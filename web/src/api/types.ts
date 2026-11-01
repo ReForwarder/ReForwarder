@@ -1359,3 +1359,109 @@ export interface FormSnippet {
   html: string
   fetch: string
 }
+
+// ---- Security (admin: bans, detection events, rules, allowlist) ----
+
+/** One ban row. `evidence` is a JSON string — parse before pretty-printing. */
+export interface SecurityBan {
+  id: number
+  ip_address: string
+  is_cidr: boolean
+  reason_code: string
+  reason_description: string
+  /** JSON string, e.g. {"ports":[...],"counts":{...},"score":40} */
+  evidence: string
+  risk_score: number
+  ban_type: 'automatic' | 'manual'
+  offense_count: number
+  /** "system" for automatic bans, the acting admin's email for manual ones. */
+  created_by: string
+  created_at: string
+  updated_at: string
+  /** null = permanent. */
+  expires_at: string | null
+}
+
+/** One detection event row (signal crossing or ban lifecycle record). */
+export interface SecurityEventRecord {
+  id: number
+  source_ip: string
+  /** Signal name, or ban.created / ban.lifted / ban.expired_notice. */
+  event_type: string
+  severity: 'info' | 'warning' | 'critical'
+  protocol: string
+  destination_port?: number | null
+  /** JSON string. */
+  evidence: string
+  risk_score: number
+  action_taken: 'recorded' | 'banned' | 'rejected'
+  created_at: string
+}
+
+export interface AllowlistEntry {
+  id: number
+  /** A single IP address or a CIDR block ("10.0.0.0/8"). */
+  ip_cidr: string
+  description: string
+  created_by: string
+  created_at: string
+}
+
+/** One day of the 14-day security trend; days without activity carry zeroes. */
+export interface SecurityDailyCount {
+  date: string
+  events: number
+  bans: number
+}
+
+export interface SecurityOverview {
+  active_bans: number
+  automatic_bans: number
+  manual_bans: number
+  bans_last_24h: number
+  events_last_24h: number
+  port_scans_detected: number
+  auth_attacks_detected: number
+  trend: SecurityDailyCount[]
+}
+
+/** One tunable security_* setting as the rules endpoints present it. */
+export interface SecurityRule {
+  key: string
+  label: string
+  description: string
+  /** boolean for type "bool", number for type "int". */
+  value: any
+  type: 'int' | 'bool'
+  /** Absent when the rule has no lower/upper bound. */
+  min?: number
+  max?: number
+  group: string
+}
+
+/** One rule update for the batch PUT; the value travels as its stored string. */
+export interface SecurityRuleInput {
+  key: string
+  value: string
+  type: string
+}
+
+export interface SecurityBanInput {
+  ip_address: string
+  description?: string
+  permanent: boolean
+  /** Required when permanent is false. */
+  duration_hours?: number
+  reason_code?: string
+}
+
+/** Returned instead of a ban when the address is allowlisted and placement was suppressed. */
+export interface SecurityBanSuppressed {
+  message: string
+  suppressed: boolean
+}
+
+export interface SecurityAllowlistInput {
+  ip_cidr: string
+  description?: string
+}

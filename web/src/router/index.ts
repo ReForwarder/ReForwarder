@@ -122,6 +122,11 @@ const routes = [
       { path: 'admin/jobs', name: 'admin-jobs', component: () => import('../views/admin/Jobs.vue'), meta: { admin: true, title: 'Admin · Jobs' } },
       { path: 'admin/oauth', name: 'admin-oauth', component: () => import('../views/admin/OAuthProviders.vue'), meta: { admin: true, title: 'Admin · OAuth Providers' } },
       { path: 'admin/settings', name: 'admin-settings', component: () => import('../views/admin/Settings.vue'), meta: { admin: true, title: 'Admin · Settings' } },
+      { path: 'admin/security', name: 'admin-security', component: () => import('../views/admin/security/SecurityOverview.vue'), meta: { admin: true, title: 'Admin · Security' } },
+      { path: 'admin/security/blocked', name: 'admin-security-blocked', component: () => import('../views/admin/security/SecurityBlocked.vue'), meta: { admin: true, title: 'Admin · Blocked IPs' } },
+      { path: 'admin/security/events', name: 'admin-security-events', component: () => import('../views/admin/security/SecurityEvents.vue'), meta: { admin: true, title: 'Admin · Detection Events' } },
+      { path: 'admin/security/rules', name: 'admin-security-rules', component: () => import('../views/admin/security/SecurityRules.vue'), meta: { admin: true, title: 'Admin · Detection Rules' } },
+      { path: 'admin/security/allowlist', name: 'admin-security-allowlist', component: () => import('../views/admin/security/SecurityAllowlist.vue'), meta: { admin: true, title: 'Admin · Allowlist' } },
     ],
   },
   {

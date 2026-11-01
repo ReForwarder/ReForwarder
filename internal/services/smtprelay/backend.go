@@ -34,6 +34,7 @@ import (
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/email"
 	"github.com/goposta/posta/internal/services/inbound"
+	"github.com/goposta/posta/internal/services/security"
 	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/jkaninda/logger"
 )
@@ -44,6 +45,8 @@ type Backend struct {
 	emailSvc       *email.Service
 	maxMessageSize int64
 	limiter        *inbound.IPRateLimiter
+	sec            *security.Engine
+	securityPort   int
 }
 
 func NewBackend(credRepo *repositories.SMTPCredentialRepository, userRepo *repositories.UserRepository, emailSvc *email.Service, maxMessageSize int64) *Backend {
@@ -58,6 +61,10 @@ func NewBackend(credRepo *repositories.SMTPCredentialRepository, userRepo *repos
 // SetRateLimiter enables per-IP rate limiting for new SMTP sessions.
 func (b *Backend) SetRateLimiter(l *inbound.IPRateLimiter) { b.limiter = l }
 
+// SetSecurity wires the security engine (setter-injection convention). A nil
+// engine disables security enforcement for new sessions.
+func (b *Backend) SetSecurity(eng *security.Engine) { b.sec = eng }
+
 func (b *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	remote := c.Conn().RemoteAddr().String()
 	if b.limiter != nil {
@@ -70,9 +77,15 @@ func (b *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 			return nil, &smtp.SMTPError{Code: 421, EnhancedCode: smtp.EnhancedCode{4, 7, 0}, Message: "rate limit exceeded"}
 		}
 	}
+	guard := security.NewSessionGuard(b.sec, security.ParseRemoteIP(remote), b.securityPort, "smtp-relay")
+	guard.WatchConn(c)
+	if err := guard.GuardNewSession(); err != nil {
+		return nil, err
+	}
 	return &session{
 		backend: b,
 		remote:  remote,
+		guard:   guard,
 	}, nil
 }
 
@@ -84,20 +97,24 @@ type session struct {
 	ownerEmail string
 	from       string
 	to         []string
+	guard      *security.SessionGuard
 }
 
 func (s *session) AuthMechanisms() []string { return []string{sasl.Plain} }
 
 func (s *session) Auth(mech string) (sasl.Server, error) {
+	s.guard.MarkCommand()
 	if mech != sasl.Plain {
 		return nil, smtp.ErrAuthUnknownMechanism
 	}
 	return sasl.NewPlainServer(func(identity, username, password string) error {
 		cred, err := s.backend.credRepo.FindByUsername(username)
 		if err != nil || cred == nil || !cred.IsValid() {
+			s.guard.RecordAuthFailure(username)
 			return smtp.ErrAuthFailed
 		}
 		if !VerifyPassword(cred, password) {
+			s.guard.RecordAuthFailure(username)
 			return smtp.ErrAuthFailed
 		}
 		ip := s.remote
@@ -105,10 +122,12 @@ func (s *session) Auth(mech string) (sasl.Server, error) {
 			ip = host
 		}
 		if !middlewares.IPAllowed(cred.AllowedIPs, ip) {
+			s.guard.RecordAuthFailure(username)
 			return smtp.ErrAuthFailed
 		}
 		owner, err := s.backend.userRepo.FindByID(cred.UserID)
 		if err != nil {
+			s.guard.RecordAuthFailure(username)
 			return smtp.ErrAuthFailed
 		}
 
@@ -120,13 +139,18 @@ func (s *session) Auth(mech string) (sasl.Server, error) {
 }
 
 func (s *session) Reset() {
+	s.guard.MarkCommand()
 	s.from = ""
 	s.to = nil
 }
 
-func (s *session) Logout() error { return nil }
+func (s *session) Logout() error {
+	s.guard.OnLogout()
+	return nil
+}
 
 func (s *session) Mail(from string, _ *smtp.MailOptions) error {
+	s.guard.MarkCommand()
 	if s.credential == nil {
 		return smtp.ErrAuthRequired
 	}
@@ -141,6 +165,7 @@ func (s *session) Mail(from string, _ *smtp.MailOptions) error {
 }
 
 func (s *session) Rcpt(to string, _ *smtp.RcptOptions) error {
+	s.guard.MarkCommand()
 	if s.credential == nil {
 		return smtp.ErrAuthRequired
 	}
@@ -157,6 +182,7 @@ func (s *session) Rcpt(to string, _ *smtp.RcptOptions) error {
 // (MAIL FROM / RCPT TO) rather than the parsed header addresses, matching
 // normal MTA behavior.
 func (s *session) Data(r io.Reader) error {
+	s.guard.MarkCommand()
 	if s.credential == nil {
 		return smtp.ErrAuthRequired
 	}

@@ -159,6 +159,23 @@ func runConstraints(db *gorm.DB) {
 		CREATE INDEX IF NOT EXISTS idx_message_filters_lookup ON message_filters (workspace_id, enabled);
 	EXCEPTION WHEN others THEN NULL;
 	END $$`)
+
+	// Security: at most one ban in force per IP address. Expired rows remain
+	// as offense history for escalation, so uniqueness applies only while a
+	// ban is actually active.
+	db.Exec(`DO $$ BEGIN
+		CREATE UNIQUE INDEX IF NOT EXISTS uq_security_bans_active_ip
+			ON security_bans (ip_address) WHERE expires_at IS NULL OR expires_at > NOW();
+	EXCEPTION WHEN others THEN NULL;
+	END $$`)
+
+	// Security: the events list and the daily trend both filter by event type
+	// over time ranges; the composite carries the pair.
+	db.Exec(`DO $$ BEGIN
+		CREATE INDEX IF NOT EXISTS idx_security_events_created_at_type
+			ON security_events (event_type, created_at);
+	EXCEPTION WHEN others THEN NULL;
+	END $$`)
 }
 
 // rebuildUniqueIndexes re-scopes the per-tenant uniqueness constraints to

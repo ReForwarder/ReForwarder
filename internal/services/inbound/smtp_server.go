@@ -32,6 +32,7 @@ import (
 
 	"github.com/emersion/go-smtp"
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/security"
 	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/jkaninda/logger"
 )
@@ -53,6 +54,8 @@ type Backend struct {
 	domainRepo     *repositories.DomainRepository
 	maxMessageSize int64
 	limiter        *IPRateLimiter
+	sec            *security.Engine
+	securityPort   int
 }
 
 func NewBackend(svc *Service, domainRepo *repositories.DomainRepository, maxMessageSize int64) *Backend {
@@ -61,6 +64,10 @@ func NewBackend(svc *Service, domainRepo *repositories.DomainRepository, maxMess
 
 // SetRateLimiter enables per-IP rate limiting for new SMTP sessions.
 func (b *Backend) SetRateLimiter(l *IPRateLimiter) { b.limiter = l }
+
+// SetSecurity wires the security engine (setter-injection convention). A nil
+// engine disables security enforcement for new sessions.
+func (b *Backend) SetSecurity(eng *security.Engine) { b.sec = eng }
 
 func (b *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	remote := c.Conn().RemoteAddr().String()
@@ -74,9 +81,15 @@ func (b *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 			return nil, &smtp.SMTPError{Code: 421, EnhancedCode: smtp.EnhancedCode{4, 7, 0}, Message: "rate limit exceeded"}
 		}
 	}
+	guard := security.NewSessionGuard(b.sec, security.ParseRemoteIP(remote), b.securityPort, "smtp-inbound")
+	guard.WatchConn(c)
+	if err := guard.GuardNewSession(); err != nil {
+		return nil, err
+	}
 	return &session{
 		backend: b,
 		remote:  remote,
+		guard:   guard,
 	}, nil
 }
 
@@ -85,16 +98,22 @@ type session struct {
 	from    string
 	to      []string
 	remote  string
+	guard   *security.SessionGuard
 }
 
 func (s *session) Reset() {
+	s.guard.MarkCommand()
 	s.from = ""
 	s.to = nil
 }
 
-func (s *session) Logout() error { return nil }
+func (s *session) Logout() error {
+	s.guard.OnLogout()
+	return nil
+}
 
 func (s *session) Mail(from string, _ *smtp.MailOptions) error {
+	s.guard.MarkCommand()
 	if from != "" {
 		if addr, err := mail.ParseAddress(from); err == nil {
 			s.from = addr.Address
@@ -108,15 +127,18 @@ func (s *session) Mail(from string, _ *smtp.MailOptions) error {
 // Rcpt rejects recipients whose domain is not ownership-verified, saving bandwidth
 // by failing before DATA.
 func (s *session) Rcpt(to string, _ *smtp.RcptOptions) error {
+	s.guard.MarkCommand()
 	addr := to
 	if parsed, err := mail.ParseAddress(to); err == nil {
 		addr = parsed.Address
 	}
 	domain := extractDomain(addr)
 	if domain == "" {
+		s.guard.RecordMalformed("rcpt_rejected")
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 1, 3}, Message: "malformed recipient"}
 	}
 	if _, err := s.backend.domainRepo.FindVerifiedByName(domain); err != nil {
+		s.guard.RecordMalformed("rcpt_rejected")
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 1, 1}, Message: "relay not permitted"}
 	}
 	s.to = append(s.to, addr)
@@ -129,6 +151,7 @@ func (s *session) Rcpt(to string, _ *smtp.RcptOptions) error {
 // persistence no longer maps to 451 — once IngestRaw succeeds, the message
 // is durably stored and the MTA gets 250.
 func (s *session) Data(r io.Reader) error {
+	s.guard.MarkCommand()
 	limit := s.backend.maxMessageSize
 	if limit <= 0 {
 		limit = 26214400
@@ -175,6 +198,9 @@ func NewSMTPServer(backend *Backend, cfg SMTPConfig) (*smtp.Server, error) {
 	srv.MaxRecipients = 50
 	srv.AllowInsecureAuth = true
 	srv.EnableSMTPUTF8 = true
+	if backend != nil {
+		backend.securityPort = cfg.Port // port attached to security signals
+	}
 
 	switch strings.ToLower(strings.TrimSpace(cfg.TLSMode)) {
 	case "", "none":

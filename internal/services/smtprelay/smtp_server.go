@@ -48,6 +48,9 @@ func NewSMTPServer(backend *Backend, cfg SMTPConfig) (*smtp.Server, error) {
 	srv.MaxMessageBytes = cfg.MaxMessageSize
 	srv.MaxRecipients = 50
 	srv.EnableSMTPUTF8 = true
+	if backend != nil {
+		backend.securityPort = cfg.Port // port attached to security signals
+	}
 	switch strings.ToLower(strings.TrimSpace(cfg.TLSMode)) {
 	case "", "none":
 		// Preserve the existing private-network plaintext relay by default.

@@ -41,6 +41,7 @@ import (
 	"github.com/goposta/posta/internal/services/notification"
 	"github.com/goposta/posta/internal/services/realtime"
 	"github.com/goposta/posta/internal/services/retry"
+	"github.com/goposta/posta/internal/services/security"
 	"github.com/goposta/posta/internal/services/seeder"
 	"github.com/goposta/posta/internal/services/settings"
 	"github.com/goposta/posta/internal/services/smtprelay"
@@ -170,8 +171,19 @@ func runServer(cli *okapicli.CLI) {
 				}
 			}
 
+			// Security engine: ban enforcement and abuse detection for the
+			// HTTP API and both SMTP listeners. The bus stays nil here — the
+			// login-failure feed is started by the route wiring.
+			var secEng *security.Engine
+			if cfg.SecurityEnabled {
+				secEng = security.NewEngine(res.db, res.redis, cfg, settings.NewProvider(repositories.NewSettingRepository(res.db)), nil)
+				if err := secEng.Start(context.Background()); err != nil {
+					logger.Error("security engine initial resync failed (continuing fail-open)", "error", err)
+				}
+			}
+
 			if cfg.InboundEnabled && !cfg.DevMode {
-				if srv, err := startInboundSMTPServer(res.db, cfg, res.blobStore, res.producer, inboundBus); err != nil {
+				if srv, err := startInboundSMTPServer(res.db, cfg, res.blobStore, res.producer, inboundBus, secEng); err != nil {
 					logger.Error("failed to start inbound SMTP server", "error", err)
 				} else {
 					res.smtpInbound = srv
@@ -185,13 +197,14 @@ func runServer(cli *okapicli.CLI) {
 			emailSvc := routes.InitRoutes(app, res.db,
 				res.redis,
 				cfg,
+				secEng,
 				res.producer,
 				res.cronManager,
 				res.blobStore,
 				context.Background(), notifier)
 
 			if cfg.SMTPRelayEnabled && !cfg.DevMode {
-				if srv, err := startSMTPRelayServer(res.db, cfg, emailSvc); err != nil {
+				if srv, err := startSMTPRelayServer(res.db, cfg, emailSvc, secEng); err != nil {
 					logger.Fatal("failed to start SMTP relay server", "error", err)
 				} else {
 					res.smtpRelay = srv
@@ -329,6 +342,7 @@ func startInboundSMTPServer(
 	blobStore blob.Store,
 	producer *worker.Producer,
 	bus *eventbus.EventBus,
+	secEng *security.Engine,
 ) (*smtp.Server, error) {
 	inboundRepo := repositories.NewInboundEmailRepository(db)
 	domainRepo := repositories.NewDomainRepository(db)
@@ -360,6 +374,7 @@ func startInboundSMTPServer(
 		window := time.Duration(cfg.InboundSMTPRateWindow) * time.Second
 		backend.SetRateLimiter(inbound.NewIPRateLimiter(cfg.InboundSMTPRateLimit, window))
 	}
+	backend.SetSecurity(secEng)
 	srv, err := inbound.NewSMTPServer(backend, inbound.SMTPConfig{
 		Host:           cfg.InboundSMTPHost,
 		Port:           cfg.InboundSMTPPort,
@@ -375,7 +390,17 @@ func startInboundSMTPServer(
 
 	go func() {
 		logger.Info("inbound SMTP server listening", "addr", srv.Addr, "tls_mode", cfg.InboundTLSMode)
-		err := srv.ListenAndServe()
+		// Serve on a security-wrapped listener instead of ListenAndServe:
+		// the CountingListener enforces the ban snapshot at TCP accept and
+		// records connect/abort signals. Inbound TLS is STARTTLS (upgraded
+		// in-band by go-smtp), so the raw listener stays unwrapped.
+		l, err := net.Listen("tcp", srv.Addr)
+		if err != nil {
+			logger.Error("inbound SMTP server error", "error", err)
+			return
+		}
+		listener := security.NewCountingListener(l, secEng, cfg.InboundSMTPPort, "smtp")
+		err = srv.Serve(listener)
 		if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, smtp.ErrServerClosed) {
 			logger.Error("inbound SMTP server error", "error", err)
 		}
@@ -386,7 +411,7 @@ func startInboundSMTPServer(
 // startSMTPRelayServer configures and launches the built-in SMTP Relay
 // (AUTH-gated relay) listener. Returns the server so it can be
 // gracefully shut down on exit.
-func startSMTPRelayServer(db *gorm.DB, cfg *config.Config, emailSvc *email.Service) (*smtp.Server, error) {
+func startSMTPRelayServer(db *gorm.DB, cfg *config.Config, emailSvc *email.Service, secEng *security.Engine) (*smtp.Server, error) {
 	credRepo := repositories.NewSMTPCredentialRepository(db)
 	userRepo := repositories.NewUserRepository(db)
 	backend := smtprelay.NewBackend(credRepo, userRepo, emailSvc, cfg.SMTPRelayMaxMessageSize)
@@ -394,6 +419,7 @@ func startSMTPRelayServer(db *gorm.DB, cfg *config.Config, emailSvc *email.Servi
 		window := time.Duration(cfg.SMTPRelayRateWindow) * time.Second
 		backend.SetRateLimiter(inbound.NewIPRateLimiter(cfg.SMTPRelayRateLimit, window))
 	}
+	backend.SetSecurity(secEng)
 	srv, err := smtprelay.NewSMTPServer(backend, smtprelay.SMTPConfig{
 		Host:           cfg.SMTPRelayHost,
 		Port:           cfg.SMTPRelayPort,
@@ -409,7 +435,18 @@ func startSMTPRelayServer(db *gorm.DB, cfg *config.Config, emailSvc *email.Servi
 
 	go func() {
 		logger.Info("SMTP relay server listening", "addr", srv.Addr)
-		err := srv.ListenAndServe()
+		// Serve on a security-wrapped listener instead of ListenAndServe:
+		// the CountingListener enforces the ban snapshot at TCP accept and
+		// records connect/abort signals. The relay's TLS wiring is
+		// STARTTLS-only (clients connect in plaintext and upgrade in-band),
+		// so no listener-level TLS wrap applies here.
+		l, err := net.Listen("tcp", srv.Addr)
+		if err != nil {
+			logger.Error("SMTP relay server error", "error", err)
+			return
+		}
+		listener := security.NewCountingListener(l, secEng, cfg.SMTPRelayPort, "smtp")
+		err = srv.Serve(listener)
 		if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, smtp.ErrServerClosed) {
 			logger.Error("SMTP relay server error", "error", err)
 		}
@@ -485,6 +522,7 @@ func startEmbeddedWorker(db *gorm.DB,
 	campaignProducer := worker.NewProducer(cfg.Redis.AsynqRedisOpt(), cfg.WorkerMaxRetries)
 	trackingRepo := repositories.NewTrackingRepository(db)
 	trackingService := tracking.NewService(trackingRepo, cfg.AppWebURL, []byte(cfg.JWTSecret))
+	settingsProvider := settings.NewProvider(repositories.NewSettingRepository(db))
 	campaignDispatcher := newWebhookDispatcher(db, cfg)
 	campaignProcessor := worker.NewCampaignProcessor(
 		repositories.NewCampaignRepository(db),
@@ -496,6 +534,7 @@ func startEmbeddedWorker(db *gorm.DB,
 		repositories.NewTemplateVersionRepository(db),
 		repositories.NewTemplateLocalizationRepository(db),
 		trackingService,
+		settingsProvider,
 		campaignProducer,
 		campaignDispatcher,
 	)

@@ -50,6 +50,14 @@ type Config struct {
 	RateLimitDaily       int
 	AuthRateLimitEnabled bool
 
+	// SecurityEnabled turns the abuse-detection engine on: connection and
+	// protocol signals are scored and offending IPs are banned automatically.
+	SecurityEnabled bool
+	// SecurityFailOpen decides what happens when the detector cannot reach
+	// Redis. True (the default) lets the connection through; false rejects it
+	// until detection works again.
+	SecurityFailOpen bool
+
 	// Email verification (POST /api/v1/emails/verify). Results are cached in
 	// Redis to avoid re-checking the same address/domain on every call.
 	EmailVerifyEnabled         bool
@@ -292,6 +300,8 @@ func New() *Config {
 		RateLimitHourly:      goutils.EnvInt("POSTA_RATE_LIMIT_HOURLY", 100),
 		RateLimitDaily:       goutils.EnvInt("POSTA_RATE_LIMIT_DAILY", 1000),
 		AuthRateLimitEnabled: goutils.EnvBool("POSTA_AUTH_RATE_LIMIT_ENABLED", true),
+		SecurityEnabled:      goutils.EnvBool("POSTA_SECURITY_ENABLED", true),
+		SecurityFailOpen:     goutils.EnvBool("POSTA_SECURITY_FAIL_OPEN", true),
 
 		EmailVerifyEnabled:         goutils.EnvBool("POSTA_EMAIL_VERIFY_ENABLED", true),
 		EmailVerifyCacheTTLHours:   goutils.EnvInt("POSTA_EMAIL_VERIFY_CACHE_TTL_HOURS", 168),

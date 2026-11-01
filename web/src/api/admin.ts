@@ -4,6 +4,9 @@ import type {
   UserDetailMetrics, CronJob, AdminWorkspace, UpdateInfo,
   Domain, AdminDomainRow, AdminDomainDetail, AdminDomainVerifyResult,
   AdminWorkspaceRow, AdminWorkspaceDetail,
+  SecurityOverview, SecurityBan, SecurityBanInput, SecurityBanSuppressed,
+  SecurityEventRecord, SecurityRule, SecurityRuleInput,
+  AllowlistEntry, SecurityAllowlistInput,
 } from './types'
 import type { Announcement, AnnouncementInput } from './inbox'
 
@@ -118,5 +121,44 @@ export const adminApi = {
   },
   dismissUpdate(version: string) {
     return api.post<ApiResponse<{ message: string }>>('/admin/update/dismiss', { version })
+  },
+
+  // ---- Security (ban list, detection events, rules, allowlist) ----
+  getSecurityOverview() {
+    return api.get<ApiResponse<SecurityOverview>>('/admin/security/overview')
+  },
+  listSecurityBans(page = 0, size = 20, search = '', filter: '' | 'active' | 'expired' | 'all' = 'active') {
+    return api.get<PaginatedResponse<SecurityBan>>('/admin/security/bans', {
+      params: { page, size, search: search || undefined, filter: filter || undefined },
+    })
+  },
+  createSecurityBan(input: SecurityBanInput) {
+    return api.post<ApiResponse<SecurityBan | SecurityBanSuppressed>>('/admin/security/bans', input)
+  },
+  unbanSecurityIp(id: number) {
+    return api.delete<ApiResponse<{ message: string }>>(`/admin/security/bans/${id}`)
+  },
+  extendSecurityBan(id: number, hours: number) {
+    return api.post<ApiResponse<{ message: string }>>(`/admin/security/bans/${id}/extend`, { hours })
+  },
+  listSecurityEvents(page = 0, size = 20, eventType = '', severity = '') {
+    return api.get<PaginatedResponse<SecurityEventRecord>>('/admin/security/events', {
+      params: { page, size, event_type: eventType || undefined, severity: severity || undefined },
+    })
+  },
+  getSecurityRules() {
+    return api.get<ApiResponse<SecurityRule[]>>('/admin/security/rules')
+  },
+  updateSecurityRules(rules: SecurityRuleInput[]) {
+    return api.put<ApiResponse<SecurityRule[]>>('/admin/security/rules', { settings: rules })
+  },
+  listAllowlist(page = 0, size = 20) {
+    return api.get<PaginatedResponse<AllowlistEntry>>('/admin/security/allowlist', { params: { page, size } })
+  },
+  createAllowlistEntry(input: SecurityAllowlistInput) {
+    return api.post<ApiResponse<AllowlistEntry>>('/admin/security/allowlist', input)
+  },
+  deleteAllowlistEntry(id: number) {
+    return api.delete<ApiResponse<{ message: string }>>(`/admin/security/allowlist/${id}`)
   },
 }

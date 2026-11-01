@@ -665,3 +665,177 @@ func (r *Router) adminSSERoutes() []okapi.RouteDefinition {
 		},
 	}
 }
+
+// securityRoutes returns route definitions for the admin security endpoints:
+// the ban list, detection events, tunable rules and the allowlist.
+func (r *Router) securityRoutes() []okapi.RouteDefinition {
+	securityGroup := r.v1.Group("/admin", r.mw.jwtAdminAuth.Middleware).WithTagInfo(okapi.GroupTag{
+		Name:        tagAdmin,
+		Description: descAdmin,
+	})
+	securityGroup.WithBearerAuth()
+
+	return []okapi.RouteDefinition{
+		// ==================== Security Overview ====================
+		{
+			Method:      http.MethodGet,
+			Path:        "/security/overview",
+			Handler:     r.h.security.Overview,
+			Group:       securityGroup,
+			Summary:     "Security overview",
+			Description: "Returns aggregate ban and detection counts plus the 14-day activity trend",
+			Response:    &dto.Response[handlers.SecurityOverview]{},
+		},
+
+		// ==================== Bans ====================
+		{
+			Method:      http.MethodGet,
+			Path:        "/security/bans",
+			Handler:     okapi.H(r.h.security.ListBans),
+			Group:       securityGroup,
+			Summary:     "List IP bans",
+			Description: "Paginated ban list, searchable by IP address; filter accepts active (default), expired or all",
+			Request:     &handlers.ListSecurityBansRequest{},
+			Response:    &dto.PageableResponse[models.SecurityBan]{},
+		},
+		{
+			Method:      http.MethodPost,
+			Path:        "/security/bans",
+			Handler:     okapi.H(r.h.security.CreateBan),
+			Group:       securityGroup,
+			Summary:     "Ban an IP address manually",
+			Description: "Places an administrative ban on an IP address or CIDR block, permanent or for a number of hours",
+			Request:     &handlers.CreateSecurityBanRequest{},
+			Response:    &dto.Response[models.SecurityBan]{},
+			Options: []okapi.RouteOption{
+				okapi.DocResponse(201, &dto.Response[models.SecurityBan]{}),
+				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodDelete,
+			Path:        "/security/bans/{id:int}",
+			Handler:     okapi.H(r.h.security.Unban),
+			Group:       securityGroup,
+			Summary:     "Lift a ban",
+			Description: "Expires the ban in place; the row is kept as offense history",
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Ban ID"),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodPost,
+			Path:        "/security/bans/{id:int}/extend",
+			Handler:     okapi.H(r.h.security.ExtendBan),
+			Group:       securityGroup,
+			Summary:     "Extend a ban",
+			Description: "Pushes a timed ban's expiry out by the given number of hours",
+			Request:     &handlers.ExtendSecurityBanRequest{},
+			Response:    &dto.Response[dto.MessageData]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Ban ID"),
+				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
+
+		// ==================== Detection Events ====================
+		{
+			Method:      http.MethodGet,
+			Path:        "/security/events",
+			Handler:     okapi.H(r.h.security.ListEvents),
+			Group:       securityGroup,
+			Summary:     "List detection events",
+			Description: "Paginated security events, filterable by event type and severity",
+			Request:     &handlers.ListSecurityEventsRequest{},
+			Response:    &dto.PageableResponse[models.SecurityEvent]{},
+		},
+
+		// ==================== Rules ====================
+		{
+			Method:      http.MethodGet,
+			Path:        "/security/rules",
+			Handler:     r.h.security.GetRules,
+			Group:       securityGroup,
+			Summary:     "List security rules",
+			Description: "Returns the tunable security_* settings with labels, current values and bounds",
+			Response:    &dto.Response[[]handlers.SecurityRule]{},
+		},
+		{
+			Method:      http.MethodPut,
+			Path:        "/security/rules",
+			Handler:     okapi.H(r.h.security.UpdateRules),
+			Group:       securityGroup,
+			Summary:     "Update security rules",
+			Description: "Upserts a batch of security_* settings; unknown keys are ignored and values are validated against the rule bounds",
+			Request:     &handlers.UpdateSecurityRulesRequest{},
+			Response:    &dto.Response[[]handlers.SecurityRule]{},
+		},
+
+		// ==================== Allowlist ====================
+		{
+			Method:      http.MethodGet,
+			Path:        "/security/allowlist",
+			Handler:     okapi.H(r.h.security.ListAllowlist),
+			Group:       securityGroup,
+			Summary:     "List the IP allowlist",
+			Description: "Addresses and CIDR blocks exempt from detection and bans",
+			Request:     &handlers.ListSecurityAllowlistRequest{},
+			Response:    &dto.PageableResponse[models.SecurityAllowlist]{},
+		},
+		{
+			Method:      http.MethodPost,
+			Path:        "/security/allowlist",
+			Handler:     okapi.H(r.h.security.CreateAllowlist),
+			Group:       securityGroup,
+			Summary:     "Add an allowlist entry",
+			Description: "Exempts an IP address or CIDR block from detection and bans; the change propagates to every replica",
+			Request:     &handlers.CreateSecurityAllowlistRequest{},
+			Response:    &dto.Response[models.SecurityAllowlist]{},
+			Options: []okapi.RouteOption{
+				okapi.DocResponse(201, &dto.Response[models.SecurityAllowlist]{}),
+				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodDelete,
+			Path:        "/security/allowlist/{id:int}",
+			Handler:     okapi.H(r.h.security.DeleteAllowlist),
+			Group:       securityGroup,
+			Summary:     "Remove an allowlist entry",
+			Description: "Deletes the exemption; the address becomes subject to detection and existing bans again",
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Allowlist entry ID"),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
+	}
+}
+
+// securitySSERoutes returns the security SSE endpoints. They skip WithBearerAuth
+// like the other SSE groups: the browser's EventSource handshake authenticates
+// with the session cookie and cannot set an Authorization header. Registered
+// before the plain security routes so no param route can shadow the stream
+// path (see admin_sse_route_order_test.go for the convention).
+func (r *Router) securitySSERoutes() []okapi.RouteDefinition {
+	securitySSE := r.v1.Group("/admin", r.mw.jwtAdminAuth.Middleware).WithTagInfo(okapi.GroupTag{
+		Name:        tagAdmin,
+		Description: descAdmin,
+	})
+
+	return []okapi.RouteDefinition{
+		{
+			Method:      http.MethodGet,
+			Path:        "/security/events/stream",
+			Handler:     r.h.security.EventsStream,
+			Group:       securitySSE,
+			Summary:     "Stream security events (SSE)",
+			Description: "Real-time security events via Server-Sent Events. Emits security.event, ban.created and ban.lifted. Authenticated by the session cookie the browser sends on the EventSource handshake.",
+			Options:     []okapi.RouteOption{okapi.DocHide()},
+		},
+	}
+}
