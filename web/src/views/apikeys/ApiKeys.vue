@@ -1,0 +1,414 @@
+<script setup lang="ts">
+import { ref, onMounted } from 'vue'
+import { apiKeysApi } from '../../api/apikeys'
+import { settingsApi } from '../../api/settings'
+import { infoApi, type AppInfo } from '../../api/info'
+import type { ApiKey, ApiKeyCreateResponse, Pageable } from '../../api/types'
+import { useNotificationStore } from '../../stores/notification'
+import { useConfirm } from '../../composables/useConfirm'
+import { useModalSafeClose } from '../../composables/useModalSafeClose';
+import { useWorkspaceStore } from '../../stores/workspace'
+import { usePagination } from '@/composables/usePagination'
+import Pagination from '../../components/Pagination.vue'
+
+const notify = useNotificationStore()
+const wsStore = useWorkspaceStore()
+const { confirm } = useConfirm()
+
+const keys = ref<ApiKey[]>([])
+const loading = ref(true)
+const appInfo = ref<AppInfo | null>(null)
+
+const showCreateModal = ref(false)
+const newKeyName = ref('')
+const newKeyIPs = ref('')
+const newKeyScopes = ref<string[]>(['send'])
+const newKeyExpiry = ref('default')
+
+// Workspace-level scopes. None of them grant platform administration — the
+// /admin dashboard is reachable only with a user session.
+const scopeOptions = [
+  { value: 'send', label: 'Send', hint: 'Send emails, batches, templates, and manage subscriber lists' },
+  { value: 'read', label: 'Read', hint: 'List/get emails, bounces, and webhook deliveries' },
+  { value: 'webhooks', label: 'Webhooks', hint: 'Create, list, and delete webhooks' },
+  { value: 'write', label: 'Write', hint: 'Create, update, and delete workspace resources' },
+  { value: 'admin', label: 'Admin', hint: 'Administrative operations within the workspace' },
+]
+
+function toggleScope(value: string) {
+  const i = newKeyScopes.value.indexOf(value)
+  if (i === -1) newKeyScopes.value.push(value)
+  else newKeyScopes.value.splice(i, 1)
+}
+const defaultExpiryDays = ref(90)
+const creating = ref(false)
+
+const createdKey = ref<ApiKeyCreateResponse | null>(null)
+const showKeyModal = ref(false)
+const copied = ref(false)
+
+const expiryOptions = [
+  { label: 'Default', value: 'default' },
+  { label: '30 days', value: '30' },
+  { label: '60 days', value: '60' },
+  { label: '90 days', value: '90' },
+  { label: '180 days', value: '180' },
+  { label: '365 days', value: '365' },
+  { label: 'Never', value: 'never' },
+]
+
+async function loadSettings() {
+  try {
+    const res = await settingsApi.getUserSettings()
+    defaultExpiryDays.value = res.data.data.api_key_expiry_days || 90
+  } catch {
+    // Use fallback default
+  }
+}
+
+
+const { pageable, goToPage } = usePagination(async (page) => {
+  loading.value = true
+  try {
+     const res = await apiKeysApi.list(page, pageable.value.size)
+    keys.value = res.data.data
+    pageable.value = res.data.pageable
+  } catch (e) {
+    console.error('Failed to load API keys', e)
+  } finally {
+    loading.value = false
+  }
+})
+
+
+function resolveExpiryDays(): number | undefined {
+  if (newKeyExpiry.value === 'never') return 0
+  if (newKeyExpiry.value === 'default') return undefined // let backend use user setting
+  return parseInt(newKeyExpiry.value, 10)
+}
+
+async function createKey() {
+  if (!newKeyName.value.trim()) return
+  creating.value = true
+  try {
+    const allowedIPs = newKeyIPs.value
+      .split(/[,\n]/)
+      .map(ip => ip.trim())
+      .filter(ip => ip.length > 0)
+    const expiresInDays = resolveExpiryDays()
+    const scopes = newKeyScopes.value.length > 0 ? [...newKeyScopes.value] : ['send']
+    const res = await apiKeysApi.create(
+      newKeyName.value.trim(),
+      allowedIPs.length > 0 ? allowedIPs : undefined,
+      scopes,
+      expiresInDays,
+    )
+    createdKey.value = res.data.data
+    showCreateModal.value = false
+    newKeyName.value = ''
+    newKeyIPs.value = ''
+    newKeyScopes.value = ['send']
+    newKeyExpiry.value = 'default'
+    showKeyModal.value = true
+    notify.success('API key created')
+    await goToPage(pageable.value.current_page)
+  } catch {
+    notify.error('Failed to create API key')
+  } finally {
+    creating.value = false
+  }
+}
+
+async function revokeKey(key: ApiKey) {
+  const confirmed = await confirm({
+    title: 'Revoke API Key',
+    message: `Are you sure you want to revoke "${key.name}"? This key will immediately stop working and cannot be reactivated.`,
+    confirmText: 'Revoke',
+    variant: 'danger',
+  })
+  if (!confirmed) return
+  try {
+    await apiKeysApi.revoke(key.id)
+    notify.success('API key revoked')
+    await goToPage(pageable.value.current_page)
+  } catch {
+    notify.error('Failed to revoke API key')
+  }
+}
+
+async function deleteKey(key: ApiKey) {
+  const confirmed = await confirm({
+    title: 'Delete API Key',
+    message: `Are you sure you want to permanently delete "${key.name}"? This action cannot be undone.`,
+    confirmText: 'Delete',
+    variant: 'danger',
+  })
+  if (!confirmed) return
+  try {
+    await apiKeysApi.delete(key.id)
+    notify.success('API key deleted')
+    await goToPage(pageable.value.current_page)
+  } catch {
+    notify.error('Failed to delete API key')
+  }
+}
+
+function copyKey() {
+  if (!createdKey.value) return
+  navigator.clipboard.writeText(createdKey.value.key)
+  copied.value = true
+  setTimeout(() => (copied.value = false), 2000)
+}
+
+function closeKeyModal() {
+  showKeyModal.value = false
+  createdKey.value = null
+  copied.value = false
+}
+
+function keyStatus(key: ApiKey): { label: string; class: string } {
+  if (key.revoked) return { label: 'Revoked', class: 'badge-danger' }
+  if (key.expires_at && new Date(key.expires_at) < new Date()) return { label: 'Expired', class: 'badge-warning' }
+  return { label: 'Active', class: 'badge-success' }
+}
+
+function isActive(key: ApiKey): boolean {
+  return !key.revoked && !(key.expires_at && new Date(key.expires_at) < new Date())
+}
+
+function canDelete(key: ApiKey): boolean {
+  return key.revoked || (!!key.expires_at && new Date(key.expires_at) < new Date())
+}
+
+function formatDate(dateStr: string): string {
+  return new Date(dateStr).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+}
+const { watchClickStart, confirmClickEnd } = useModalSafeClose(() => {
+  showCreateModal.value = false;
+});
+
+onMounted(() => {
+  loadSettings()
+  infoApi.get().then((res) => { appInfo.value = res.data.data }).catch(() => {})
+})
+</script>
+
+<template>
+  <div>
+    <div class="page-header">
+      <h1>API Keys</h1>
+      <button v-if="wsStore.canEdit" class="btn btn-primary" @click="showCreateModal = true">Create Key</button>
+    </div>
+
+    <div v-if="appInfo?.openapi_docs" class="card api-docs-callout">
+      <div class="api-docs-text">
+        <strong>Developer resources</strong>
+        <span>Authenticate with your API key and explore the full HTTP API.</span>
+      </div>
+      <div class="api-docs-links">
+        <a class="btn btn-secondary btn-sm" href="/docs" target="_blank" rel="noopener noreferrer">API Reference</a>
+      </div>
+    </div>
+
+    <div v-if="loading" class="loading-page">
+      <div class="spinner"></div>
+    </div>
+
+    <div v-else class="card">
+      <div v-if="keys.length === 0" class="empty-state">
+        <h3>No API Keys</h3>
+        <p>Create your first API key to start sending emails.</p>
+      </div>
+
+      <template v-else>
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Key Prefix</th>
+                <th>Created</th>
+                <th>Last Used</th>
+                <th>Expires</th>
+                <th>IP Allowlist</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="key in keys" :key="key.id">
+                <td>
+                  <router-link :to="{ name: 'api-key-detail', params: { id: key.id } }">{{ key.name }}</router-link>
+                </td>
+                <td><code>{{ key.key_prefix }}...</code></td>
+                <td>{{ formatDate(key.created_at) }}</td>
+                <td>{{ key.last_used_at ? formatDate(key.last_used_at) : 'Never' }}</td>
+                <td>{{ key.expires_at ? formatDate(key.expires_at) : 'Never' }}</td>
+                <td>
+                  <template v-if="key.allowed_ips && key.allowed_ips.length > 0">
+                    <code v-for="(ip, i) in key.allowed_ips.slice(0, 2)" :key="i" style="margin-right: 4px; font-size: 12px">{{ ip }}</code>
+                    <span v-if="key.allowed_ips.length > 2" style="font-size: 12px; color: var(--text-muted)">+{{ key.allowed_ips.length - 2 }} more</span>
+                  </template>
+                  <span v-else style="color: var(--text-muted)">Any</span>
+                </td>
+                <td>
+                  <span class="badge" :class="keyStatus(key).class">{{ keyStatus(key).label }}</span>
+                </td>
+                <td>
+                  <div style="display: flex; gap: 6px">
+                    <button
+                      v-if="wsStore.canEdit && isActive(key)"
+                      class="btn btn-warning btn-sm"
+                      @click="revokeKey(key)"
+                    >
+                      Revoke
+                    </button>
+                    <button
+                      v-if="wsStore.canEdit && canDelete(key)"
+                      class="btn btn-danger btn-sm"
+                      @click="deleteKey(key)"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <Pagination :pageable="pageable" @page="goToPage" />
+
+      </template>
+    </div>
+
+    <!-- Create Key Modal -->
+    <div v-if="showCreateModal" class="modal-overlay" @mousedown="watchClickStart" 
+      @mouseup="confirmClickEnd">
+      <div class="modal" @mousedown.stop @mouseup.stop>
+        <div class="modal-header">
+          <h3>Create API Key</h3>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label class="form-label">Name</label>
+            <input
+              v-model="newKeyName"
+              class="form-input"
+              placeholder="e.g. Production, Staging"
+              @keyup.enter="createKey"
+            />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Expiration</label>
+            <select v-model="newKeyExpiry" class="form-select">
+              <option v-for="opt in expiryOptions" :key="opt.value" :value="opt.value">
+                {{ opt.value === 'default' ? `${opt.label} (${defaultExpiryDays} days)` : opt.label }}
+              </option>
+            </select>
+            <small style="font-size: 12px; color: var(--text-muted); margin-top: 4px; display: block">
+              Choose when this key expires. "Never" means the key will not expire.
+            </small>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Scopes</label>
+            <div class="scope-list">
+              <label v-for="opt in scopeOptions" :key="opt.value" class="scope-option">
+                <input
+                  type="checkbox"
+                  :checked="newKeyScopes.includes(opt.value)"
+                  @change="toggleScope(opt.value)"
+                />
+                <span class="scope-text">
+                  <strong>{{ opt.label }}</strong>
+                  <small>{{ opt.hint }}</small>
+                </span>
+              </label>
+            </div>
+            <small style="font-size: 12px; color: var(--text-muted); margin-top: 4px; display: block">
+              Scopes are fixed at creation. To change them, create a new key.
+            </small>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Allowed IPs <span style="font-weight: 400; color: var(--text-muted)">(optional)</span></label>
+            <textarea
+              v-model="newKeyIPs"
+              class="form-input"
+              rows="3"
+              placeholder="Comma or newline separated, e.g.&#10;192.168.1.1&#10;10.0.0.0/24"
+            ></textarea>
+            <small style="font-size: 12px; color: var(--text-muted); margin-top: 4px; display: block">
+              Restrict this key to specific IP addresses. Leave empty to allow all.
+            </small>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" @click="showCreateModal = false">Cancel</button>
+          <button class="btn btn-primary" :disabled="creating || !newKeyName.trim()" @click="createKey">
+            {{ creating ? 'Creating...' : 'Create' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Show Key Modal -->
+    <div v-if="showKeyModal" class="modal-overlay">
+      <div class="modal">
+        <div class="modal-header">
+          <h3>API Key Created</h3>
+        </div>
+        <div class="modal-body">
+          <p class="text-sm" style="color: var(--danger-600); font-weight: 500; margin-bottom: 12px;">
+            Save this key. It won't be shown again.
+          </p>
+          <div class="code-block">{{ createdKey?.key }}</div>
+          <p v-if="createdKey?.expires_at" class="text-sm" style="margin-top: 8px; color: var(--text-muted)">
+            Expires: {{ formatDate(createdKey.expires_at) }}
+          </p>
+          <p v-else class="text-sm" style="margin-top: 8px; color: var(--text-muted)">
+            This key never expires.
+          </p>
+          <button class="btn btn-secondary btn-sm mt-4" @click="copyKey">
+            {{ copied ? 'Copied!' : 'Copy Key' }}
+          </button>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-primary" @click="closeKeyModal">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.api-docs-callout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 16px 20px;
+  margin-bottom: 20px;
+}
+.api-docs-text { display: flex; flex-direction: column; gap: 2px; }
+.api-docs-text strong { font-size: 14px; color: var(--text-primary); }
+.api-docs-text span { font-size: 13px; color: var(--text-secondary); }
+.api-docs-links { display: flex; gap: 8px; flex-shrink: 0; }
+.api-docs-links .btn { text-decoration: none; }
+.scope-list { display: flex; flex-direction: column; gap: 8px; }
+.scope-option { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
+.scope-option input { margin-top: 3px; }
+.scope-text { display: flex; flex-direction: column; gap: 1px; }
+.scope-text strong { font-size: 13px; color: var(--text-primary); }
+.scope-text small { font-size: 12px; color: var(--text-muted); }
+/* Key prefixes and allowed IPs are technical identifiers — render the table's
+   bare <code> elements as mono chips on the tertiary surface. */
+td code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+}
+</style>

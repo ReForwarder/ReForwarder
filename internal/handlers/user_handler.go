@@ -1,0 +1,838 @@
+// Copyright (c) 2026 Jonas Kaninda.
+//
+// This file is part of Posta.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package handlers
+
+import (
+	"fmt"
+	"net/http"
+	"time"
+
+	"strings"
+
+	"github.com/google/uuid"
+	"github.com/goposta/posta/internal/dto"
+	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/clientinfo"
+	"github.com/goposta/posta/internal/services/emailverify"
+	"github.com/goposta/posta/internal/services/eventbus"
+	"github.com/goposta/posta/internal/services/notification"
+	"github.com/goposta/posta/internal/services/passwordreset"
+	"github.com/goposta/posta/internal/services/seeder"
+	"github.com/goposta/posta/internal/services/session"
+	"github.com/goposta/posta/internal/services/settings"
+	"github.com/goposta/posta/internal/services/twofactor"
+	"github.com/goposta/posta/internal/services/workspaceprovision"
+	"github.com/goposta/posta/internal/storage/repositories"
+	"github.com/jkaninda/logger"
+	"github.com/jkaninda/okapi"
+	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
+)
+
+type UserHandler struct {
+	repo          *repositories.UserRepository
+	sessionRepo   *repositories.SessionRepository
+	jwtSecret     []byte
+	seeder        *seeder.Seeder
+	bus           *eventbus.EventBus
+	settings      *settings.Provider
+	notifier      *notification.Service
+	emailVerifier *emailverify.Service
+	passwordReset *passwordreset.Service
+	db            *gorm.DB
+	migrator      *workspaceprovision.Service
+}
+
+func NewUserHandler(repo *repositories.UserRepository, jwtSecret string, seeder *seeder.Seeder, bus *eventbus.EventBus) *UserHandler {
+	return &UserHandler{
+		repo:      repo,
+		jwtSecret: []byte(jwtSecret),
+		seeder:    seeder,
+		bus:       bus,
+	}
+}
+
+func (h *UserHandler) SetMigrator(db *gorm.DB, m *workspaceprovision.Service) {
+	h.db = db
+	h.migrator = m
+}
+
+func (h *UserHandler) ensurePersonalWorkspace(userID uint) {
+	if h.migrator == nil || h.db == nil {
+		return
+	}
+	if _, err := h.migrator.EnsureWorkspace(h.db, userID); err != nil {
+		logger.Error("failed to provision personal workspace", "user_id", userID, "err", err)
+	}
+}
+
+func (h *UserHandler) SetSessionRepo(repo *repositories.SessionRepository) {
+	h.sessionRepo = repo
+}
+
+const jwtTokenTTL = 24 * time.Hour
+
+func (h *UserHandler) SetSettings(s *settings.Provider) {
+	h.settings = s
+}
+
+// SetNotifier sets the notification service for sending welcome and password change emails.
+func (h *UserHandler) SetNotifier(n *notification.Service) {
+	h.notifier = n
+}
+
+// SetEmailVerifier wires the email verification service.
+func (h *UserHandler) SetEmailVerifier(s *emailverify.Service) {
+	h.emailVerifier = s
+}
+
+// SetPasswordReset wires the self-service password reset service.
+func (h *UserHandler) SetPasswordReset(s *passwordreset.Service) {
+	h.passwordReset = s
+}
+
+// passwordResetEnabled reports whether the forgot-password flow is both turned
+// on in platform settings and actually deliverable (notifier configured).
+func (h *UserHandler) passwordResetEnabled() bool {
+	return h.settings != nil && h.settings.PasswordResetEnabled() &&
+		h.passwordReset != nil && h.passwordReset.Deliverable()
+}
+
+type LoginRequest struct {
+	Body struct {
+		Email         string `json:"email" required:"true" format:"email"`
+		Password      string `json:"password" required:"true" minLength:"4"`
+		TwoFactorCode string `json:"two_factor_code"`
+	} `json:"body"`
+}
+
+type AuthResponse struct {
+	Token string `json:"token"`
+	User  struct {
+		ID    uint            `json:"id"`
+		Name  string          `json:"name"`
+		Email string          `json:"email"`
+		Role  models.UserRole `json:"role"`
+	} `json:"user"`
+}
+
+type UserProfile struct {
+	ID                        uint            `json:"id"`
+	Name                      string          `json:"name"`
+	Email                     string          `json:"email"`
+	Role                      models.UserRole `json:"role"`
+	TwoFactorEnabled          bool            `json:"two_factor_enabled"`
+	RequireVerifiedDomain     bool            `json:"require_verified_domain"`
+	ScheduledDeletionAt       *time.Time      `json:"scheduled_deletion_at"`
+	EmailVerifiedAt           *time.Time      `json:"email_verified_at"`
+	EmailVerificationRequired bool            `json:"email_verification_required"`
+	DefaultWorkspaceID        *uint           `json:"default_workspace_id"`
+	// Deprecated: renamed to default_workspace_id. Mirrors it for one minor
+	// release so an older dashboard build keeps working.
+	PersonalWorkspaceID *uint     `json:"personal_workspace_id"`
+	CreatedAt           time.Time `json:"created_at"`
+}
+
+type Enable2FAResponse struct {
+	Secret string `json:"secret"`
+	URL    string `json:"url"` // otpauth:// URL for QR code
+}
+
+type Verify2FARequest struct {
+	Body struct {
+		Code string `json:"code" required:"true" minLength:"6" maxLength:"6"`
+	} `json:"body"`
+}
+
+type Disable2FARequest struct {
+	Body struct {
+		Code string `json:"code" required:"true" minLength:"6" maxLength:"6"`
+	} `json:"body"`
+}
+
+type UpdateProfileRequest struct {
+	Body struct {
+		Name                  string `json:"name" required:"true" minLength:"1"`
+		RequireVerifiedDomain *bool  `json:"require_verified_domain"`
+	} `json:"body"`
+}
+
+type ChangePasswordRequest struct {
+	Body struct {
+		CurrentPassword string `json:"current_password" required:"true"`
+		NewPassword     string `json:"new_password" required:"true" minLength:"8"`
+	} `json:"body"`
+}
+
+type RegisterRequest struct {
+	Body struct {
+		Name     string `json:"name" required:"true" minLength:"1"`
+		Email    string `json:"email" required:"true" format:"email"`
+		Password string `json:"password" required:"true" minLength:"8"`
+	} `json:"body"`
+}
+
+// Register allows new users to self-register when registration is enabled.
+func (h *UserHandler) Register(c *okapi.Context, req *RegisterRequest) error {
+	if h.settings == nil || !h.settings.RegistrationEnabled() {
+		return c.AbortForbidden("registration is disabled")
+	}
+
+	email := strings.TrimSpace(strings.ToLower(req.Body.Email))
+	if email == "" {
+		return c.AbortBadRequest("email is required")
+	}
+
+	// Check allowed signup domains
+	allowedDomains := h.settings.GetString("allowed_signup_domains", "")
+	if allowedDomains != "" {
+		parts := strings.SplitN(email, "@", 2)
+		if len(parts) != 2 {
+			return c.AbortBadRequest("invalid email address")
+		}
+		domain := parts[1]
+		allowed := false
+		for _, d := range strings.Split(allowedDomains, ",") {
+			if strings.TrimSpace(d) == domain {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return c.AbortForbidden("registration is not allowed for this email domain")
+		}
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Body.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return c.AbortInternalServerError("failed to hash password", err)
+	}
+
+	user := &models.User{
+		Name:         strings.TrimSpace(req.Body.Name),
+		Email:        email,
+		PasswordHash: string(hash),
+		Role:         models.UserRoleUser,
+	}
+
+	if err := h.repo.Create(user); err != nil {
+		return c.AbortConflict("email already registered")
+	}
+
+	// Provision the user's personal workspace (and seed its default content)
+	// before issuing the JWT, so the first authenticated request lands in it.
+	h.ensurePersonalWorkspace(user.ID)
+
+	if h.bus != nil {
+		h.bus.PublishSimple(models.EventCategoryUser, "user.registered", &user.ID, user.Email, c.RealIP(),
+			fmt.Sprintf("User %q registered", user.Email), nil)
+	}
+
+	// Email verification: if the notifier is configured, send a verification email.
+	// Otherwise (self-hosted without SMTP) auto-verify so the account isn't locked out.
+	// The welcome email is deferred until after verification (see VerifyEmail).
+	if h.emailVerifier != nil {
+		if h.emailVerifier.Required() {
+			go func() {
+				if err := h.emailVerifier.IssueAndSend(user); err != nil {
+					logger.Error("failed to send verification email", "user_id", user.ID, "err", err)
+				}
+			}()
+		} else {
+			_ = h.emailVerifier.MarkVerifiedNow(user)
+		}
+	}
+
+	// Auto-login: generate JWT token
+	token, _, err := h.generateTokenWithSession(c, user)
+	if err != nil {
+		return c.AbortInternalServerError("failed to generate token", err)
+	}
+	session.SetCookie(c, token, jwtTokenTTL)
+
+	return created(c, AuthResponse{
+		Token: token,
+		User: struct {
+			ID    uint            `json:"id"`
+			Name  string          `json:"name"`
+			Email string          `json:"email"`
+			Role  models.UserRole `json:"role"`
+		}{ID: user.ID, Name: user.Name, Email: user.Email, Role: user.Role},
+	})
+}
+
+func (h *UserHandler) RegistrationStatus(c *okapi.Context) error {
+	enabled := h.settings != nil && h.settings.RegistrationEnabled()
+	return ok(c, okapi.M{
+		"registration_enabled":   enabled,
+		"password_reset_enabled": h.passwordResetEnabled(),
+	})
+}
+
+type ForgotPasswordRequest struct {
+	Body struct {
+		Email string `json:"email" required:"true" format:"email"`
+	} `json:"body"`
+}
+
+type ResetPasswordRequest struct {
+	Body struct {
+		Token       string `json:"token" required:"true"`
+		NewPassword string `json:"new_password" required:"true" minLength:"8"`
+	} `json:"body"`
+}
+
+func (h *UserHandler) ForgotPassword(c *okapi.Context, req *ForgotPasswordRequest) error {
+	if !h.passwordResetEnabled() {
+		return c.AbortBadRequest("password reset is not enabled")
+	}
+
+	const genericMsg = "If an account exists for that email, a password reset link is on its way."
+	email := strings.ToLower(strings.TrimSpace(req.Body.Email))
+
+	user, err := h.repo.FindByEmail(email)
+	if err != nil || user == nil {
+		return ok(c, okapi.M{"message": genericMsg})
+	}
+	// Rate-limit per account to curb token flooding; stay generic on the wire.
+	if err := h.passwordReset.CanIssue(user.ID); err != nil {
+		return ok(c, okapi.M{"message": genericMsg})
+	}
+	if err := h.passwordReset.IssueAndSend(user); err != nil {
+		logger.Error("failed to send password reset email", "user_id", user.ID, "err", err)
+		return ok(c, okapi.M{"message": genericMsg})
+	}
+	if h.bus != nil {
+		h.bus.PublishSimple(models.EventCategoryUser, "user.password_reset_requested", &user.ID, user.Email, c.RealIP(),
+			fmt.Sprintf("Password reset requested for %q", user.Email), nil)
+	}
+	return ok(c, okapi.M{"message": genericMsg})
+}
+
+// ResetPassword redeems a reset token and sets the new password.
+func (h *UserHandler) ResetPassword(c *okapi.Context, req *ResetPasswordRequest) error {
+	if !h.passwordResetEnabled() {
+		return c.AbortBadRequest("password reset is not enabled")
+	}
+
+	user, err := h.passwordReset.Redeem(req.Body.Token, req.Body.NewPassword)
+	if err != nil {
+		return c.AbortBadRequest(err.Error())
+	}
+
+	if h.bus != nil {
+		h.bus.PublishSimple(models.EventCategoryUser, "user.password_reset", &user.ID, user.Email, c.RealIP(),
+			fmt.Sprintf("Password reset completed for %q", user.Email), nil)
+	}
+	// Notify the account owner that their password changed (best-effort).
+	if h.notifier != nil {
+		go func(uid uint) {
+			_ = h.notifier.SendSecurityToUser(uid, "Your password has been changed", notification.TemplatePasswordChanged, map[string]any{
+				"ChangedAt": time.Now().UTC().Format("January 2, 2006 at 15:04 UTC"),
+			})
+		}(user.ID)
+	}
+	return ok(c, okapi.M{"message": "password updated successfully"})
+}
+
+type VerifyEmailRequest struct {
+	Token string `query:"token" required:"true"`
+}
+
+// VerifyEmail redeems a verification token and marks the user's email as verified.
+func (h *UserHandler) VerifyEmail(c *okapi.Context, req *VerifyEmailRequest) error {
+	if h.emailVerifier == nil {
+		return c.AbortBadRequest("email verification is not enabled")
+	}
+	user, newlyVerified, err := h.emailVerifier.Redeem(req.Token)
+	if err != nil {
+		return c.AbortBadRequest(err.Error())
+	}
+	if newlyVerified {
+		if h.bus != nil {
+			h.bus.PublishSimple(models.EventCategoryUser, "user.email_verified", &user.ID, user.Email, c.RealIP(),
+				fmt.Sprintf("User %q verified email", user.Email), nil)
+		}
+		// Fire the welcome email now that we know the address works.
+		if h.notifier != nil {
+			go func(uid uint) {
+				_ = h.notifier.SendToUser(uid, "Welcome to Posta!", notification.TemplateWelcome, nil)
+			}(user.ID)
+		}
+	}
+	return ok(c, okapi.M{"message": "email verified"})
+}
+
+// ResendVerificationEmail issues a fresh token for the authenticated user.
+func (h *UserHandler) ResendVerificationEmail(c *okapi.Context) error {
+	if h.emailVerifier == nil || !h.emailVerifier.Required() {
+		return c.AbortBadRequest("email verification is not enabled")
+	}
+	userID := c.GetInt("user_id")
+	user, err := h.repo.FindByID(uint(userID))
+	if err != nil {
+		return c.AbortNotFound("user not found")
+	}
+	if user.EmailVerifiedAt != nil {
+		return ok(c, okapi.M{"message": "email already verified"})
+	}
+	if err := h.emailVerifier.CanResend(user.ID); err != nil {
+		return c.AbortTooManyRequests(err.Error())
+	}
+	if err := h.emailVerifier.IssueAndSend(user); err != nil {
+		logger.Error("failed to resend verification email", "user_id", user.ID, "err", err)
+		return c.AbortInternalServerError("failed to send verification email")
+	}
+	return ok(c, okapi.M{"message": "verification email sent"})
+}
+
+// UpdateProfile allows authenticated users to update their profile (name).
+func (h *UserHandler) UpdateProfile(c *okapi.Context, req *UpdateProfileRequest) error {
+	userID := c.GetInt("user_id")
+	user, err := h.repo.FindByID(uint(userID))
+	if err != nil {
+		return c.AbortNotFound("user not found")
+	}
+
+	user.Name = req.Body.Name
+	if req.Body.RequireVerifiedDomain != nil {
+		user.RequireVerifiedDomain = *req.Body.RequireVerifiedDomain
+	}
+	if err := h.repo.Update(user); err != nil {
+		return c.AbortInternalServerError("failed to update profile")
+	}
+
+	return ok(c, h.buildProfile(user))
+}
+
+// ChangePassword allows authenticated users to change their own password.
+func (h *UserHandler) ChangePassword(c *okapi.Context, req *ChangePasswordRequest) error {
+	userID := c.GetInt("user_id")
+	user, err := h.repo.FindByID(uint(userID))
+	if err != nil {
+		return c.AbortNotFound("user not found")
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Body.CurrentPassword)); err != nil {
+		return c.AbortBadRequest("current password is incorrect")
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Body.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return c.AbortInternalServerError("failed to hash password", err)
+	}
+
+	user.PasswordHash = string(hash)
+	if err := h.repo.Update(user); err != nil {
+		return c.AbortInternalServerError("failed to update password")
+	}
+
+	// Send password change notification (best-effort)
+	if h.notifier != nil {
+		go func() {
+			_ = h.notifier.SendSecurityToUser(user.ID, "Your password has been changed", notification.TemplatePasswordChanged, map[string]any{
+				"ChangedAt": time.Now().UTC().Format("January 2, 2006 at 15:04 UTC"),
+			})
+		}()
+	}
+
+	return ok(c, okapi.M{"message": "password updated successfully"})
+}
+
+func (h *UserHandler) publishLoginFailed(actorID *uint, email, ip, reason string) {
+	if h.bus == nil {
+		return
+	}
+	h.bus.PublishSimple(models.EventCategoryUser, "user.login_failed", actorID, email, ip,
+		fmt.Sprintf("Failed login attempt for %q (%s)", email, reason),
+		map[string]any{"reason": reason})
+}
+
+func (h *UserHandler) Login(c *okapi.Context, req *LoginRequest) error {
+	user, err := h.repo.FindByEmail(req.Body.Email)
+	if err != nil {
+		h.publishLoginFailed(nil, req.Body.Email, c.RealIP(), "unknown_email")
+		return c.AbortUnauthorized("invalid credentials")
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Body.Password)); err != nil {
+		h.publishLoginFailed(&user.ID, user.Email, c.RealIP(), "bad_password")
+		return c.AbortUnauthorized("invalid credentials")
+	}
+
+	if !user.Active {
+		h.publishLoginFailed(&user.ID, user.Email, c.RealIP(), "inactive")
+		return c.AbortForbidden("account is disabled")
+	}
+
+	// Check 2FA
+	if user.TwoFactorEnabled {
+		if req.Body.TwoFactorCode == "" {
+			return c.JSON(http.StatusUnauthorized, dto.Response[any]{
+				Success: false,
+				Data: okapi.M{
+					"requires_2fa": true,
+					"message":      "2FA code required",
+				},
+			})
+		}
+		if !twofactor.ValidateCode(user.TwoFactorSecret, req.Body.TwoFactorCode) {
+			h.publishLoginFailed(&user.ID, user.Email, c.RealIP(), "bad_2fa")
+			return c.AbortUnauthorized("invalid 2FA code")
+		}
+	}
+
+	h.ensurePersonalWorkspace(user.ID)
+
+	// Record last login time
+	now := time.Now()
+	user.LastLoginAt = &now
+	_ = h.repo.Update(user)
+
+	if h.bus != nil {
+		h.bus.PublishSimple(models.EventCategoryUser, "user.login", &user.ID, user.Email, c.RealIP(),
+			fmt.Sprintf("User %q logged in", user.Email), nil)
+	}
+
+	// Detect a sign-in from a new device before the session is recorded, so the
+	// freshly created session doesn't count as a prior known device.
+	ua := c.Header("User-Agent")
+	newDevice := h.isNewDevice(user.ID, ua)
+
+	token, _, err := h.generateTokenWithSession(c, user)
+	if err != nil {
+		return c.AbortInternalServerError("failed to generate token", err)
+	}
+
+	// Browser clients ride the HttpOnly cookie; the body's token remains for
+	// CLI/SDK clients, which send it back as a Bearer header.
+	session.SetCookie(c, token, jwtTokenTTL)
+
+	if newDevice {
+		h.sendLoginAlert(user.ID, ua, c.RealIP())
+	}
+
+	return ok(c, AuthResponse{
+		Token: token,
+		User: struct {
+			ID    uint            `json:"id"`
+			Name  string          `json:"name"`
+			Email string          `json:"email"`
+			Role  models.UserRole `json:"role"`
+		}{ID: user.ID, Name: user.Name, Email: user.Email, Role: user.Role},
+	})
+}
+
+// Me returns the current user's profile.
+func (h *UserHandler) Me(c *okapi.Context) error {
+	userID := c.GetInt("user_id")
+	user, err := h.repo.FindByID(uint(userID))
+	if err != nil {
+		return c.AbortNotFound("user not found")
+	}
+
+	return ok(c, h.buildProfile(user))
+}
+
+func (h *UserHandler) buildProfile(user *models.User) UserProfile {
+	required := h.emailVerifier != nil && h.emailVerifier.Required()
+	return UserProfile{
+		ID:                        user.ID,
+		Name:                      user.Name,
+		Email:                     user.Email,
+		Role:                      user.Role,
+		TwoFactorEnabled:          user.TwoFactorEnabled,
+		RequireVerifiedDomain:     user.RequireVerifiedDomain,
+		ScheduledDeletionAt:       user.ScheduledDeletionAt,
+		EmailVerifiedAt:           user.EmailVerifiedAt,
+		EmailVerificationRequired: required,
+		DefaultWorkspaceID:        user.DefaultWorkspaceID,
+		PersonalWorkspaceID:       user.DefaultWorkspaceID,
+		CreatedAt:                 user.CreatedAt,
+	}
+}
+
+// Setup2FA generates a TOTP secret for the user (doesn't enable yet).
+func (h *UserHandler) Setup2FA(c *okapi.Context) error {
+	userID := c.GetInt("user_id")
+	user, err := h.repo.FindByID(uint(userID))
+	if err != nil {
+		return c.AbortNotFound("user not found")
+	}
+	if user.TwoFactorEnabled {
+		return c.AbortBadRequest("2FA is already enabled")
+	}
+
+	secret, url, err := twofactor.GenerateSecret(user.Email)
+	if err != nil {
+		return c.AbortInternalServerError("failed to generate 2FA secret")
+	}
+
+	// Store secret temporarily (not enabled yet)
+	user.TwoFactorSecret = secret
+	if err := h.repo.Update(user); err != nil {
+		return c.AbortInternalServerError("failed to save 2FA secret")
+	}
+
+	return ok(c, Enable2FAResponse{
+		Secret: secret,
+		URL:    url,
+	})
+}
+
+// Verify2FA verifies a TOTP code and enables 2FA.
+func (h *UserHandler) Verify2FA(c *okapi.Context, req *Verify2FARequest) error {
+	userID := c.GetInt("user_id")
+	user, err := h.repo.FindByID(uint(userID))
+	if err != nil {
+		return c.AbortNotFound("user not found")
+	}
+	if user.TwoFactorEnabled {
+		return c.AbortBadRequest("2FA is already enabled")
+	}
+	if user.TwoFactorSecret == "" {
+		return c.AbortBadRequest("2FA setup not initiated, call setup first")
+	}
+
+	if !twofactor.ValidateCode(user.TwoFactorSecret, req.Body.Code) {
+		return c.AbortBadRequest("invalid 2FA code")
+	}
+
+	user.TwoFactorEnabled = true
+	if err := h.repo.Update(user); err != nil {
+		return c.AbortInternalServerError("failed to enable 2FA")
+	}
+
+	h.sendTwoFactorAlert(user.ID, "enabled")
+
+	return ok(c, okapi.M{"message": "2FA enabled successfully"})
+}
+
+// Disable2FA disables 2FA after verifying a code.
+func (h *UserHandler) Disable2FA(c *okapi.Context, req *Disable2FARequest) error {
+	userID := c.GetInt("user_id")
+	user, err := h.repo.FindByID(uint(userID))
+	if err != nil {
+		return c.AbortNotFound("user not found")
+	}
+	if !user.TwoFactorEnabled {
+		return c.AbortBadRequest("2FA is not enabled")
+	}
+
+	if !twofactor.ValidateCode(user.TwoFactorSecret, req.Body.Code) {
+		return c.AbortBadRequest("invalid 2FA code")
+	}
+
+	user.TwoFactorEnabled = false
+	user.TwoFactorSecret = ""
+	if err := h.repo.Update(user); err != nil {
+		return c.AbortInternalServerError("failed to disable 2FA")
+	}
+
+	h.sendTwoFactorAlert(user.ID, "disabled")
+
+	return ok(c, okapi.M{"message": "2FA disabled successfully"})
+}
+
+func (h *UserHandler) isNewDevice(userID uint, ua string) bool {
+	if h.sessionRepo == nil {
+		return false
+	}
+	sessions, err := h.sessionRepo.FindActiveByUserID(userID)
+	if err != nil {
+		return false
+	}
+	sig := clientinfo.Parse(ua).Signature()
+	for _, s := range sessions {
+		if clientinfo.Parse(s.UserAgent).Signature() == sig {
+			return false
+		}
+	}
+	return true
+}
+
+// sendLoginAlert emails the user about a sign-in from a new device (best-effort).
+func (h *UserHandler) sendLoginAlert(userID uint, ua, ip string) {
+	if h.notifier == nil {
+		return
+	}
+	client := clientinfo.Parse(ua)
+	data := map[string]any{
+		"Browser":   client.Browser,
+		"OS":        client.OS,
+		"Device":    client.Device,
+		"IPAddress": ip,
+		"LoginAt":   time.Now().UTC().Format("January 2, 2006 at 15:04 UTC"),
+	}
+	go func() {
+		_ = h.notifier.SendSecurityToUser(userID, "New sign-in to your account", notification.TemplateLoginAlert, data)
+	}()
+}
+
+// sendTwoFactorAlert emails the user when 2FA is enabled or disabled (best-effort).
+// action must be "enabled" or "disabled".
+func (h *UserHandler) sendTwoFactorAlert(userID uint, action string) {
+	if h.notifier == nil {
+		return
+	}
+	subject := "Two-factor authentication " + action
+	data := map[string]any{
+		"Action":    action,
+		"ChangedAt": time.Now().UTC().Format("January 2, 2006 at 15:04 UTC"),
+	}
+	go func() {
+		_ = h.notifier.SendSecurityToUser(userID, subject, notification.TemplateTwoFactorChange, data)
+	}()
+}
+
+// generateTokenWithSession creates a JWT with a jti claim and records the session.
+func (h *UserHandler) generateTokenWithSession(c *okapi.Context, user *models.User) (string, string, error) { //nolint:unparam
+	jti := uuid.NewString()
+
+	token, err := okapi.GenerateJwtToken(h.jwtSecret, map[string]any{
+		"sub":   user.ID,
+		"email": user.Email,
+		"role":  string(user.Role),
+		"aud":   "posta",
+		"jti":   jti,
+	}, jwtTokenTTL)
+	if err != nil {
+		return "", "", err
+	}
+
+	// Track session in database
+	if h.sessionRepo != nil {
+		ua := c.Header("User-Agent")
+		if len(ua) > 512 {
+			ua = ua[:512]
+		}
+		session := &models.Session{
+			UserID:    user.ID,
+			JTI:       jti,
+			IPAddress: c.RealIP(),
+			UserAgent: ua,
+			ExpiresAt: time.Now().Add(jwtTokenTTL),
+		}
+		_ = h.sessionRepo.Create(session)
+	}
+
+	return token, jti, nil
+}
+
+// RequestAccountDeletion schedules the current user's account for deletion in 7 days.
+func (h *UserHandler) RequestAccountDeletion(c *okapi.Context) error {
+	userID := c.GetInt("user_id")
+	user, err := h.repo.FindByID(uint(userID))
+	if err != nil {
+		return c.AbortNotFound("user not found")
+	}
+
+	if user.Role == models.UserRoleAdmin {
+		return c.AbortBadRequest("admin accounts cannot be self-deleted")
+	}
+
+	if user.ScheduledDeletionAt != nil {
+		return c.AbortBadRequest("account deletion is already scheduled")
+	}
+
+	deletionDate := time.Now().Add(7 * 24 * time.Hour)
+	user.ScheduledDeletionAt = &deletionDate
+	user.Active = false
+
+	if err := h.repo.Update(user); err != nil {
+		return c.AbortInternalServerError("failed to schedule account deletion")
+	}
+
+	if h.bus != nil {
+		uid := user.ID
+		h.bus.PublishSimple(models.EventCategoryUser, "user.deletion_requested", &uid, user.Email, c.RealIP(),
+			fmt.Sprintf("Account deletion scheduled for %s", deletionDate.Format("2006-01-02")), nil)
+	}
+
+	// Confirm the scheduled deletion by email (best-effort).
+	if h.notifier != nil {
+		uid := user.ID
+		data := map[string]any{
+			"ScheduledFor": deletionDate.UTC().Format("January 2, 2006"),
+		}
+		go func() {
+			_ = h.notifier.SendSecurityToUser(uid, "Your account is scheduled for deletion", notification.TemplateAccountDeletion, data)
+		}()
+	}
+
+	return ok(c, map[string]any{
+		"message":               "Account scheduled for deletion",
+		"scheduled_deletion_at": deletionDate,
+	})
+}
+
+// CancelAccountDeletion cancels a previously scheduled account deletion.
+func (h *UserHandler) CancelAccountDeletion(c *okapi.Context) error {
+	userID := c.GetInt("user_id")
+	user, err := h.repo.FindByID(uint(userID))
+	if err != nil {
+		return c.AbortNotFound("user not found")
+	}
+
+	if user.ScheduledDeletionAt == nil {
+		return c.AbortBadRequest("no deletion is scheduled")
+	}
+
+	user.ScheduledDeletionAt = nil
+	user.Active = true
+
+	if err := h.repo.Update(user); err != nil {
+		return c.AbortInternalServerError("failed to cancel account deletion")
+	}
+
+	if h.bus != nil {
+		uid := user.ID
+		h.bus.PublishSimple(models.EventCategoryUser, "user.deletion_cancelled", &uid, user.Email, c.RealIP(),
+			"Account deletion cancelled", nil)
+	}
+
+	return ok(c, map[string]any{"message": "Account deletion cancelled"})
+}
+
+type SetDefaultWorkspaceRequest struct {
+	Body struct {
+		WorkspaceID uint `json:"workspace_id" required:"true"`
+	} `json:"body"`
+}
+
+// SetDefaultWorkspace records which workspace a request that names none lands
+// in. The caller must be a member, and the system workspace is not a valid
+// choice: landing there by default would hide the user's real work.
+func (h *UserHandler) SetDefaultWorkspace(c *okapi.Context, req *SetDefaultWorkspaceRequest) error {
+	userID := uint(c.GetInt("user_id"))
+
+	ws, _, err := h.repo.WorkspaceForMember(userID, req.Body.WorkspaceID)
+	if err != nil {
+		return c.AbortNotFound("workspace not found, or you are not a member of it")
+	}
+	if ws.System {
+		return c.AbortBadRequest("the system workspace cannot be your default")
+	}
+
+	if err := h.repo.SetDefaultWorkspace(userID, &ws.ID); err != nil {
+		return c.AbortInternalServerError("failed to update the default workspace")
+	}
+	return ok(c, dto.MessageData{Message: "Default workspace updated"})
+}

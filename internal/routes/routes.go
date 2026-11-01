@@ -1,0 +1,604 @@
+// Copyright (c) 2026 Jonas Kaninda.
+//
+// This file is part of Posta.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package routes
+
+import (
+	"context"
+	"time"
+
+	"github.com/goposta/posta/internal/config"
+	cronpkg "github.com/goposta/posta/internal/cron"
+	"github.com/goposta/posta/internal/handlers"
+	"github.com/goposta/posta/internal/metrics"
+	"github.com/goposta/posta/internal/middlewares"
+	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/audit"
+	"github.com/goposta/posta/internal/services/auth"
+	"github.com/goposta/posta/internal/services/cache"
+	"github.com/goposta/posta/internal/services/email"
+	"github.com/goposta/posta/internal/services/emailverify"
+	"github.com/goposta/posta/internal/services/eventbus"
+	"github.com/goposta/posta/internal/services/inbound"
+	"github.com/goposta/posta/internal/services/inbox"
+	"github.com/goposta/posta/internal/services/messages"
+	"github.com/goposta/posta/internal/services/notification"
+	"github.com/goposta/posta/internal/services/passwordreset"
+	planpkg "github.com/goposta/posta/internal/services/plan"
+	"github.com/goposta/posta/internal/services/ratelimit"
+	"github.com/goposta/posta/internal/services/realtime"
+	"github.com/goposta/posta/internal/services/seeder"
+	sessionpkg "github.com/goposta/posta/internal/services/session"
+	"github.com/goposta/posta/internal/services/settings"
+	"github.com/goposta/posta/internal/services/smtprelay"
+	"github.com/goposta/posta/internal/services/tracking"
+	"github.com/goposta/posta/internal/services/updatecheck"
+	"github.com/goposta/posta/internal/services/verifier"
+	"github.com/goposta/posta/internal/services/webhook"
+	"github.com/goposta/posta/internal/services/workermon"
+	"github.com/goposta/posta/internal/services/workspaceprovision"
+	"github.com/goposta/posta/internal/storage/blob"
+	"github.com/goposta/posta/internal/storage/repositories"
+	"github.com/goposta/posta/internal/web"
+	"github.com/goposta/posta/internal/worker"
+	"github.com/hibiken/asynq"
+	"github.com/jkaninda/okapi"
+	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
+)
+
+type Router struct {
+	app *okapi.Okapi
+	cfg *config.Config
+	v1  *okapi.Group
+	mw  routerMiddleware
+	h   routerHandlers
+}
+
+type routerMiddleware struct {
+	// jwtAdminAuth guards platform administration. Only an admin user session
+	// satisfies it — /admin/* is dashboard-only and an API key is never a valid
+	// credential there, whatever scopes it carries.
+	jwtAdminAuth okapi.JWTAuth
+	// auth accepts a user JWT or an API key; it guards workspace-scoped routes.
+	auth okapi.Middleware
+	// jwtOnly accepts only a user JWT; it guards account-level routes (profile,
+	// 2FA, API key management), which a machine key must not reach.
+	jwtOnly okapi.Middleware
+	// apiKey accepts only an API key; it guards the public machine-facing API.
+	apiKey            okapi.Middleware
+	loginLimiter      okapi.Middleware
+	workspace         okapi.Middleware
+	optionalWorkspace okapi.Middleware
+	workspaceQuery    okapi.Middleware
+	verifiedEmail     okapi.Middleware
+}
+
+type routerHandlers struct {
+	health           *handlers.HealthHandler
+	update           *handlers.UpdateHandler
+	user             *handlers.UserHandler
+	email            *handlers.EmailHandler
+	apiKey           *handlers.APIKeyHandler
+	template         *handlers.TemplateHandler
+	version          *handlers.TemplateVersionHandler
+	localization     *handlers.TemplateLocalizationHandler
+	language         *handlers.LanguageHandler
+	stylesheet       *handlers.StyleSheetHandler
+	smtp             *handlers.SMTPHandler
+	webhook          *handlers.WebhookHandler
+	webhookDelivery  *handlers.WebhookDeliveryHandler
+	dashboard        *handlers.DashboardHandler
+	domain           *handlers.DomainHandler
+	bounce           *handlers.BounceHandler
+	suppression      *handlers.SuppressionHandler
+	unsubscribeList  *handlers.UnsubscribeListHandler
+	contact          *handlers.ContactHandler
+	admin            *handlers.AdminHandler
+	workspace        *handlers.WorkspaceHandler
+	server           *handlers.ServerHandler
+	event            *handlers.EventHandler
+	analytics        *handlers.AnalyticsHandler
+	adminDomain      *handlers.AdminDomainHandler
+	adminWorkspace   *handlers.AdminWorkspaceHandler
+	notification     *handlers.NotificationHandler
+	announcement     *handlers.AdminAnnouncementHandler
+	setting          *handlers.SettingHandler
+	userSetting      *handlers.UserSettingHandler
+	workspaceSetting *handlers.WorkspaceSettingHandler
+	session          *handlers.SessionHandler
+	cron             *handlers.CronHandler
+	oauth            *handlers.OAuthHandler
+	oauthAdmin       *handlers.OAuthAdminHandler
+	subscriber       *handlers.SubscriberHandler
+	subscriberList   *handlers.SubscriberListHandler
+	campaign         *handlers.CampaignHandler
+	tracking         *handlers.TrackingHandler
+	bounceWebhook    *handlers.BounceWebhookHandler
+	workspaceData    *handlers.WorkspaceDataHandler
+	plan             *handlers.PlanHandler
+	inbound          *handlers.InboundHandler
+	smtpCredential   *handlers.SMTPCredentialHandler
+	verify           *handlers.VerifyHandler
+	form             *handlers.FormHandler
+	message          *handlers.MessageHandler
+	messageFilter    *handlers.MessageFilterHandler
+	formIngest       *handlers.FormIngestHandler
+}
+
+func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *config.Config, producer *worker.Producer, cronManager *cronpkg.Manager, blobStore blob.Store, ctx context.Context, notifier ...*notification.Service) *email.Service {
+
+	// Repositories
+	userRepo := repositories.NewUserRepository(db)
+	apiKeyRepo := repositories.NewAPIKeyRepository(db)
+	emailRepo := repositories.NewEmailRepository(db)
+	templateRepo := repositories.NewTemplateRepository(db)
+	smtpRepo := repositories.NewSMTPRepository(db)
+	serverRepo := repositories.NewServerRepository(db)
+	webhookRepo := repositories.NewWebhookRepository(db)
+	domainRepo := repositories.NewDomainRepository(db)
+	notificationRepo := repositories.NewNotificationRepository(db)
+	bounceRepo := repositories.NewBounceRepository(db)
+	suppressionRepo := repositories.NewSuppressionRepository(db)
+	unsubListRepo := repositories.NewUnsubscribeListRepository(db)
+	stylesheetRepo := repositories.NewStyleSheetRepository(db)
+	versionRepo := repositories.NewTemplateVersionRepository(db)
+	localizationRepo := repositories.NewTemplateLocalizationRepository(db)
+	languageRepo := repositories.NewLanguageRepository(db)
+	contactRepo := repositories.NewContactRepository(db)
+	contactListRepo := repositories.NewContactListRepository(db)
+	eventRepo := repositories.NewEventRepository(db)
+	settingRepo := repositories.NewSettingRepository(db)
+	userSettingRepo := repositories.NewUserSettingRepository(db)
+	workspaceSettingRepo := repositories.NewWorkspaceSettingRepository(db)
+	sessionRepo := repositories.NewSessionRepository(db)
+	workspaceRepo := repositories.NewWorkspaceRepository(db)
+	emailVerifyRepo := repositories.NewUserEmailVerificationRepository(db)
+
+	// Session store (Redis-backed blacklist)
+	sessionStore := sessionpkg.NewStore(redisClient)
+
+	// Services
+	bus := eventbus.New(eventRepo)
+	auditLogger := audit.NewLogger(bus)
+	inboxService := inbox.NewService(db, notificationRepo)
+	apiKeyService := auth.NewAPIKeyService(apiKeyRepo)
+	settingsProvider := settings.NewProvider(settingRepo)
+	planRepo := repositories.NewPlanRepository(db)
+	planService := planpkg.NewService(planRepo, settingsProvider)
+	limiter := ratelimit.NewRedisLimiter(redisClient, cfg.RateLimitHourly, cfg.RateLimitDaily)
+	limiter.SetSettings(settingsProvider)
+	webhookDeliveryRepo := repositories.NewWebhookDeliveryRepository(db)
+	dispatcher := webhook.NewDispatcher(webhookRepo)
+	dispatcher.SetDeliveryRepo(webhookDeliveryRepo)
+	dispatcher.SetConfig(webhook.Config{
+		MaxRetries: cfg.WebhookMaxRetries,
+		Timeout:    time.Duration(cfg.WebhookTimeoutSecs) * time.Second,
+	})
+	dispatcher.OnDeliverySuccess(func() { metrics.IncrementWebhookDelivery("success") })
+	dispatcher.OnDeliveryFailed(func() { metrics.IncrementWebhookDelivery("failed") })
+	dispatcher.OnDeliveryDone(metrics.ObserveWebhookDeliveryDuration)
+	emailService := email.NewService(emailRepo, smtpRepo, templateRepo, suppressionRepo, limiter, dispatcher, cfg.DevMode)
+	emailService.SetSettings(settingsProvider)
+	emailService.SetPlanLimits(&emailPlanAdapter{planService})
+	emailService.SetVersionRepos(versionRepo, localizationRepo)
+	emailService.SetContactRepo(contactRepo)
+	emailService.SetUnsubscribeListRepo(unsubListRepo)
+	emailService.SetDomainVerification(domainRepo, userRepo, workspaceSettingRepo)
+	if producer != nil {
+		emailService.SetEnqueuer(producer)
+	}
+	if blobStore != nil {
+		emailService.SetBlobStore(blobStore)
+	}
+	emailService.OnSent(metrics.IncrementEmailSent)
+	emailService.OnFailed(metrics.IncrementEmailFailed)
+	emailService.OnQueued(metrics.IncrementEmailQueued)
+
+	// Cache
+	statsCache := cache.New(redisClient)
+
+	// Email verification service (Redis-cached)
+	verifierSvc := verifier.NewService(redisClient, suppressionRepo, bounceRepo, verifier.Options{
+		Enabled:    cfg.EmailVerifyEnabled,
+		AddrTTL:    time.Duration(cfg.EmailVerifyCacheTTLHours) * time.Hour,
+		MXTTL:      time.Duration(cfg.EmailVerifyMXCacheTTLHours) * time.Hour,
+		RateHourly: cfg.EmailVerifyRateHourly,
+	})
+
+	// Handlers
+	userSeeder := seeder.New(templateRepo, stylesheetRepo, versionRepo, localizationRepo, languageRepo)
+
+	migrator := workspaceprovision.New(cfg.PlanEnforcement)
+	migrator.SetSeeder(userSeeder)
+	userHandler := handlers.NewUserHandler(userRepo, cfg.JWTSecret, userSeeder, bus)
+	userHandler.SetSettings(settingsProvider)
+	userHandler.SetMigrator(db, migrator)
+	inspector := asynq.NewInspector(cfg.Redis.AsynqRedisOpt())
+
+	// Seed default platform settings
+	go seeder.SeedDefaultSettings(settingRepo)
+
+	// Start worker connection monitor
+	wm := workermon.New(inspector, bus, 15*time.Second)
+	wm.OnCount(metrics.SetActiveWorkers)
+	wm.Start(ctx)
+
+	jwtAuth := middlewares.JWTAuth(cfg, sessionStore)
+	jwtAdminAuth := middlewares.JWTAdminAuth(cfg, sessionStore)
+
+	r := &Router{
+		app: app,
+		cfg: cfg,
+		v1:  app.Group("/api/v1"),
+		mw: routerMiddleware{
+			jwtAdminAuth:      jwtAdminAuth,
+			auth:              middlewares.Authenticate(jwtAuth, apiKeyService, userRepo, apiKeyRepo),
+			jwtOnly:           jwtAuth.Middleware,
+			apiKey:            middlewares.APIKeyAuth(apiKeyService, userRepo, apiKeyRepo),
+			loginLimiter:      loginLimiterMiddleware(cfg, limiter),
+			workspace:         middlewares.RequireWorkspaceMiddleware(workspaceRepo, userRepo),
+			optionalWorkspace: middlewares.OptionalWorkspaceMiddleware(workspaceRepo, userRepo),
+			workspaceQuery:    middlewares.WorkspaceFromQueryOrHeader(workspaceRepo, userRepo),
+		},
+		h: routerHandlers{
+			health: handlers.NewHealthHandler(db, redisClient),
+			// A second Service instance also exists for the cron job. They share no
+			// in-memory state — the cached verdict is a single database row — so
+			// constructing one per consumer is equivalent to threading one through.
+			update:           handlers.NewUpdateHandler(updatecheck.NewService(db, config.Version, cfg.UpdateCheck)),
+			user:             userHandler,
+			email:            handlers.NewEmailHandler(emailService, emailRepo, bus, statsCache),
+			apiKey:           handlers.NewAPIKeyHandler(apiKeyService, apiKeyRepo, userSettingRepo, auditLogger),
+			template:         handlers.NewTemplateHandler(templateRepo, stylesheetRepo, versionRepo, localizationRepo, languageRepo, emailService),
+			version:          handlers.NewTemplateVersionHandler(templateRepo, versionRepo, stylesheetRepo),
+			localization:     handlers.NewTemplateLocalizationHandler(templateRepo, versionRepo, localizationRepo, stylesheetRepo),
+			language:         handlers.NewLanguageHandler(languageRepo),
+			stylesheet:       handlers.NewStyleSheetHandler(stylesheetRepo),
+			smtp:             handlers.NewSMTPHandler(smtpRepo, domainRepo, auditLogger),
+			webhook:          handlers.NewWebhookHandler(webhookRepo, auditLogger),
+			webhookDelivery:  handlers.NewWebhookDeliveryHandler(webhookDeliveryRepo),
+			dashboard:        handlers.NewDashboardHandler(db, statsCache, webhookDeliveryRepo),
+			domain:           handlers.NewDomainHandler(domainRepo),
+			adminDomain:      handlers.NewAdminDomainHandler(db, domainRepo, auditLogger),
+			adminWorkspace:   handlers.NewAdminWorkspaceHandler(db, workspaceRepo),
+			notification:     handlers.NewNotificationHandler(notificationRepo, inboxService),
+			announcement:     handlers.NewAdminAnnouncementHandler(db, inboxService, auditLogger),
+			bounce:           handlers.NewBounceHandler(bounceRepo, suppressionRepo, emailRepo, dispatcher),
+			suppression:      handlers.NewSuppressionHandler(suppressionRepo, unsubListRepo),
+			unsubscribeList:  handlers.NewUnsubscribeListHandler(unsubListRepo),
+			contact:          handlers.NewContactHandler(contactRepo, suppressionRepo),
+			admin:            handlers.NewAdminHandler(db, statsCache, userRepo, apiKeyRepo, emailRepo, webhookDeliveryRepo, inspector, redisClient, bus, userSeeder, cfg.EmbeddedWorker),
+			workspace:        handlers.NewWorkspaceHandler(workspaceRepo, userRepo, db),
+			server:           handlers.NewServerHandler(serverRepo, auditLogger),
+			event:            handlers.NewEventHandler(eventRepo, bus),
+			analytics:        handlers.NewAnalyticsHandler(repositories.NewAnalyticsRepository(db), statsCache),
+			setting:          handlers.NewSettingHandler(settingRepo, auditLogger),
+			userSetting:      handlers.NewUserSettingHandler(userSettingRepo),
+			workspaceSetting: handlers.NewWorkspaceSettingHandler(workspaceSettingRepo),
+			session:          handlers.NewSessionHandler(sessionRepo, sessionStore),
+			verify:           handlers.NewVerifyHandler(verifierSvc),
+		},
+	}
+
+	// Session management
+	r.h.user.SetSessionRepo(sessionRepo)
+	r.h.admin.SetSessionRepo(sessionRepo, sessionStore)
+	r.h.admin.SetMigrator(migrator)
+
+	// Plans
+	r.h.plan = handlers.NewPlanHandler(planRepo, workspaceRepo, userRepo, planService, auditLogger)
+	r.h.admin.SetWorkspaceRepo(workspaceRepo, planRepo)
+	r.h.workspace.SetSeeder(userSeeder)
+	r.h.workspace.SetPlanService(planService)
+	r.h.workspace.SetAuditLogger(auditLogger)
+	r.h.apiKey.SetQuota(planService, db)
+	r.h.domain.SetQuota(planService, db)
+	r.h.smtp.SetQuota(planService, db)
+
+	// Notifications
+	var notif *notification.Service
+	if len(notifier) > 0 && notifier[0] != nil {
+		notif = notifier[0]
+		r.h.user.SetNotifier(notif)
+		r.h.workspace.SetNotifier(notif, cfg.AppWebURL)
+		r.h.apiKey.SetNotifier(notif)
+	}
+
+	// Email verification service (coordinates token issuance, delivery, redemption)
+	emailVerifySvc := emailverify.NewService(userRepo, emailVerifyRepo, notif, cfg.AppWebURL, cfg.EmailVerificationRequired)
+	r.h.user.SetEmailVerifier(emailVerifySvc)
+	r.mw.verifiedEmail = middlewares.RequireVerifiedEmail(emailVerifySvc, userRepo)
+
+	// Self-service password reset (gated by the password_reset_enabled setting)
+	passwordResetSvc := passwordreset.NewService(userRepo, repositories.NewPasswordResetRepository(db), notif, cfg.AppWebURL)
+	r.h.user.SetPasswordReset(passwordResetSvc)
+
+	r.h.dashboard.SetFeatures(handlers.DashboardFeatures{
+		Messages: cfg.MessagesEnabled,
+		Inbound:  cfg.InboundEnabled,
+		Relay:    cfg.SMTPRelayEnabled,
+	})
+	r.h.dashboard.SetInbox(inboxService)
+
+	// Email content privacy
+	r.h.email.SetSettings(settingsProvider)
+	r.h.admin.SetEmailSettings(settingsProvider)
+
+	if cronManager != nil {
+		r.h.cron = handlers.NewCronHandler(cronManager)
+	}
+
+	// OAuth
+	oauthProviderRepo := repositories.NewOAuthProviderRepository(db)
+	oauthAccountRepo := repositories.NewOAuthAccountRepository(db)
+	ssoRepo := repositories.NewWorkspaceSSORepository(db)
+	oauthService := auth.NewOAuthService(oauthProviderRepo, oauthAccountRepo, userRepo)
+
+	callbackBase := cfg.OAuthCallbackBaseURL
+	if callbackBase == "" {
+		callbackBase = cfg.AppWebURL
+	}
+
+	r.h.oauth = handlers.NewOAuthHandler(
+		oauthService, oauthProviderRepo, oauthAccountRepo,
+		userRepo, sessionRepo, cfg.JWTSecret,
+		userSeeder, bus, redisClient, callbackBase, cfg.AppWebURL,
+	)
+	r.h.oauth.SetMigrator(db, migrator)
+	r.h.oauthAdmin = handlers.NewOAuthAdminHandler(oauthProviderRepo, ssoRepo)
+
+	// Subscribers
+	subscriberRepo := repositories.NewSubscriberRepository(db)
+	subscriberListRepo := repositories.NewSubscriberListRepository(db)
+	r.h.subscriber = handlers.NewSubscriberHandler(subscriberRepo)
+	r.h.subscriberList = handlers.NewSubscriberListHandler(subscriberListRepo, subscriberRepo)
+
+	// Campaigns
+	campaignRepo := repositories.NewCampaignRepository(db)
+	campaignMessageRepo := repositories.NewCampaignMessageRepository(db)
+	r.h.campaign = handlers.NewCampaignHandler(
+		campaignRepo, campaignMessageRepo,
+		subscriberListRepo, subscriberRepo, templateRepo, domainRepo, producer,
+	)
+
+	// Tracking
+	trackingRepo := repositories.NewTrackingRepository(db)
+	trackingService := tracking.NewService(trackingRepo, cfg.AppWebURL, []byte(cfg.JWTSecret))
+	r.h.tracking = handlers.NewTrackingHandler(trackingRepo, campaignMessageRepo, campaignRepo, subscriberRepo, subscriberListRepo, emailRepo, suppressionRepo, trackingService, dispatcher)
+
+	// Wire the generator for Posta-injected public links (one-click unsubscribe +
+	// hosted "view in browser"), used to resolve reserved {{ posta_* }} template
+	// variables once an email's identity is known.
+	emailService.SetLinkGenerator(trackingService)
+
+	// Bounce webhook
+	r.h.bounceWebhook = handlers.NewBounceWebhookHandler(subscriberRepo, emailRepo, campaignMessageRepo)
+
+	// Inbound email
+	if cfg.InboundEnabled {
+		inboundEmailRepo := repositories.NewInboundEmailRepository(db)
+		inboundSvc := inbound.NewService(
+			inboundEmailRepo,
+			domainRepo,
+			suppressionRepo,
+			inbound.Config{
+				MaxMessageSize:    cfg.InboundMaxMessageSize,
+				MaxAttachmentSize: cfg.InboundMaxAttachSize,
+			},
+		)
+		if blobStore != nil {
+			inboundSvc.SetBlobStore(blobStore)
+		}
+		if producer != nil {
+			inboundSvc.SetEnqueuer(producer)
+		}
+		inboundSvc.SetEventBus(bus)
+		if cfg.MessagesEnabled && cfg.MessagesInboundDomain != "" {
+			router := messages.NewThreadRouter(repositories.NewMessageRepository(db), cfg.MessagesInboundDomain)
+			router.SetRealtime(realtime.NewRedis(redisClient))
+			if producer != nil {
+				router.SetEnqueuer(producer)
+			}
+			inboundSvc.SetThreadRouter(router)
+		}
+		inboundSvc.OnReceived(func(src models.InboundSource) { metrics.IncrementInboundReceived(string(src)) })
+		inboundSvc.OnRejected(metrics.IncrementInboundRejected)
+		inboundSvc.OnBytes(metrics.AddInboundBytes)
+
+		r.h.inbound = handlers.NewInboundHandler(
+			inboundSvc,
+			inboundEmailRepo,
+			blobStore,
+			cfg.InboundWebhookSecret,
+			[]byte(cfg.JWTSecret),
+		)
+		if producer != nil {
+			r.h.inbound.SetEnqueuer(producer)
+		}
+		r.h.inbound.SetEventBus(bus)
+	}
+
+	// Web form messages
+	if cfg.MessagesEnabled {
+		formRepo := repositories.NewFormRepository(db)
+		messageRepo := repositories.NewMessageRepository(db)
+		messageFilterRepo := repositories.NewMessageFilterRepository(db)
+
+		messageSvc := messages.NewService(
+			formRepo, messageRepo, messageFilterRepo, suppressionRepo, redisClient,
+			messages.Config{
+				PerIPHourly:       cfg.MessagesIPRateLimit,
+				PerFormHourly:     cfg.MessagesPerFormHourly,
+				PerEmailHourly:    cfg.MessagesPerEmailHourly,
+				PerWorkspaceDaily: cfg.MessagesPerWorkspaceDaily,
+				MaxBodyBytes:      cfg.MessagesMaxBodyBytes,
+				MaxAttachmentSize: cfg.MessagesMaxAttachSize,
+				InboundDomain:     cfg.MessagesInboundDomain,
+				AppWebURL:         cfg.AppWebURL,
+			},
+			[]byte(cfg.JWTSecret),
+		)
+		messageSvc.SetEmailService(emailService)
+		if producer != nil {
+			messageSvc.SetEnqueuer(producer)
+		}
+		if blobStore != nil {
+			messageSvc.SetBlobStore(blobStore)
+		}
+		messageSvc.OnReceived(func(status models.MessageStatus) {
+			metrics.IncrementMessageReceived(string(status))
+		})
+
+		r.h.form = handlers.NewFormHandler(formRepo, messageRepo, domainRepo, auditLogger, cfg.ApiBaseURL)
+		r.h.form.SetKeyCache(messageSvc)
+		r.h.message = handlers.NewMessageHandler(messageRepo, formRepo, messageFilterRepo, messageSvc, auditLogger)
+		r.h.message.SetEventBus(bus)
+		r.h.message.SetRealtime(realtime.NewRedis(redisClient))
+		r.h.messageFilter = handlers.NewMessageFilterHandler(messageFilterRepo, messageRepo, formRepo, messageSvc.Scanner())
+		r.h.formIngest = handlers.NewFormIngestHandler(
+			messageSvc,
+			inbound.NewIPRateLimiter(cfg.MessagesIPRateLimit, time.Duration(cfg.MessagesIPRateWindow)*time.Second),
+			cfg.MessagesMaxAttachSize,
+		)
+		if blobStore != nil {
+			r.h.message.SetBlobStore(blobStore)
+			r.h.formIngest.SetBlobStore(blobStore)
+		}
+	}
+
+	// SMTP Relay
+	if cfg.SMTPRelayEnabled {
+		smtpCredRepo := repositories.NewSMTPCredentialRepository(db)
+		credService := smtprelay.NewCredentialService(smtpCredRepo)
+		r.h.smtpCredential = handlers.NewSMTPCredentialHandler(credService, smtpCredRepo, cfg, auditLogger)
+	}
+
+	// Workspace data export/import
+	r.h.workspaceData = handlers.NewWorkspaceDataHandler(
+		db, workspaceRepo, templateRepo, versionRepo, localizationRepo,
+		stylesheetRepo, languageRepo, contactRepo, contactListRepo,
+		webhookRepo, suppressionRepo, smtpRepo, domainRepo,
+		subscriberRepo, subscriberListRepo,
+	)
+	r.h.workspaceData.SetAuditLogger(auditLogger)
+	if blobStore != nil {
+		r.h.workspaceData.SetBlobStore(blobStore)
+	}
+
+	// Auto-seed Google provider if configured
+	if cfg.GoogleOAuthClientID != "" {
+		if _, err := oauthProviderRepo.FindBySlug("google"); err != nil {
+			_ = oauthProviderRepo.Create(&models.OAuthProvider{
+				Name:         "Google",
+				Slug:         "google",
+				Type:         models.OAuthProviderGoogle,
+				ClientID:     cfg.GoogleOAuthClientID,
+				ClientSecret: cfg.GoogleOAuthClientSecret,
+				Scopes:       "openid email profile",
+				Enabled:      true,
+				AutoRegister: true,
+			})
+		}
+	}
+
+	r.registerRoutes()
+
+	return emailService
+}
+
+// emailPlanAdapter adapts planpkg.Service to the email.PlanLimitsProvider interface.
+type emailPlanAdapter struct {
+	svc *planpkg.Service
+}
+
+func (a *emailPlanAdapter) EffectiveLimits(workspaceID *uint) *email.PlanLimits {
+	l := a.svc.EffectiveLimits(workspaceID)
+	return &email.PlanLimits{
+		HourlyRateLimit:     l.HourlyRateLimit,
+		DailyRateLimit:      l.DailyRateLimit,
+		MaxAttachmentSizeMB: l.MaxAttachmentSizeMB,
+		MaxBatchSize:        l.MaxBatchSize,
+	}
+}
+
+// workspaceHeaderRequired is a reusable route option documenting the required workspace header.
+var workspaceHeaderRequired = okapi.DocHeader("X-Posta-Workspace-Id", "integer", "Workspace ID (required for workspace-scoped endpoints)", true)
+
+// loginLimiterMiddleware returns the login rate limit middleware when enabled,
+// or a pass-through middleware when disabled.
+func loginLimiterMiddleware(cfg *config.Config, limiter *ratelimit.RedisLimiter) okapi.Middleware {
+	if !cfg.AuthRateLimitEnabled {
+		return func(c *okapi.Context) error {
+			return c.Next()
+		}
+	}
+	return middlewares.LoginRateLimitMiddleware(limiter)
+}
+
+func (r *Router) registerRoutes() {
+	// Request ID middleware
+	r.app.Use(okapi.RequestID())
+
+	// Prometheus metrics
+	if r.cfg.MetricsEnabled {
+		r.app.Use(metrics.PrometheusMiddleware())
+		r.app.Get("/metrics", metrics.MetricsHandler(), okapi.DocHide())
+	}
+
+	// Register all route definitions
+	r.app.Register(r.healthRoutes()...)
+	r.app.Register(r.infoRoute())
+	r.app.Register(r.authRoutes()...)
+	r.app.Register(r.apiAuthRoutes()...)
+	r.app.Register(r.userRoutes()...)
+	r.app.Register(r.workspaceRoutes()...)
+	r.app.Register(r.workspaceResourceRoutes()...)
+	r.app.Register(r.oauthRoutes()...)
+	r.app.Register(r.trackingRoutes()...)
+	r.app.Register(r.trackingAnalyticsRoutes()...)
+	r.app.Register(r.bounceWebhookRoutes()...)
+	if r.cfg.InboundEnabled && r.h.inbound != nil {
+		r.app.Register(r.inboundWebhookRoutes()...)
+		r.app.Register(r.inboundWorkspaceRoutes()...)
+	}
+	if r.cfg.MessagesEnabled && r.h.formIngest != nil {
+		r.app.Register(r.formIngestRoutes()...)
+		r.app.Register(r.messageWorkspaceRoutes()...)
+	}
+	r.app.Register(r.adminSSERoutes()...)
+	r.app.Register(r.adminRoutes()...)
+
+	// Documentation-only OpenAPI webhooks (events Posta POSTs to subscribers).
+	r.registerWebhookDocs()
+
+	// Dashboard UI (static files + SPA fallback). Registered last so API routes
+	// win; Okapi auto-excludes their top-level segments (/api, /healthz, /metrics)
+	// from the index fallback, so those keep returning JSON rather than index.html.
+	//
+	// The UI is embedded in the binary (internal/web), so a stock `posta`
+	// executable serves it with no static files to ship. POSTA_WEB_DIR overrides
+	// this to serve from disk — useful for frontend development against live
+	// rebuilds, or to swap in a customized build without recompiling.
+	if r.cfg.WebDir != "" {
+		r.app.Web("/", r.cfg.WebDir, okapi.WebConfig{MaxAge: time.Hour})
+	} else {
+		r.app.WebFS("/", web.Assets, okapi.WebConfig{Root: "dist", MaxAge: time.Hour})
+	}
+}

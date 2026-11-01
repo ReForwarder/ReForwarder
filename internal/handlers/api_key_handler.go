@@ -1,0 +1,213 @@
+// Copyright (c) 2026 Jonas Kaninda.
+//
+// This file is part of Posta.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package handlers
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/goposta/posta/internal/services/audit"
+	"github.com/goposta/posta/internal/services/auth"
+	"github.com/goposta/posta/internal/services/notification"
+	"github.com/goposta/posta/internal/storage/repositories"
+	"github.com/jkaninda/okapi"
+	"gorm.io/gorm"
+)
+
+type APIKeyHandler struct {
+	service         *auth.APIKeyService
+	repo            *repositories.APIKeyRepository
+	userSettingRepo *repositories.UserSettingRepository
+	audit           *audit.Logger
+	quota           QuotaChecker
+	db              *gorm.DB
+	notifier        *notification.Service
+}
+
+// SetNotifier sets the notification service for API key creation alerts.
+func (h *APIKeyHandler) SetNotifier(n *notification.Service) {
+	h.notifier = n
+}
+
+type CreateAPIKeyRequest struct {
+	Body struct {
+		Name          string   `json:"name" required:"true"`
+		AllowedIPs    []string `json:"allowed_ips"`
+		Scopes        []string `json:"scopes" enum:"send,read,webhooks,write,admin,*" default:"send"`
+		ExpiresInDays *int     `json:"expires_in_days"`
+	} `json:"body"`
+}
+type RevokeAPIKeyRequest struct {
+	ID int `param:"id"`
+}
+type DeleteAPIKeyRequest struct {
+	ID int `param:"id"`
+}
+
+func NewAPIKeyHandler(service *auth.APIKeyService, repo *repositories.APIKeyRepository, userSettingRepo *repositories.UserSettingRepository, audit *audit.Logger) *APIKeyHandler {
+	return &APIKeyHandler{
+		service:         service,
+		repo:            repo,
+		userSettingRepo: userSettingRepo,
+		audit:           audit,
+	}
+}
+
+// SetQuota sets the quota checker for plan-based resource limits.
+func (h *APIKeyHandler) SetQuota(q QuotaChecker, db *gorm.DB) {
+	h.quota = q
+	h.db = db
+}
+
+func (h *APIKeyHandler) Create(c *okapi.Context, req *CreateAPIKeyRequest) error {
+	if err := requireEdit(c); err != nil {
+		return c.AbortForbidden("Insufficient workspace permissions", err)
+	}
+	scope := getScope(c)
+
+	scopes, err := auth.NormalizeScopes(req.Body.Scopes)
+	if err != nil {
+		return c.AbortBadRequest("invalid scope", err)
+	}
+
+	if h.quota != nil {
+		if err := h.quota.CheckQuota(h.db, scope.UserID, scope.WorkspaceID, "api_keys"); err != nil {
+			return c.AbortForbidden("API key quota exceeded for this workspace", err)
+		}
+	}
+
+	// Determine expiration: use provided value, fall back to user setting default
+	var expiresAt *time.Time
+	if req.Body.ExpiresInDays != nil {
+		days := *req.Body.ExpiresInDays
+		if days > 0 {
+			t := time.Now().AddDate(0, 0, days)
+			expiresAt = &t
+		}
+		// days == 0 means never expires (expiresAt stays nil)
+	} else {
+		// Use default from user settings
+		setting, err := h.userSettingRepo.FindByUserID(scope.UserID)
+		if err == nil && setting.APIKeyExpiryDays > 0 {
+			t := time.Now().AddDate(0, 0, setting.APIKeyExpiryDays)
+			expiresAt = &t
+		}
+	}
+
+	rawKey, key, err := h.service.GenerateKey(scope.UserID, scope.WorkspaceID, req.Body.Name, req.Body.AllowedIPs, scopes, expiresAt)
+	if err != nil {
+		return c.AbortInternalServerError("failed to create API key", err)
+	}
+
+	h.audit.LogCtx(c, "apikey.created", "API key created: "+req.Body.Name, map[string]any{
+		"scopes": []string(key.Scopes),
+	})
+
+	// Send API key created notification
+	if h.notifier != nil {
+		expiresStr := "Never"
+		if key.ExpiresAt != nil {
+			expiresStr = key.ExpiresAt.Format("January 2, 2006")
+		}
+		go func() {
+			_ = h.notifier.SendSecurityToUser(scope.UserID, fmt.Sprintf("New API key created: %s", key.Name), notification.TemplateAPIKeyCreated, map[string]any{
+				"KeyName":   key.Name,
+				"KeyPrefix": key.KeyPrefix,
+				"ExpiresAt": expiresStr,
+				"CreatedAt": key.CreatedAt.Format("January 2, 2006 at 15:04 UTC"),
+				"IPAddress": c.RealIP(),
+			})
+		}()
+	}
+
+	return created(c, okapi.M{
+		"key":        rawKey,
+		"id":         key.ID,
+		"name":       key.Name,
+		"prefix":     key.KeyPrefix,
+		"scopes":     []string(key.Scopes),
+		"expires_at": key.ExpiresAt,
+		"message":    "Save this key securely. It will not be shown again.",
+	})
+}
+
+func (h *APIKeyHandler) List(c *okapi.Context, req *ListRequest) error {
+	page, size, offset := normalizePageParams(req.Page, req.Size)
+
+	keys, total, err := h.repo.FindByScope(getScope(c), size, offset)
+	if err != nil {
+		return c.AbortInternalServerError("failed to list API keys")
+	}
+
+	return paginated(c, keys, total, page, size)
+}
+
+type GetAPIKeyRequest struct {
+	ID int `param:"id" doc:"API key ID"`
+}
+
+func (h *APIKeyHandler) Get(c *okapi.Context, req *GetAPIKeyRequest) error {
+	key, err := h.repo.FindByIDWithCreator(uint(req.ID))
+	if err != nil || !ownsResource(c, key.UserID, key.WorkspaceID) {
+		return c.AbortNotFound("API key not found")
+	}
+	return ok(c, key)
+}
+
+func (h *APIKeyHandler) Revoke(c *okapi.Context, req *RevokeAPIKeyRequest) error {
+	if err := requireEdit(c); err != nil {
+		return c.AbortForbidden("Insufficient workspace permissions", err)
+	}
+	key, err := h.repo.FindByID(uint(req.ID))
+	if err != nil || !ownsResource(c, key.UserID, key.WorkspaceID) {
+		return c.AbortNotFound("API key not found")
+	}
+
+	if err := h.repo.Revoke(key.ID); err != nil {
+		return c.AbortInternalServerError("failed to revoke API key")
+	}
+
+	h.audit.LogCtx(c, "apikey.revoked", "API key revoked: "+key.Name, nil)
+
+	return ok(c, okapi.M{"message": "API key revoked"})
+}
+
+func (h *APIKeyHandler) Delete(c *okapi.Context, req *DeleteAPIKeyRequest) error {
+	if err := requireEdit(c); err != nil {
+		return c.AbortForbidden("Insufficient workspace permissions", err)
+	}
+	key, err := h.repo.FindByID(uint(req.ID))
+	if err != nil || !ownsResource(c, key.UserID, key.WorkspaceID) {
+		return c.AbortNotFound("API key not found")
+	}
+
+	// Only allow deletion of expired or revoked keys
+	if key.IsValid() {
+		return c.AbortBadRequest("active API keys cannot be deleted — revoke it first")
+	}
+
+	if err := h.repo.Delete(key.ID); err != nil {
+		return c.AbortInternalServerError("failed to delete API key")
+	}
+
+	h.audit.LogCtx(c, "apikey.deleted", "API key deleted: "+key.Name, nil)
+
+	return ok(c, okapi.M{"message": "API key deleted"})
+}

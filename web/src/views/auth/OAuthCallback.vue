@@ -1,0 +1,75 @@
+<script setup lang="ts">
+import { onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { useAuthStore } from '../../stores/auth'
+
+const route = useRoute()
+const router = useRouter()
+const auth = useAuthStore()
+const error = ref('')
+
+onMounted(async () => {
+  const errorParam = route.query.error as string
+
+  if (errorParam) {
+    error.value = errorParam.replace(/_/g, ' ')
+    setTimeout(() => router.push('/login'), 3000)
+    return
+  }
+
+  // The callback set an HttpOnly session cookie, so there is no token on the URL
+  // to pick up. Fetching the profile both loads it and proves the cookie is good.
+  await auth.fetchUser()
+  if (!auth.isAuthenticated) {
+    error.value = 'Failed to load user profile'
+    setTimeout(() => router.push('/login'), 3000)
+    return
+  }
+  router.push('/')
+})
+</script>
+
+<template>
+  <div class="oauth-callback">
+    <div v-if="error" class="oauth-error">
+      <h2>Authentication Error</h2>
+      <p>{{ error }}</p>
+      <p style="font-size: 13px; color: var(--text-muted);">Redirecting to login...</p>
+    </div>
+    <div v-else class="oauth-loading">
+      <div class="spinner"></div>
+      <p>Completing sign in...</p>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.oauth-callback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: var(--bg-secondary);
+}
+
+.oauth-loading, .oauth-error {
+  text-align: center;
+  padding: 40px;
+}
+
+.oauth-loading p {
+  margin-top: 16px;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.oauth-error h2 {
+  color: var(--danger-text);
+  margin-bottom: 8px;
+}
+
+.oauth-error p {
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+</style>

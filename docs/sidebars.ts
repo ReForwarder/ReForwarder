@@ -1,0 +1,189 @@
+import type {SidebarsConfig} from '@docusaurus/plugin-content-docs';
+
+const sidebars: SidebarsConfig = {
+  docsSidebar: [
+    {
+      type: 'category',
+      label: 'Getting Started',
+      collapsed: false,
+      items: [
+        'getting-started/introduction',
+        'getting-started/managed-posta',
+        'getting-started/installation',
+        'getting-started/configuration',
+        'getting-started/quickstart',
+        'getting-started/architecture',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Email Sending',
+      items: [
+        'email-sending/single-email',
+        'email-sending/template-email',
+        'email-sending/batch-email',
+        'email-sending/scheduled-email',
+        'email-sending/attachments',
+        'email-sending/email-status',
+        'email-sending/email-log',
+        'email-sending/email-verification',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Templates',
+      items: [
+        'templates/overview',
+        'templates/creating-templates',
+        'templates/versioning',
+        'templates/localization',
+        'templates/languages',
+        'templates/stylesheets',
+        'templates/preview-and-test',
+        'templates/import-export',
+        'templates/system-variables',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Subscribers',
+      items: [
+        'subscribers/subscriber-management',
+        'subscribers/bulk-import',
+        'subscribers/subscriber-lists',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Campaigns',
+      items: [
+        'campaigns/overview',
+        'campaigns/sending',
+        'campaigns/ab-testing',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'SMTP & Domains',
+      items: [
+        'smtp-domains/smtp-servers',
+        'smtp-domains/domain-verification',
+        'smtp-domains/shared-smtp-pool',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Security',
+      items: [
+        'security/authentication',
+        'security/api-keys',
+        'security/smtp-relay',
+        'security/two-factor-auth',
+        'security/rate-limiting',
+        'security/sessions',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Contacts & Suppression',
+      items: [
+        'contacts/contact-management',
+        'contacts/contact-lists',
+        'contacts/bounce-handling',
+        'contacts/suppression-list',
+        'contacts/unsubscribe-lists',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Tracking & Engagement',
+      items: [
+        'tracking/overview',
+        'tracking/unsubscribe',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Webhooks & Events',
+      items: [
+        'webhooks/overview',
+        'webhooks/event-types',
+        'webhooks/delivery-tracking',
+        'webhooks/audit-log',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Inbound Email',
+      items: [
+        'inbound/overview',
+        'inbound/receiving',
+        'inbound/managing',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Forms & Messages',
+      items: [
+        'messages/overview',
+        'messages/creating-a-form',
+        'messages/embedding',
+        'messages/spam-filtering',
+        'messages/replying',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Analytics & Monitoring',
+      items: [
+        'analytics/dashboard',
+        'analytics/email-analytics',
+        'analytics/prometheus-metrics',
+        'analytics/health-checks',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Workspaces',
+      items: [
+        'workspaces/overview',
+        'workspaces/members-and-invitations',
+        'workspaces/settings',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Admin Panel',
+      items: [
+        'admin/user-management',
+        'admin/platform-settings',
+        'admin/platform-metrics',
+        'admin/shared-servers',
+        'admin/scheduled-jobs',
+        'admin/oauth-providers',
+        'admin/plans',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'GDPR & Data',
+      items: [
+        'gdpr/data-export-import',
+        'gdpr/data-deletion',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'SDKs',
+      items: [
+        'sdks/overview',
+        'sdks/go',
+        'sdks/php',
+        'sdks/java',
+        'sdks/dotnet',
+      ],
+    },
+  ],
+};
+
+export default sidebars;

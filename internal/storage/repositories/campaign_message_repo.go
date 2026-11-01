@@ -1,0 +1,201 @@
+// Copyright (c) 2026 Jonas Kaninda.
+//
+// This file is part of Posta.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package repositories
+
+import (
+	"time"
+
+	"github.com/goposta/posta/internal/models"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+type CampaignMessageRepository struct {
+	db *gorm.DB
+}
+
+func NewCampaignMessageRepository(db *gorm.DB) *CampaignMessageRepository {
+	return &CampaignMessageRepository{db: db}
+}
+
+func (r *CampaignMessageRepository) Create(m *models.CampaignMessage) error {
+	return r.db.Create(m).Error
+}
+
+func (r *CampaignMessageRepository) BulkCreate(messages []models.CampaignMessage) (int, error) {
+	if len(messages) == 0 {
+		return 0, nil
+	}
+	result := r.db.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(messages, 100)
+	return int(result.RowsAffected), result.Error
+}
+
+func (r *CampaignMessageRepository) FindByCampaign(campaignID uint, status string, limit, offset int) ([]models.CampaignMessage, int64, error) {
+	var items []models.CampaignMessage
+	var total int64
+
+	q := r.db.Model(&models.CampaignMessage{}).Where("campaign_id = ?", campaignID)
+	if status != "" {
+		q = q.Where("status = ?", status)
+	}
+	q.Count(&total)
+
+	qFind := r.db.Where("campaign_id = ?", campaignID)
+	if status != "" {
+		qFind = qFind.Where("status = ?", status)
+	}
+	if err := qFind.Preload("Subscriber").Order("created_at DESC").Limit(limit).Offset(offset).Find(&items).Error; err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
+func (r *CampaignMessageRepository) FindPendingByCampaign(campaignID uint, batchSize int) ([]models.CampaignMessage, error) {
+	var items []models.CampaignMessage
+	if err := r.db.Preload("Subscriber").
+		Where("campaign_id = ? AND status = ?", campaignID, models.CampaignMsgPending).
+		Order("id ASC").
+		Limit(batchSize).
+		Find(&items).Error; err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (r *CampaignMessageRepository) UpdateStatus(id uint, status models.CampaignMessageStatus, errorMsg string) error {
+	updates := map[string]interface{}{"status": status}
+	if errorMsg != "" {
+		updates["error_message"] = errorMsg
+	}
+	if status == models.CampaignMsgSent {
+		now := time.Now()
+		updates["sent_at"] = now
+	}
+	return r.db.Model(&models.CampaignMessage{}).Where("id = ?", id).Updates(updates).Error
+}
+
+func (r *CampaignMessageRepository) SetEmailID(id uint, emailID uint) error {
+	return r.db.Model(&models.CampaignMessage{}).Where("id = ?", id).Update("email_id", emailID).Error
+}
+
+func (r *CampaignMessageRepository) CountByStatusForCampaigns(campaignIDs []uint) (map[uint]map[models.CampaignMessageStatus]int64, error) {
+	result := make(map[uint]map[models.CampaignMessageStatus]int64, len(campaignIDs))
+	if len(campaignIDs) == 0 {
+		return result, nil
+	}
+	type row struct {
+		CampaignID uint
+		Status     models.CampaignMessageStatus
+		Count      int64
+	}
+	var rows []row
+	if err := r.db.Model(&models.CampaignMessage{}).
+		Select("campaign_id, status, COUNT(*) as count").
+		Where("campaign_id IN ?", campaignIDs).
+		Group("campaign_id, status").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, rw := range rows {
+		if _, ok := result[rw.CampaignID]; !ok {
+			result[rw.CampaignID] = make(map[models.CampaignMessageStatus]int64)
+		}
+		result[rw.CampaignID][rw.Status] = rw.Count
+	}
+	return result, nil
+}
+
+func (r *CampaignMessageRepository) CountByStatus(campaignID uint) (map[models.CampaignMessageStatus]int64, error) {
+	type result struct {
+		Status models.CampaignMessageStatus
+		Count  int64
+	}
+	var results []result
+	if err := r.db.Model(&models.CampaignMessage{}).
+		Select("status, COUNT(*) as count").
+		Where("campaign_id = ?", campaignID).
+		Group("status").
+		Find(&results).Error; err != nil {
+		return nil, err
+	}
+
+	counts := make(map[models.CampaignMessageStatus]int64)
+	for _, r := range results {
+		counts[r.Status] = r.Count
+	}
+	return counts, nil
+}
+
+// SkipPendingForCampaign marks all still-pending CampaignMessages as skipped.
+func (r *CampaignMessageRepository) SkipPendingForCampaign(campaignID uint, reason string) (int64, error) {
+	res := r.db.Model(&models.CampaignMessage{}).
+		Where("campaign_id = ? AND status = ?", campaignID, models.CampaignMsgPending).
+		Updates(map[string]interface{}{
+			"status":        models.CampaignMsgSkipped,
+			"error_message": reason,
+		})
+	return res.RowsAffected, res.Error
+}
+
+func (r *CampaignMessageRepository) CountPending(campaignID uint) (int64, error) {
+	var count int64
+	err := r.db.Model(&models.CampaignMessage{}).
+		Where("campaign_id = ? AND status = ?", campaignID, models.CampaignMsgPending).
+		Count(&count).Error
+	return count, err
+}
+
+func (r *CampaignMessageRepository) FindByCampaignMessageID(id uint) (*models.CampaignMessage, error) {
+	var msg models.CampaignMessage
+	if err := r.db.First(&msg, id).Error; err != nil {
+		return nil, err
+	}
+	return &msg, nil
+}
+
+func (r *CampaignMessageRepository) UpdateOpenedAt(id uint) error {
+	return r.db.Model(&models.CampaignMessage{}).Where("id = ? AND opened_at IS NULL", id).
+		Update("opened_at", time.Now()).Error
+}
+
+func (r *CampaignMessageRepository) UpdateClickedAt(id uint) error {
+	return r.db.Model(&models.CampaignMessage{}).Where("id = ? AND clicked_at IS NULL", id).
+		Update("clicked_at", time.Now()).Error
+}
+
+// FindByEmailID looks up a campaign message by its linked email record.
+func (r *CampaignMessageRepository) FindByEmailID(emailID uint) (*models.CampaignMessage, error) {
+	var msg models.CampaignMessage
+	if err := r.db.Where("email_id = ?", emailID).First(&msg).Error; err != nil {
+		return nil, err
+	}
+	return &msg, nil
+}
+
+// UpdateBouncedAt marks a campaign message as bounced.
+func (r *CampaignMessageRepository) UpdateBouncedAt(id uint) error {
+	return r.db.Model(&models.CampaignMessage{}).Where("id = ? AND bounced_at IS NULL", id).
+		Update("bounced_at", time.Now()).Error
+}
+
+func (r *CampaignMessageRepository) UpdateUnsubscribedAt(id uint) error {
+	return r.db.Model(&models.CampaignMessage{}).Where("id = ? AND unsubscribed_at IS NULL", id).
+		Update("unsubscribed_at", time.Now()).Error
+}

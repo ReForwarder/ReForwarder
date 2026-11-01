@@ -1,0 +1,55 @@
+.env
+bin/
+.history
+.DS_Store
+
+# Embedded dashboard: the built assets are a `make build-ui` artifact baked into
+# the binary by //go:embed, not source. Only the placeholder is committed so
+# `go build` works on a clean checkout.
+/internal/web/dist/*
+!/internal/web/dist/.gitkeep
+
+# Local environment files and secrets — never commit.
+# (.env is ignored above; the tracked examples stay exempt via the negation.)
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+
+# Dependencies
+node_modules/
+
+# Build output (web/.gitignore and docs/.gitignore cover their own trees)
+web/dist/
+
+# Local tool state (security-scan leftovers, agent session data, skill folders)
+.mimosa/
+.zcode/
+.agents/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDEs
+.idea/
+.vscode/
+
+# OS / temp files
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*.tmp
+
+# Local design reference (brand source material)
+resend-brand-package/
+# Impeccable skill project files (local agent tooling)
+.github/agents/
+.github/hooks/
+.github/skills/

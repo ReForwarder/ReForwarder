@@ -1,0 +1,115 @@
+// Copyright (c) 2026 Jonas Kaninda.
+//
+// This file is part of Posta.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package handlers
+
+import (
+	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/storage/repositories"
+	"github.com/jkaninda/okapi"
+)
+
+type SuppressionHandler struct {
+	repo      *repositories.SuppressionRepository
+	unsubRepo *repositories.UnsubscribeListRepository
+}
+type CreateSuppressionRequest struct {
+	Body struct {
+		Email  string `json:"email" required:"true" format:"email"`
+		Reason string `json:"reason"`
+		// ListID scopes the suppression to one UnsubscribeList. Omit for a global block.
+		ListID *uint `json:"list_id,omitempty"`
+	} `json:"body"`
+}
+type ListSuppressionsRequest struct {
+	Page   int  `query:"page" default:"0"`
+	Size   int  `query:"size" default:"20"`
+	ListID uint `query:"list_id" default:"0"`
+}
+type DeleteSuppressionRequest struct {
+	Body struct {
+		Email  string `json:"email" required:"true" format:"email"`
+		ListID *uint  `json:"list_id,omitempty"`
+	} `json:"body"`
+}
+
+func NewSuppressionHandler(repo *repositories.SuppressionRepository, unsubRepo *repositories.UnsubscribeListRepository) *SuppressionHandler {
+	return &SuppressionHandler{repo: repo, unsubRepo: unsubRepo}
+}
+
+func (h *SuppressionHandler) Create(c *okapi.Context, req *CreateSuppressionRequest) error {
+	if err := requireEdit(c); err != nil {
+		return c.AbortForbidden("Insufficient workspace permissions", err)
+	}
+	scope := getScope(c)
+
+	// A list-scoped suppression must reference a list the caller owns.
+	if req.Body.ListID != nil {
+		if h.unsubRepo == nil {
+			return c.AbortBadRequest("list-scoped suppression is not available")
+		}
+		if _, err := h.unsubRepo.FindByIDForScope(*req.Body.ListID, scope); err != nil {
+			return c.AbortNotFound("unsubscribe list not found")
+		}
+	}
+
+	suppression := &models.Suppression{
+		UserID:      scope.UserID,
+		WorkspaceID: scope.WorkspaceID,
+		Email:       req.Body.Email,
+		ListID:      req.Body.ListID,
+		Kind:        models.SuppressionKindManual,
+		Reason:      req.Body.Reason,
+	}
+
+	if err := h.repo.Create(suppression); err != nil {
+		return c.AbortConflict("email already in suppression list")
+	}
+
+	return created(c, suppression)
+}
+
+func (h *SuppressionHandler) List(c *okapi.Context, req *ListSuppressionsRequest) error {
+	page, size, offset := normalizePageParams(req.Page, req.Size)
+
+	var listID *uint
+	if req.ListID > 0 {
+		listID = &req.ListID
+	}
+
+	suppressions, total, err := h.repo.FindByScopeFiltered(getScope(c), listID, size, offset)
+	if err != nil {
+		return c.AbortInternalServerError("failed to list suppressions")
+	}
+
+	return paginated(c, suppressions, total, page, size)
+}
+
+func (h *SuppressionHandler) Delete(c *okapi.Context, req *DeleteSuppressionRequest) error {
+	if err := requireEdit(c); err != nil {
+		return c.AbortForbidden("Insufficient workspace permissions", err)
+	}
+	scope := getScope(c)
+
+	if err := h.repo.Delete(scope, req.Body.Email, req.Body.ListID); err != nil {
+		return c.AbortInternalServerError("failed to remove from suppression list")
+	}
+
+	return noContent(c)
+}

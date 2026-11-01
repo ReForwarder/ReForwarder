@@ -1,0 +1,639 @@
+// Copyright (c) 2026 Jonas Kaninda.
+//
+// This file is part of Posta.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package inbound
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+	"time"
+
+	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/eventbus"
+	"github.com/goposta/posta/internal/storage/blob"
+	"github.com/goposta/posta/internal/storage/repositories"
+	"github.com/jkaninda/logger"
+	"gorm.io/gorm"
+)
+
+var (
+	// ErrUnverifiedDomain is returned when none of the recipient domains match an
+	// ownership-verified domain. Maps to SMTP 550.
+	ErrUnverifiedDomain = errors.New("recipient domain is not verified")
+	// ErrSizeExceeded is returned when the raw message exceeds the configured limit.
+	// Maps to SMTP 552.
+	ErrSizeExceeded = errors.New("message size exceeds limit")
+	// ErrAttachmentTooLarge is returned when a single attachment is larger than
+	// the configured per-attachment limit.
+	ErrAttachmentTooLarge = errors.New("attachment exceeds per-attachment size limit")
+	// ErrDuplicate is returned when a message with the same Message-ID already
+	// exists for the resolved user. Callers should treat this as success (idempotent).
+	ErrDuplicate = errors.New("duplicate message-id")
+	// ErrSenderSuppressed is returned when the sender is on the recipient's
+	// suppression list.
+	ErrSenderSuppressed = errors.New("sender is suppressed")
+)
+
+// Enqueuer enqueues inbound-processing tasks. Satisfied by worker.Producer.
+type Enqueuer interface {
+	EnqueueInboundProcess(inboundEmailID uint) error
+	EnqueueInboundParse(inboundEmailID uint) error
+}
+
+// ThreadRouter attaches an inbound email to an existing conversation (a web
+// form thread) when one of its recipients is that conversation's reply
+// address. It reports false when no recipient matched.
+type ThreadRouter interface {
+	RouteReply(ctx context.Context, rec *models.InboundEmail, recipients []string) (bool, error)
+}
+
+type Service struct {
+	repo            *repositories.InboundEmailRepository
+	domainRepo      *repositories.DomainRepository
+	suppressionRepo *repositories.SuppressionRepository
+	blobStore       blob.Store
+	producer        Enqueuer
+	bus             *eventbus.EventBus
+	threadRouter    ThreadRouter
+	maxMsgSize      int64
+	maxAttachSize   int64
+	onReceived      func(source models.InboundSource)
+	onRejected      func(reason string)
+	onBytes         func(int64)
+	onIngestMs      func(float64)
+}
+
+// Config holds runtime configuration for the inbound service.
+type Config struct {
+	MaxMessageSize    int64
+	MaxAttachmentSize int64
+}
+
+func NewService(
+	repo *repositories.InboundEmailRepository,
+	domainRepo *repositories.DomainRepository,
+	suppressionRepo *repositories.SuppressionRepository,
+	cfg Config,
+) *Service {
+	return &Service{
+		repo:            repo,
+		domainRepo:      domainRepo,
+		suppressionRepo: suppressionRepo,
+		maxMsgSize:      cfg.MaxMessageSize,
+		maxAttachSize:   cfg.MaxAttachmentSize,
+	}
+}
+
+// SetBlobStore configures the blob store for attachment persistence.
+// When nil, attachment content is stored inline (base64) on the InboundEmail record.
+func (s *Service) SetBlobStore(bs blob.Store) { s.blobStore = bs }
+
+// SetEnqueuer configures the worker-task enqueuer.
+func (s *Service) SetEnqueuer(eq Enqueuer) { s.producer = eq }
+
+// SetEventBus configures the event bus used to publish inbound.received events.
+func (s *Service) SetEventBus(b *eventbus.EventBus) { s.bus = b }
+
+// SetThreadRouter enables routing replies to thread addresses onto their
+// conversation instead of the generic inbound pipeline.
+func (s *Service) SetThreadRouter(r ThreadRouter) { s.threadRouter = r }
+
+// RouteThread offers rec to the thread router. When the email is attached to a
+// thread it is marked forwarded and the caller must not run the generic
+// email.inbound processing for it. A router failure is logged and the email
+// falls back to ordinary inbound handling, so it is never lost.
+func (s *Service) RouteThread(ctx context.Context, rec *models.InboundEmail, candidates ...[]string) bool {
+	if s.threadRouter == nil || rec == nil {
+		return false
+	}
+	routed, err := s.threadRouter.RouteReply(ctx, rec, uniqueAddresses(candidates...))
+	if err != nil {
+		logger.Error("thread routing failed; handling as ordinary inbound", "inbound_id", rec.UUID, "error", err)
+		return false
+	}
+	if !routed {
+		return false
+	}
+	rec.Status = models.InboundStatusForwarded
+	if err := s.repo.Update(rec); err != nil {
+		logger.Error("failed to mark thread reply forwarded", "inbound_id", rec.UUID, "error", err)
+	}
+	return true
+}
+
+func uniqueAddresses(lists ...[]string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, list := range lists {
+		for _, a := range list {
+			key := strings.ToLower(strings.TrimSpace(a))
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// OnReceived sets a callback invoked after each successfully ingested inbound message.
+func (s *Service) OnReceived(fn func(source models.InboundSource)) { s.onReceived = fn }
+
+// OnRejected sets a callback invoked after each rejected inbound message.
+func (s *Service) OnRejected(fn func(reason string)) { s.onRejected = fn }
+
+// OnBytes sets a callback invoked with the total inbound byte count.
+func (s *Service) OnBytes(fn func(int64)) { s.onBytes = fn }
+
+// OnIngestDuration sets a callback invoked with ingestion duration in seconds.
+func (s *Service) OnIngestDuration(fn func(float64)) { s.onIngestMs = fn }
+
+// computeDedupHash derives a stable hash for messages without a Message-ID, used
+// on the webhook path to reject near-duplicate retries.
+func computeDedupHash(sender string, recipients []string, subject string, size int64) string {
+	return "fh-" + fmt.Sprintf("%s|%s|%s|%d", strings.ToLower(sender), strings.ToLower(strings.Join(recipients, ",")), subject, size)
+}
+
+// Ingest is the single entry point for both SMTP and webhook paths.
+// It resolves a verified tenant domain from the recipient list, persists the
+// record (and attachments to blob storage when configured), and enqueues an
+// async task to dispatch the email.inbound webhook.
+func (s *Service) Ingest(ctx context.Context, p *ParsedEmail, source models.InboundSource) (*models.InboundEmail, error) {
+	start := time.Now()
+	defer func() {
+		if s.onIngestMs != nil {
+			s.onIngestMs(time.Since(start).Seconds())
+		}
+	}()
+
+	if s.maxMsgSize > 0 && int64(len(p.Raw)) > s.maxMsgSize {
+		s.rejected("size_exceeded")
+		return nil, ErrSizeExceeded
+	}
+
+	domain, recipient, err := s.resolveDomain(p.To)
+	if err != nil {
+		s.rejected("unverified_domain")
+		return nil, err
+	}
+
+	// Suppression check — skip delivery (record as rejected) if sender is suppressed.
+	if s.suppressionRepo != nil && p.From != "" {
+		scope := repositories.ResourceScope{UserID: domain.UserID, WorkspaceID: domain.WorkspaceID}
+		if yes, _ := s.suppressionRepo.IsSuppressed(scope, strings.ToLower(p.From)); yes {
+			s.rejected("sender_suppressed")
+			return s.persistRejected(p, domain, source, "sender is on suppression list"), ErrSenderSuppressed
+		}
+	}
+
+	// Idempotency: first by Message-ID when present, else by content-hash fallback.
+	if p.MessageID != "" {
+		if existing, err := s.repo.FindByMessageID(domain.UserID, p.MessageID); err == nil && existing != nil {
+			return existing, ErrDuplicate
+		} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			logger.Warn("failed to check message-id dedup", "error", err)
+		}
+	}
+
+	recipients := p.To
+	if len(recipients) == 0 && recipient != "" {
+		recipients = []string{recipient}
+	}
+
+	var dedupHash string
+	if p.MessageID == "" {
+		dedupHash = computeDedupHash(p.From, recipients, p.Subject, int64(len(p.Raw)))
+		if existing, err := s.repo.FindByDedupHash(domain.UserID, dedupHash); err == nil && existing != nil {
+			return existing, ErrDuplicate
+		} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			logger.Warn("failed to check dedup hash", "error", err)
+		}
+	}
+
+	headersJSON, _ := json.Marshal(p.Headers)
+
+	rec := &models.InboundEmail{
+		UserID:      domain.UserID,
+		WorkspaceID: domain.WorkspaceID,
+		DomainID:    domain.ID,
+		MessageID:   p.MessageID,
+		DedupHash:   dedupHash,
+		Sender:      p.From,
+		Recipients:  recipients,
+		Subject:     p.Subject,
+		TextBody:    p.TextBody,
+		HTMLBody:    p.HTMLBody,
+		HeadersJSON: string(headersJSON),
+		Size:        int64(len(p.Raw)),
+		Status:      models.InboundStatusReceived,
+		Source:      source,
+		ReceivedAt:  time.Now().UTC(),
+	}
+
+	if err := s.repo.Create(rec); err != nil {
+		return nil, fmt.Errorf("persist inbound email: %w", err)
+	}
+
+	// Persist raw .eml bytes (best effort) so operators can export later.
+	if s.blobStore != nil && len(p.Raw) > 0 {
+		rawKey := fmt.Sprintf("inbound/%s/raw.eml", rec.UUID)
+		if err := s.blobStore.Put(ctx, rawKey, bytes.NewReader(p.Raw), "message/rfc822"); err == nil {
+			rec.RawStorageKey = rawKey
+			_ = s.repo.Update(rec)
+		} else {
+			logger.Warn("failed to store raw inbound eml", "uuid", rec.UUID, "error", err)
+		}
+	}
+
+	attachments, uploadedKeys, err := s.persistAttachments(ctx, rec.UUID, p.Attachments)
+	if err != nil {
+		// Best-effort cleanup of partial uploads so blob storage doesn't leak.
+		if s.blobStore != nil {
+			for _, k := range uploadedKeys {
+				_ = s.blobStore.Delete(ctx, k)
+			}
+			if rec.RawStorageKey != "" {
+				_ = s.blobStore.Delete(ctx, rec.RawStorageKey)
+				rec.RawStorageKey = ""
+			}
+		}
+		rec.Status = models.InboundStatusFailed
+		rec.ErrorMessage = err.Error()
+		_ = s.repo.Update(rec)
+		s.rejected("attachment_error")
+		return rec, err
+	}
+	if len(attachments) > 0 {
+		if data, mErr := json.Marshal(attachments); mErr == nil {
+			rec.AttachmentsJSON = string(data)
+			_ = s.repo.Update(rec)
+		}
+	}
+
+	routed := s.RouteThread(ctx, rec, recipients, p.Cc)
+
+	if s.producer != nil && !routed {
+		if err := s.producer.EnqueueInboundProcess(rec.ID); err != nil {
+			logger.Error("failed to enqueue inbound:process", "inbound_id", rec.ID, "error", err)
+		}
+	}
+
+	if s.bus != nil {
+		actor := rec.UserID
+		s.bus.PublishSimple(
+			models.EventCategoryEmail,
+			"email.inbound.received",
+			&actor,
+			"",
+			"",
+			fmt.Sprintf("Inbound email received from %s", rec.Sender),
+			map[string]any{
+				"inbound_id":   rec.UUID,
+				"sender":       rec.Sender,
+				"recipients":   []string(rec.Recipients),
+				"subject":      rec.Subject,
+				"source":       string(rec.Source),
+				"size":         rec.Size,
+				"workspace_id": rec.WorkspaceID,
+			},
+		)
+	}
+
+	if s.onReceived != nil {
+		s.onReceived(source)
+	}
+	if s.onBytes != nil {
+		s.onBytes(rec.Size)
+	}
+	return rec, nil
+}
+
+func (s *Service) IngestRaw(ctx context.Context, raw []byte, envelopeFrom string, envelopeTo []string, source models.InboundSource) (*models.InboundEmail, error) {
+	start := time.Now()
+	defer func() {
+		if s.onIngestMs != nil {
+			s.onIngestMs(time.Since(start).Seconds())
+		}
+	}()
+
+	if s.maxMsgSize > 0 && int64(len(raw)) > s.maxMsgSize {
+		s.rejected("size_exceeded")
+		return nil, ErrSizeExceeded
+	}
+
+	domain, _, err := s.resolveDomain(envelopeTo)
+	if err != nil {
+		s.rejected("unverified_domain")
+		return nil, err
+	}
+
+	sender := strings.ToLower(strings.TrimSpace(envelopeFrom))
+	if s.suppressionRepo != nil && sender != "" {
+		scope := repositories.ResourceScope{UserID: domain.UserID, WorkspaceID: domain.WorkspaceID}
+		if yes, _ := s.suppressionRepo.IsSuppressed(scope, sender); yes {
+			s.rejected("sender_suppressed")
+			return s.persistRejectedRaw(raw, sender, envelopeTo, domain, source, "sender is on suppression list"), ErrSenderSuppressed
+		}
+	}
+
+	rec := &models.InboundEmail{
+		UserID:      domain.UserID,
+		WorkspaceID: domain.WorkspaceID,
+		DomainID:    domain.ID,
+		Sender:      sender,
+		Recipients:  envelopeTo,
+		Size:        int64(len(raw)),
+		Status:      models.InboundStatusReceived,
+		Source:      source,
+		ReceivedAt:  time.Now().UTC(),
+		RawContent:  raw,
+	}
+	if err := s.repo.Create(rec); err != nil {
+		return nil, fmt.Errorf("persist inbound email: %w", err)
+	}
+
+	if s.blobStore != nil {
+		rawKey := fmt.Sprintf("inbound/%s/raw.eml", rec.UUID)
+		if err := s.blobStore.Put(ctx, rawKey, bytes.NewReader(raw), "message/rfc822"); err == nil {
+			rec.RawStorageKey = rawKey
+			rec.RawContent = nil
+			if uerr := s.repo.Update(rec); uerr != nil {
+				logger.Warn("failed to clear inline raw after blob upload", "uuid", rec.UUID, "error", uerr)
+				rec.RawContent = raw
+			}
+		} else {
+			logger.Warn("failed to store raw inbound eml", "uuid", rec.UUID, "error", err)
+		}
+	}
+
+	if s.producer != nil {
+		if err := s.producer.EnqueueInboundParse(rec.ID); err != nil {
+			logger.Error("failed to enqueue inbound:parse", "inbound_id", rec.ID, "error", err)
+		}
+	}
+
+	if s.onReceived != nil {
+		s.onReceived(source)
+	}
+	if s.onBytes != nil {
+		s.onBytes(rec.Size)
+	}
+	return rec, nil
+}
+
+func (s *Service) ApplyParsed(ctx context.Context, rec *models.InboundEmail, p *ParsedEmail) error {
+	if p.MessageID != "" {
+		if existing, err := s.repo.FindByMessageID(rec.UserID, p.MessageID); err == nil && existing != nil && existing.ID != rec.ID {
+			rec.MessageID = p.MessageID
+			rec.Status = models.InboundStatusRejected
+			rec.ErrorMessage = "duplicate message-id"
+			_ = s.repo.Update(rec)
+			return ErrDuplicate
+		} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			logger.Warn("failed to check message-id dedup", "error", err)
+		}
+	}
+
+	recipients := rec.Recipients
+	if len(p.To) > 0 {
+		recipients = p.To
+	}
+
+	var dedupHash string
+	if p.MessageID == "" {
+		dedupHash = computeDedupHash(p.From, recipients, p.Subject, rec.Size)
+		if existing, err := s.repo.FindByDedupHash(rec.UserID, dedupHash); err == nil && existing != nil && existing.ID != rec.ID {
+			rec.DedupHash = dedupHash
+			rec.Status = models.InboundStatusRejected
+			rec.ErrorMessage = "duplicate content"
+			_ = s.repo.Update(rec)
+			return ErrDuplicate
+		} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			logger.Warn("failed to check dedup hash", "error", err)
+		}
+	}
+
+	headersJSON, _ := json.Marshal(p.Headers)
+
+	rec.MessageID = p.MessageID
+	rec.DedupHash = dedupHash
+	if p.From != "" {
+		rec.Sender = p.From
+	}
+	if len(p.To) > 0 {
+		rec.Recipients = p.To
+	}
+	rec.Subject = p.Subject
+	rec.TextBody = p.TextBody
+	rec.HTMLBody = p.HTMLBody
+	rec.HeadersJSON = string(headersJSON)
+	rec.Status = models.InboundStatusReceived
+	rec.ErrorMessage = ""
+
+	attachments, uploadedKeys, err := s.persistAttachments(ctx, rec.UUID, p.Attachments)
+	if err != nil {
+		if s.blobStore != nil {
+			for _, k := range uploadedKeys {
+				_ = s.blobStore.Delete(ctx, k)
+			}
+		}
+		return fmt.Errorf("persist attachments: %w", err)
+	}
+	if len(attachments) > 0 {
+		if data, mErr := json.Marshal(attachments); mErr == nil {
+			rec.AttachmentsJSON = string(data)
+		}
+	}
+
+	if err := s.repo.Update(rec); err != nil {
+		return fmt.Errorf("update inbound email: %w", err)
+	}
+
+	if s.bus != nil {
+		actor := rec.UserID
+		s.bus.PublishSimple(
+			models.EventCategoryEmail,
+			"email.inbound.received",
+			&actor,
+			"",
+			"",
+			fmt.Sprintf("Inbound email received from %s", rec.Sender),
+			map[string]any{
+				"inbound_id":   rec.UUID,
+				"sender":       rec.Sender,
+				"recipients":   []string(rec.Recipients),
+				"subject":      rec.Subject,
+				"source":       string(rec.Source),
+				"size":         rec.Size,
+				"workspace_id": rec.WorkspaceID,
+			},
+		)
+	}
+	return nil
+}
+
+// LoadRaw returns the raw RFC 5322 bytes for a stored inbound record, reading
+// from the inline RawContent column first and falling back to the blob store
+// when the row has already been promoted.
+func (s *Service) LoadRaw(ctx context.Context, rec *models.InboundEmail) ([]byte, error) {
+	if len(rec.RawContent) > 0 {
+		return rec.RawContent, nil
+	}
+	if rec.RawStorageKey == "" || s.blobStore == nil {
+		return nil, fmt.Errorf("raw content unavailable for inbound %s", rec.UUID)
+	}
+	rc, err := s.blobStore.Get(ctx, rec.RawStorageKey)
+	if err != nil {
+		return nil, fmt.Errorf("fetch raw blob: %w", err)
+	}
+	defer func() { _ = rc.Close() }()
+	raw, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, fmt.Errorf("read raw blob: %w", err)
+	}
+	return raw, nil
+}
+
+// persistRejectedRaw records a synchronous-time rejection from IngestRaw where
+// only envelope information is known — no parsed headers, no subject.
+func (s *Service) persistRejectedRaw(raw []byte, sender string, recipients []string, domain *models.Domain, source models.InboundSource, reason string) *models.InboundEmail {
+	rec := &models.InboundEmail{
+		UserID:       domain.UserID,
+		WorkspaceID:  domain.WorkspaceID,
+		DomainID:     domain.ID,
+		Sender:       sender,
+		Recipients:   recipients,
+		Size:         int64(len(raw)),
+		Status:       models.InboundStatusRejected,
+		Source:       source,
+		ReceivedAt:   time.Now().UTC(),
+		ErrorMessage: reason,
+	}
+	if err := s.repo.Create(rec); err != nil {
+		logger.Error("failed to persist rejected inbound email", "error", err)
+		return nil
+	}
+	return rec
+}
+
+// resolveDomain walks the recipient list and returns the first ownership-verified
+// tenant domain that matches. Returns ErrUnverifiedDomain if none match.
+func (s *Service) resolveDomain(recipients []string) (*models.Domain, string, error) {
+	for _, r := range recipients {
+		addr := strings.ToLower(strings.TrimSpace(r))
+		at := strings.LastIndex(addr, "@")
+		if at < 0 || at == len(addr)-1 {
+			continue
+		}
+		d, err := s.domainRepo.FindVerifiedByName(addr[at+1:])
+		if err != nil {
+			continue
+		}
+		return d, addr, nil
+	}
+	return nil, "", ErrUnverifiedDomain
+}
+
+// persistAttachments stores attachment content in blob storage (or inline when
+// no store is configured). Returns attachment metadata plus the list of blob keys
+// that were successfully uploaded — the caller uses the keys to clean up on
+// later failure.
+func (s *Service) persistAttachments(ctx context.Context, uuid string, atts []ParsedAttachment) ([]models.InboundAttachmentMeta, []string, error) {
+	if len(atts) == 0 {
+		return nil, nil, nil
+	}
+	out := make([]models.InboundAttachmentMeta, 0, len(atts))
+	keys := make([]string, 0, len(atts))
+	for i, a := range atts {
+		if s.maxAttachSize > 0 && a.Size > s.maxAttachSize {
+			return nil, keys, fmt.Errorf("%w: %q (%d bytes)", ErrAttachmentTooLarge, a.Filename, a.Size)
+		}
+		meta := models.InboundAttachmentMeta{
+			Filename:    a.Filename,
+			ContentType: a.ContentType,
+			Size:        a.Size,
+		}
+		if s.blobStore != nil {
+			key := fmt.Sprintf("inbound/%s/%d_%s", uuid, i, sanitizeFilename(a.Filename))
+			if err := s.blobStore.Put(ctx, key, bytes.NewReader(a.Content), a.ContentType); err != nil {
+				return nil, keys, fmt.Errorf("store attachment %q: %w", a.Filename, err)
+			}
+			meta.StorageKey = key
+			keys = append(keys, key)
+		} else {
+			meta.Content = base64.StdEncoding.EncodeToString(a.Content)
+		}
+		out = append(out, meta)
+	}
+	return out, keys, nil
+}
+
+func (s *Service) persistRejected(p *ParsedEmail, domain *models.Domain, source models.InboundSource, reason string) *models.InboundEmail {
+	rec := &models.InboundEmail{
+		UserID:       domain.UserID,
+		WorkspaceID:  domain.WorkspaceID,
+		DomainID:     domain.ID,
+		MessageID:    p.MessageID,
+		Sender:       p.From,
+		Recipients:   p.To,
+		Subject:      p.Subject,
+		Size:         int64(len(p.Raw)),
+		Status:       models.InboundStatusRejected,
+		Source:       source,
+		ReceivedAt:   time.Now().UTC(),
+		ErrorMessage: reason,
+	}
+	if err := s.repo.Create(rec); err != nil {
+		logger.Error("failed to persist rejected inbound email", "error", err)
+		return nil
+	}
+	return rec
+}
+
+func (s *Service) rejected(reason string) {
+	if s.onRejected != nil {
+		s.onRejected(reason)
+	}
+}
+
+const defaultAttachmentName = "attachment"
+
+func sanitizeFilename(name string) string {
+	if name == "" {
+		return defaultAttachmentName
+	}
+	out := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			return r
+		}
+		return '_'
+	}, name)
+	if out == "" {
+		return defaultAttachmentName
+	}
+	return out
+}

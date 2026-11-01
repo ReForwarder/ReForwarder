@@ -1,0 +1,251 @@
+// Copyright (c) 2026 Jonas Kaninda.
+//
+// This file is part of Posta.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package handlers
+
+import (
+	"time"
+
+	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/email"
+	"github.com/goposta/posta/internal/storage/repositories"
+	"github.com/jkaninda/okapi"
+)
+
+type TemplateLocalizationHandler struct {
+	templateRepo     *repositories.TemplateRepository
+	versionRepo      *repositories.TemplateVersionRepository
+	localizationRepo *repositories.TemplateLocalizationRepository
+	stylesheetRepo   *repositories.StyleSheetRepository
+}
+type ListLocalizationsRequest struct {
+	TemplateID int `param:"id"`
+	VersionID  int `param:"versionId"`
+}
+type CreateLocalizationRequest struct {
+	TemplateID int `param:"id"`
+	VersionID  int `param:"versionId"`
+	Body       struct {
+		Language        string `json:"language" required:"true"`
+		SubjectTemplate string `json:"subject_template" required:"true"`
+		HTMLTemplate    string `json:"html_template"`
+		TextTemplate    string `json:"text_template"`
+		BuilderJSON     string `json:"builder_json,omitempty"`
+	} `json:"body"`
+}
+type UpdateLocalizationRequest struct {
+	ID   int `param:"localizationId"`
+	Body struct {
+		SubjectTemplate *string `json:"subject_template"`
+		HTMLTemplate    *string `json:"html_template"`
+		TextTemplate    *string `json:"text_template"`
+		BuilderJSON     *string `json:"builder_json,omitempty"`
+	} `json:"body"`
+}
+type DeleteLocalizationRequest struct {
+	ID int `param:"localizationId"`
+}
+type PreviewLocalizationRequest struct {
+	TemplateID int `param:"id"`
+	VersionID  int `param:"versionId"`
+	Body       struct {
+		Language     string         `json:"language" required:"true"`
+		TemplateData map[string]any `json:"template_data"`
+	} `json:"body"`
+}
+
+func NewTemplateLocalizationHandler(
+	templateRepo *repositories.TemplateRepository,
+	versionRepo *repositories.TemplateVersionRepository,
+	localizationRepo *repositories.TemplateLocalizationRepository,
+	stylesheetRepo *repositories.StyleSheetRepository,
+) *TemplateLocalizationHandler {
+	return &TemplateLocalizationHandler{
+		templateRepo:     templateRepo,
+		versionRepo:      versionRepo,
+		localizationRepo: localizationRepo,
+		stylesheetRepo:   stylesheetRepo,
+	}
+}
+
+func (h *TemplateLocalizationHandler) List(c *okapi.Context, req *ListLocalizationsRequest) error {
+	tmpl, err := h.templateRepo.FindByID(uint(req.TemplateID))
+	if err != nil || !ownsResource(c, tmpl.UserID, tmpl.WorkspaceID) {
+		return c.AbortNotFound("template not found")
+	}
+
+	v, err := h.versionRepo.FindByID(uint(req.VersionID))
+	if err != nil || v.TemplateID != tmpl.ID {
+		return c.AbortNotFound("version not found")
+	}
+
+	localizations, err := h.localizationRepo.FindByVersionID(v.ID)
+	if err != nil {
+		return c.AbortInternalServerError("failed to list localizations")
+	}
+
+	return ok(c, localizations)
+}
+
+func (h *TemplateLocalizationHandler) Create(c *okapi.Context, req *CreateLocalizationRequest) error {
+	if err := requireEdit(c); err != nil {
+		return c.AbortForbidden("Insufficient workspace permissions", err)
+	}
+	tmpl, err := h.templateRepo.FindByID(uint(req.TemplateID))
+	if err != nil || !ownsResource(c, tmpl.UserID, tmpl.WorkspaceID) {
+		return c.AbortNotFound("template not found")
+	}
+
+	v, err := h.versionRepo.FindByID(uint(req.VersionID))
+	if err != nil || v.TemplateID != tmpl.ID {
+		return c.AbortNotFound("version not found")
+	}
+
+	l := &models.TemplateLocalization{
+		VersionID:       v.ID,
+		Language:        req.Body.Language,
+		SubjectTemplate: req.Body.SubjectTemplate,
+		HTMLTemplate:    req.Body.HTMLTemplate,
+		TextTemplate:    req.Body.TextTemplate,
+		BuilderJSON:     req.Body.BuilderJSON,
+	}
+
+	if err := h.localizationRepo.Create(l); err != nil {
+		return c.AbortConflict("localization for this language already exists")
+	}
+	_ = h.templateRepo.TouchEditor(tmpl.ID, getScope(c).UserID)
+
+	return created(c, l)
+}
+
+func (h *TemplateLocalizationHandler) Update(c *okapi.Context, req *UpdateLocalizationRequest) error {
+	if err := requireEdit(c); err != nil {
+		return c.AbortForbidden("Insufficient workspace permissions", err)
+	}
+	l, err := h.localizationRepo.FindByID(uint(req.ID))
+	if err != nil {
+		return c.AbortNotFound("localization not found")
+	}
+
+	// Verify ownership through the version → template chain
+	v, err := h.versionRepo.FindByID(l.VersionID)
+	if err != nil {
+		return c.AbortNotFound("version not found")
+	}
+	tmpl, err := h.templateRepo.FindByID(v.TemplateID)
+	if err != nil || !ownsResource(c, tmpl.UserID, tmpl.WorkspaceID) {
+		return c.AbortNotFound("localization not found")
+	}
+
+	if req.Body.SubjectTemplate != nil {
+		l.SubjectTemplate = *req.Body.SubjectTemplate
+	}
+	if req.Body.HTMLTemplate != nil {
+		l.HTMLTemplate = *req.Body.HTMLTemplate
+	}
+	if req.Body.TextTemplate != nil {
+		l.TextTemplate = *req.Body.TextTemplate
+	}
+	if req.Body.BuilderJSON != nil {
+		l.BuilderJSON = *req.Body.BuilderJSON
+	}
+
+	now := time.Now()
+	l.UpdatedAt = &now
+
+	if err := h.localizationRepo.Update(l); err != nil {
+		return c.AbortInternalServerError("failed to update localization")
+	}
+	_ = h.templateRepo.TouchEditor(tmpl.ID, getScope(c).UserID)
+
+	return ok(c, l)
+}
+
+func (h *TemplateLocalizationHandler) Delete(c *okapi.Context, req *DeleteLocalizationRequest) error {
+	if err := requireEdit(c); err != nil {
+		return c.AbortForbidden("Insufficient workspace permissions", err)
+	}
+	l, err := h.localizationRepo.FindByID(uint(req.ID))
+	if err != nil {
+		return c.AbortNotFound("localization not found")
+	}
+
+	v, err := h.versionRepo.FindByID(l.VersionID)
+	if err != nil {
+		return c.AbortNotFound("version not found")
+	}
+	tmpl, err := h.templateRepo.FindByID(v.TemplateID)
+	if err != nil || !ownsResource(c, tmpl.UserID, tmpl.WorkspaceID) {
+		return c.AbortNotFound("localization not found")
+	}
+
+	if err := h.localizationRepo.Delete(l.ID); err != nil {
+		return c.AbortInternalServerError("failed to delete localization")
+	}
+	_ = h.templateRepo.TouchEditor(tmpl.ID, getScope(c).UserID)
+
+	return noContent(c)
+}
+
+func (h *TemplateLocalizationHandler) Preview(c *okapi.Context, req *PreviewLocalizationRequest) error {
+	tmpl, err := h.templateRepo.FindByID(uint(req.TemplateID))
+	if err != nil || !ownsResource(c, tmpl.UserID, tmpl.WorkspaceID) {
+		return c.AbortNotFound("template not found")
+	}
+
+	v, err := h.versionRepo.FindByID(uint(req.VersionID))
+	if err != nil || v.TemplateID != tmpl.ID {
+		return c.AbortNotFound("version not found")
+	}
+
+	l, err := h.localizationRepo.FindByVersionAndLanguage(v.ID, req.Body.Language)
+	if err != nil {
+		return c.AbortNotFound("localization not found for language: " + req.Body.Language)
+	}
+
+	data := req.Body.TemplateData
+	if data == nil {
+		data = map[string]any{}
+	}
+	data = email.WithSystemVarNames(data)
+
+	// Build render input from the localization
+	var css string
+	if v.StyleSheet != nil {
+		css = v.StyleSheet.CSS
+	}
+	input := &email.RenderInput{
+		SubjectTemplate: l.SubjectTemplate,
+		HTMLTemplate:    l.HTMLTemplate,
+		TextTemplate:    l.TextTemplate,
+		CSS:             css,
+	}
+
+	renderer := email.NewTemplateRenderer()
+	rendered, err := renderer.Render(input, data)
+	if err != nil {
+		return c.AbortBadRequest("template render error: " + err.Error())
+	}
+
+	return ok(c, PreviewResult{
+		Subject: rendered.Subject,
+		HTML:    rendered.HTML,
+		Text:    rendered.Text,
+	})
+}

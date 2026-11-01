@@ -1,0 +1,149 @@
+// Copyright (c) 2026 Jonas Kaninda.
+//
+// This file is part of Posta.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package repositories
+
+import (
+	"net/mail"
+	"time"
+
+	"github.com/goposta/posta/internal/models"
+	"gorm.io/gorm"
+)
+
+type ContactRepository struct {
+	db *gorm.DB
+}
+
+func NewContactRepository(db *gorm.DB) *ContactRepository {
+	return &ContactRepository{db: db}
+}
+
+// RecordSent upserts contacts for the given recipients, incrementing sent_count.
+// Recipients may use RFC 5322 format ("Display Name <email>"), in which case
+// the name and bare email are extracted.
+func (r *ContactRepository) RecordSent(userID uint, workspaceID *uint, recipients []string) {
+	now := time.Now()
+	for _, raw := range recipients {
+		addr, name := parseRecipient(raw)
+		r.db.Exec(`INSERT INTO contacts (user_id, workspace_id, email, name, sent_count, fail_count, last_sent_at, created_at)
+			VALUES (?, ?, ?, ?, 1, 0, ?, ?)
+			ON CONFLICT (workspace_id, email) WHERE workspace_id IS NOT NULL
+			DO UPDATE SET sent_count = contacts.sent_count + 1, last_sent_at = EXCLUDED.last_sent_at`+
+			nameUpdateClause(name),
+			userID, workspaceID, addr, name, now, now)
+	}
+}
+
+// RecordFailed upserts contacts for the given recipients, incrementing fail_count.
+func (r *ContactRepository) RecordFailed(userID uint, workspaceID *uint, recipients []string) {
+	for _, raw := range recipients {
+		addr, name := parseRecipient(raw)
+		r.db.Exec(`INSERT INTO contacts (user_id, workspace_id, email, name, sent_count, fail_count, created_at)
+			VALUES (?, ?, ?, ?, 0, 1, ?)
+			ON CONFLICT (workspace_id, email) WHERE workspace_id IS NOT NULL
+			DO UPDATE SET fail_count = contacts.fail_count + 1`+
+			nameUpdateClause(name),
+			userID, workspaceID, addr, name, time.Now())
+	}
+}
+
+func nameUpdateClause(name string) string {
+	if name != "" {
+		return `, name = EXCLUDED.name`
+	}
+	return ""
+}
+
+// parseRecipient extracts the bare email and display name from a recipient
+// string. It supports RFC 5322 format ("Display Name <email@example.com>").
+// If parsing fails, the original string is returned as the email with no name.
+func parseRecipient(raw string) (email, name string) {
+	addr, err := mail.ParseAddress(raw)
+	if err != nil {
+		return raw, ""
+	}
+	return addr.Address, addr.Name
+}
+
+func (r *ContactRepository) FindByUserID(userID uint, search string, limit, offset int) ([]models.Contact, int64, error) {
+	var contacts []models.Contact
+	var total int64
+
+	q := r.db.Model(&models.Contact{}).Where("user_id = ? AND workspace_id IS NULL", userID)
+	if search != "" {
+		q = q.Where("email ILIKE ? OR name ILIKE ?", "%"+search+"%", "%"+search+"%")
+	}
+	q.Count(&total)
+
+	if err := q.Order("last_sent_at DESC NULLS LAST").
+		Limit(limit).Offset(offset).
+		Find(&contacts).Error; err != nil {
+		return nil, 0, err
+	}
+	return contacts, total, nil
+}
+
+func (r *ContactRepository) FindByWorkspaceID(workspaceID uint, search string, limit, offset int) ([]models.Contact, int64, error) {
+	var contacts []models.Contact
+	var total int64
+
+	q := r.db.Model(&models.Contact{}).Where("workspace_id = ?", workspaceID)
+	if search != "" {
+		q = q.Where("email ILIKE ? OR name ILIKE ?", "%"+search+"%", "%"+search+"%")
+	}
+	q.Count(&total)
+
+	if err := q.Order("last_sent_at DESC NULLS LAST").
+		Limit(limit).Offset(offset).
+		Find(&contacts).Error; err != nil {
+		return nil, 0, err
+	}
+	return contacts, total, nil
+}
+
+func (r *ContactRepository) FindByScope(scope ResourceScope, search string, limit, offset int) ([]models.Contact, int64, error) {
+	var contacts []models.Contact
+	var total int64
+
+	q := ApplyScope(r.db.Model(&models.Contact{}), scope)
+	if search != "" {
+		q = q.Where("email ILIKE ? OR name ILIKE ?", "%"+search+"%", "%"+search+"%")
+	}
+	q.Count(&total)
+
+	qFind := ApplyScope(r.db, scope)
+	if search != "" {
+		qFind = qFind.Where("email ILIKE ? OR name ILIKE ?", "%"+search+"%", "%"+search+"%")
+	}
+	if err := qFind.Order("last_sent_at DESC NULLS LAST").
+		Limit(limit).Offset(offset).
+		Find(&contacts).Error; err != nil {
+		return nil, 0, err
+	}
+	return contacts, total, nil
+}
+
+func (r *ContactRepository) FindByID(id uint) (*models.Contact, error) {
+	var contact models.Contact
+	if err := r.db.First(&contact, id).Error; err != nil {
+		return nil, err
+	}
+	return &contact, nil
+}

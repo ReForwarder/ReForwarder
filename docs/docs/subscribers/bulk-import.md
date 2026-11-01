@@ -1,0 +1,105 @@
+---
+sidebar_position: 2
+title: Bulk Import
+description: Import subscribers from JSON and CSV files
+---
+
+# Bulk Import
+
+Import subscribers in bulk using JSON or CSV formats.
+
+:::tip
+For the full request/response schema, see the interactive API Reference at `/docs` on your Posta instance.
+:::
+
+:::note
+Bulk import endpoints are workspace-scoped. Requests require a JWT bearer token and the `X-Posta-Workspace-Id` header.
+:::
+
+## JSON Import
+
+```
+POST /api/v1/workspaces/current/subscribers/import/json
+```
+
+```json
+{
+  "subscribers": [
+    {
+      "email": "alice@example.com",
+      "name": "Alice",
+      "timezone": "Europe/London",
+      "language": "en",
+      "custom_fields": {
+        "company": "Acme"
+      }
+    },
+    {
+      "email": "bob@example.com",
+      "name": "Bob",
+      "language": "fr"
+    }
+  ]
+}
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "created": 2,
+    "skipped": 0,
+    "total": 2,
+    "invalid_timezones": 0
+  }
+}
+```
+
+Duplicate emails (already existing) are skipped, not updated.
+
+`timezone` must be an IANA name such as `Europe/London` or `America/New_York`. A subscriber with an unrecognised timezone is still imported, without a timezone, and counted in `invalid_timezones`. Creating or updating a single subscriber with an invalid timezone returns `400 Bad Request`.
+
+## CSV Import
+
+```
+POST /api/v1/workspaces/current/subscribers/import/csv
+Content-Type: multipart/form-data
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `file` | Yes | CSV file |
+| `column_mapping` | No | JSON string mapping column indexes to fields |
+
+### Default Column Mapping
+
+If no `column_mapping` is provided:
+- Column 0 = `email`
+- Column 1 = `name`
+
+### Custom Column Mapping
+
+Map CSV columns to subscriber fields using a JSON object where keys are column indexes and values are field names:
+
+```json
+{
+  "0": "email",
+  "1": "name",
+  "2": "custom_fields.company",
+  "3": "custom_fields.role"
+}
+```
+
+Supported fields are `email`, `name`, `status`, `language`, `timezone` (IANA name, see [JSON Import](#json-import)) and custom fields, which use dot notation: `custom_fields.field_name`.
+
+### Example
+
+```bash
+curl -X POST http://localhost:9000/api/v1/workspaces/current/subscribers/import/csv \
+  -H "Authorization: Bearer <jwt>" \
+  -H "X-Posta-Workspace-Id: 1" \
+  -F "file=@subscribers.csv" \
+  -F 'column_mapping={"0":"email","1":"name","2":"custom_fields.company"}'
+```

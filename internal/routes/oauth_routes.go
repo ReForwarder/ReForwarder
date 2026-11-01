@@ -1,0 +1,224 @@
+// Copyright (c) 2026 Jonas Kaninda.
+//
+// This file is part of Posta.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package routes
+
+import (
+	"net/http"
+
+	"github.com/goposta/posta/internal/dto"
+	"github.com/goposta/posta/internal/handlers"
+	"github.com/goposta/posta/internal/middlewares"
+	"github.com/goposta/posta/internal/models"
+	"github.com/jkaninda/okapi"
+)
+
+// oauthRoutes returns route definitions for OAuth authentication.
+func (r *Router) oauthRoutes() []okapi.RouteDefinition {
+	// Public OAuth routes (no auth required)
+	oauthPublic := r.v1.Group("/auth/oauth").WithTagInfo(okapi.GroupTag{
+		Name:        tagOAuth,
+		Description: descOAuth,
+	})
+
+	routes := make([]okapi.RouteDefinition, 0, 12)
+	routes = append(routes, []okapi.RouteDefinition{
+		{
+			Method:      http.MethodGet,
+			Path:        "/providers",
+			Handler:     r.h.oauth.ListProviders,
+			Group:       oauthPublic,
+			Summary:     "List OAuth providers",
+			Description: "Returns enabled OAuth providers for the login page",
+			Response:    &dto.Response[okapi.M]{},
+		},
+		{
+			Method:      http.MethodPost,
+			Path:        "/discover",
+			Handler:     okapi.H(r.h.oauth.DiscoverSSO),
+			Group:       oauthPublic,
+			Summary:     "Discover SSO provider by email",
+			Description: "Returns the OAuth provider slug whose allowed domains match the given email's domain. Used for email-first SSO login.",
+			Request:     &handlers.DiscoverSSORequest{},
+			Response:    &dto.Response[handlers.DiscoverSSOResponse]{},
+		},
+		{
+			Method:      http.MethodGet,
+			Path:        "/{provider}/authorize",
+			Handler:     r.h.oauth.Authorize,
+			Group:       oauthPublic,
+			Summary:     "Initiate OAuth flow",
+			Description: "Redirects to the OAuth provider's authorization page",
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("provider", "string", "Provider slug"),
+			},
+		},
+		{
+			Method:      http.MethodGet,
+			Path:        "/{provider}/callback",
+			Handler:     r.h.oauth.Callback,
+			Group:       oauthPublic,
+			Summary:     "OAuth callback",
+			Description: "Handles the OAuth provider's redirect after authorization",
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("provider", "string", "Provider slug"),
+				okapi.DocHide(),
+			},
+		},
+	}...)
+
+	// Authenticated OAuth routes (linked accounts)
+	oauthUser := r.v1.Group("/users/me/oauth", r.mw.jwtOnly).WithTagInfo(okapi.GroupTag{
+		Name:        tagOAuth,
+		Description: descOAuth,
+	})
+	oauthUser.WithBearerAuth()
+
+	routes = append(routes, []okapi.RouteDefinition{
+		{
+			Method:   http.MethodGet,
+			Path:     "",
+			Handler:  r.h.oauth.ListLinkedAccounts,
+			Group:    oauthUser,
+			Summary:  "List linked OAuth accounts",
+			Response: &dto.Response[[]handlers.OAuthLinkedAccount]{},
+		},
+		{
+			Method:  http.MethodDelete,
+			Path:    "/{provider_id:int}",
+			Handler: okapi.H(r.h.oauth.UnlinkAccount),
+			Group:   oauthUser,
+			Summary: "Unlink OAuth account",
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("provider_id", "integer", "Provider ID"),
+			},
+			Response: &dto.Response[okapi.M]{},
+		},
+	}...)
+
+	// Admin OAuth provider management
+	oauthAdmin := r.v1.Group("/admin/oauth/providers", r.mw.jwtAdminAuth.Middleware).WithTagInfo(
+		okapi.GroupTag{
+			Name:        tagAdmin,
+			Description: descAdmin,
+		},
+		okapi.GroupTag{
+			Name:        tagOAuth,
+			Description: descOAuth,
+		},
+	)
+	oauthAdmin.WithBearerAuth()
+
+	routes = append(routes, []okapi.RouteDefinition{
+		{
+			Method:   http.MethodGet,
+			Path:     "",
+			Handler:  r.h.oauthAdmin.ListProviders,
+			Group:    oauthAdmin,
+			Summary:  "List all OAuth providers (admin)",
+			Response: &dto.Response[[]handlers.OAuthProviderResponse]{},
+		},
+		{
+			Method:  http.MethodPost,
+			Path:    "",
+			Handler: okapi.H(r.h.oauthAdmin.CreateProvider),
+			Group:   oauthAdmin,
+			Summary: "Create OAuth provider",
+			Request: &handlers.CreateOAuthProviderRequest{},
+			Options: []okapi.RouteOption{
+				okapi.DocResponse(201, &dto.Response[handlers.OAuthProviderResponse]{}),
+			},
+		},
+		{
+			Method:   http.MethodPut,
+			Path:     "/{id:int}",
+			Handler:  okapi.H(r.h.oauthAdmin.UpdateProvider),
+			Group:    oauthAdmin,
+			Summary:  "Update OAuth provider",
+			Request:  &handlers.UpdateOAuthProviderRequest{},
+			Response: &dto.Response[handlers.OAuthProviderResponse]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Provider ID"),
+			},
+		},
+		{
+			Method:  http.MethodDelete,
+			Path:    "/{id:int}",
+			Handler: okapi.H(r.h.oauthAdmin.DeleteProvider),
+			Group:   oauthAdmin,
+			Summary: "Delete OAuth provider",
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Provider ID"),
+				okapi.DocResponse(204, nil),
+			},
+		},
+	}...)
+
+	// Workspace SSO config
+	wsSSO := r.v1.Group("/workspaces/current/sso", r.mw.auth, r.mw.workspace).WithTagInfo(
+		okapi.GroupTag{
+			Name:        tagWorkspaces,
+			Description: descWorkspacesWithSSO,
+		},
+		okapi.GroupTag{
+			Name:        tagOAuth,
+			Description: descOAuth,
+		},
+	)
+	wsSSO.WithBearerAuth()
+
+	routes = append(routes, []okapi.RouteDefinition{
+		{
+			Method:      http.MethodGet,
+			Path:        "",
+			Handler:     r.h.oauthAdmin.GetWorkspaceSSO,
+			Group:       wsSSO,
+			Middlewares: []okapi.Middleware{middlewares.RequireWorkspaceRole(models.WorkspaceRoleAdmin)},
+			Summary:     "Get workspace SSO config",
+			Description: "Read the workspace's SSO enforcement config (admin/owner only)",
+			Response:    &dto.Response[handlers.WorkspaceSSOResponse]{},
+			Options:     []okapi.RouteOption{workspaceHeaderRequired},
+		},
+		{
+			Method:      http.MethodPut,
+			Path:        "",
+			Handler:     okapi.H(r.h.oauthAdmin.SetWorkspaceSSO),
+			Group:       wsSSO,
+			Middlewares: []okapi.Middleware{middlewares.RequireWorkspaceRole(models.WorkspaceRoleAdmin)},
+			Summary:     "Set workspace SSO config",
+			Description: "Configure the workspace's SSO enforcement (admin/owner only)",
+			Request:     &handlers.SetWorkspaceSSORequest{},
+			Response:    &dto.Response[okapi.M]{},
+			Options:     []okapi.RouteOption{workspaceHeaderRequired},
+		},
+		{
+			Method:      http.MethodDelete,
+			Path:        "",
+			Handler:     r.h.oauthAdmin.DeleteWorkspaceSSO,
+			Group:       wsSSO,
+			Middlewares: []okapi.Middleware{middlewares.RequireWorkspaceRole(models.WorkspaceRoleAdmin)},
+			Summary:     "Delete workspace SSO config",
+			Description: "Remove the workspace's SSO enforcement (admin/owner only)",
+			Response:    &dto.Response[okapi.M]{},
+			Options:     []okapi.RouteOption{workspaceHeaderRequired},
+		},
+	}...)
+
+	return routes
+}

@@ -1,0 +1,92 @@
+# Posta Deployment (Server + Dedicated Worker)
+# ============================================
+# This configuration runs Posta with a separate worker process.
+#
+# - The `posta` service runs the HTTP API and web interface.
+# - The `worker` service processes background jobs such as:
+#   • email delivery
+#   • retrying failed messages
+#   • scheduled tasks
+#
+# Using a dedicated worker is recommended for production environments
+# because it allows the API server and background processing to scale
+# independently.
+
+services:
+  posta:
+    image: jkaninda/posta:latest
+    ports:
+      - "9000:9000"
+    environment:
+      POSTA_DB_HOST: posta-db
+      POSTA_DB_NAME: posta
+      POSTA_DB_USER: posta
+      POSTA_DB_PASSWORD: posta
+      POSTA_DB_PORT: 5432
+      POSTA_DB_SSL_MODE: disable
+      POSTA_REDIS_ADDR: "posta-redis:6379"
+      # Both are required: compose refuses to start until they are set, and the
+      # server rejects placeholder or too-short values in production anyway.
+      POSTA_JWT_SECRET: "${POSTA_JWT_SECRET:?required, min 32 chars, generate with openssl rand -hex 32}"
+      POSTA_ADMIN_EMAIL: "admin@example.com"
+      POSTA_ADMIN_PASSWORD: "${POSTA_ADMIN_PASSWORD:?required, min 12 chars, sets the initial admin password}"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9000/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    depends_on:
+      posta-db:
+        condition: service_healthy
+      posta-redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    image: jkaninda/posta:latest
+    command: ["worker"]
+    environment:
+      POSTA_DB_HOST: posta-db
+      POSTA_DB_NAME: posta
+      POSTA_DB_USER: posta
+      POSTA_DB_PASSWORD: posta
+      POSTA_DB_PORT: 5432
+      POSTA_DB_SSL_MODE: disable
+      POSTA_REDIS_ADDR: "posta-redis:6379"
+      POSTA_WORKER_CONCURRENCY: "10"
+      POSTA_WORKER_MAX_RETRIES: "5"
+    depends_on:
+      posta-db:
+        condition: service_healthy
+      posta-redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  posta-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: posta
+      POSTGRES_PASSWORD: posta
+      POSTGRES_DB: posta
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U posta"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  posta-redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  db_data:
+  redis_data:

@@ -1,0 +1,374 @@
+// Copyright (c) 2026 Jonas Kaninda.
+//
+// This file is part of Posta.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package webhook
+
+import (
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"net/mail"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/jkaninda/logger"
+	"golang.org/x/net/proxy"
+
+	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/storage/repositories"
+)
+
+const (
+	defaultMaxRetries    = 3
+	defaultRetryBaseWait = 2 * time.Second
+	defaultTimeout       = 10 * time.Second
+)
+
+// Config holds configurable settings for the webhook dispatcher.
+type Config struct {
+	MaxRetries int
+	Timeout    time.Duration
+	// ProxyURL routes all outbound webhook requests through a proxy,
+	// hiding the server's IP address from webhook endpoints.
+	// Supports http://, https://, and socks5:// schemes.
+	ProxyURL string
+}
+
+type Dispatcher struct {
+	repo              *repositories.WebhookRepository
+	deliveryRepo      *repositories.WebhookDeliveryRepository
+	client            *http.Client
+	maxRetries        int
+	onDeliverySuccess func()
+	onDeliveryFailed  func()
+	onDeliveryDone    func(float64) // duration in seconds
+}
+
+func NewDispatcher(repo *repositories.WebhookRepository) *Dispatcher {
+	return &Dispatcher{
+		repo:       repo,
+		maxRetries: defaultMaxRetries,
+		client: &http.Client{
+			Timeout: defaultTimeout,
+		},
+	}
+}
+
+// SetConfig applies configurable settings to the dispatcher.
+func (d *Dispatcher) SetConfig(cfg Config) {
+	if cfg.MaxRetries > 0 {
+		d.maxRetries = cfg.MaxRetries
+	}
+	if cfg.Timeout > 0 {
+		d.client.Timeout = cfg.Timeout
+	}
+	if cfg.ProxyURL != "" {
+		transport, err := proxyTransport(cfg.ProxyURL)
+		if err != nil {
+			logger.Error("invalid webhook proxy URL, requests will be sent directly", "error", err)
+			return
+		}
+		d.client.Transport = transport
+		logger.Info("webhook proxy configured", "proxy", cfg.ProxyURL)
+	}
+}
+
+// proxyTransport builds an *http.Transport that routes requests through the
+// given proxy URL. Supported schemes: http, https, socks5.
+func proxyTransport(rawURL string) (*http.Transport, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse proxy URL: %w", err)
+	}
+
+	switch parsed.Scheme {
+	case "http", "https":
+		return &http.Transport{
+			Proxy: http.ProxyURL(parsed),
+		}, nil
+
+	case "socks5":
+		auth := &proxy.Auth{}
+		if parsed.User != nil {
+			auth.User = parsed.User.Username()
+			auth.Password, _ = parsed.User.Password()
+		} else {
+			auth = nil
+		}
+		dialer, err := proxy.SOCKS5("tcp", parsed.Host, auth, proxy.Direct)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create SOCKS5 dialer: %w", err)
+		}
+		contextDialer, ok := dialer.(proxy.ContextDialer)
+		if !ok {
+			return nil, fmt.Errorf("SOCKS5 dialer does not support DialContext")
+		}
+		return &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return contextDialer.DialContext(ctx, network, addr)
+			},
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("unsupported proxy scheme %q (use http, https, or socks5)", parsed.Scheme)
+	}
+}
+
+// SetDeliveryRepo sets the repository used to record delivery attempts.
+func (d *Dispatcher) SetDeliveryRepo(repo *repositories.WebhookDeliveryRepository) {
+	d.deliveryRepo = repo
+}
+
+// OnDeliverySuccess sets a callback invoked after each successful webhook delivery.
+func (d *Dispatcher) OnDeliverySuccess(fn func()) { d.onDeliverySuccess = fn }
+
+// OnDeliveryFailed sets a callback invoked after each failed webhook delivery.
+func (d *Dispatcher) OnDeliveryFailed(fn func()) { d.onDeliveryFailed = fn }
+
+// OnDeliveryDone sets a callback invoked after each delivery attempt with its duration.
+func (d *Dispatcher) OnDeliveryDone(fn func(float64)) { d.onDeliveryDone = fn }
+
+type Payload struct {
+	Event     string `json:"event"`
+	EmailID   string `json:"email_id"`
+	Timestamp string `json:"timestamp"`
+}
+
+// CampaignPayload is the outbound shape for campaign lifecycle events
+// (campaign.started, campaign.completed).
+type CampaignPayload struct {
+	Event      string `json:"event"`
+	CampaignID uint   `json:"campaign_id"`
+	Name       string `json:"name"`
+	Timestamp  string `json:"timestamp"`
+}
+
+// Dispatch sends webhook notifications for the given event using the default
+// outbound payload shape ({event, email_id, timestamp}). Runs asynchronously.
+// workspaceID scopes which webhooks fire: nil targets the user's personal
+// webhooks, a value targets that workspace's webhooks.
+func (d *Dispatcher) Dispatch(userID uint, workspaceID *uint, event string, emailID string, from string) {
+	payload := Payload{
+		Event:     event,
+		EmailID:   emailID,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		logger.Error("failed to marshal webhook payload", "error", err)
+		return
+	}
+
+	d.DispatchJSON(userID, workspaceID, event, body, from)
+}
+
+// DispatchCampaign sends webhook notifications for a campaign lifecycle event
+// using the campaign payload shape ({event, campaign_id, name, timestamp}).
+// Scoping follows the same rules as Dispatch. Runs asynchronously.
+func (d *Dispatcher) DispatchCampaign(userID uint, workspaceID *uint, event string, campaignID uint, name string, from string) {
+	payload := CampaignPayload{
+		Event:      event,
+		CampaignID: campaignID,
+		Name:       name,
+		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		logger.Error("failed to marshal campaign webhook payload", "error", err)
+		return
+	}
+
+	d.DispatchJSON(userID, workspaceID, event, body, from)
+}
+
+// DispatchJSON sends a pre-serialized JSON body to all webhooks subscribed to event
+// within the given scope (personal when workspaceID is nil, otherwise the
+// workspace) that pass the sender-address filter. Runs asynchronously.
+// Callers own the payload shape — this is the escape hatch used by the inbound
+// pipeline (which has a richer payload than the outbound Payload struct).
+func (d *Dispatcher) DispatchJSON(userID uint, workspaceID *uint, event string, body []byte, fromAddr string) {
+	go func() {
+		scope := repositories.ResourceScope{UserID: userID, WorkspaceID: workspaceID}
+		webhooks, err := d.repo.FindByScopeAndEvent(scope, event)
+		if err != nil {
+			logger.Error("failed to find webhooks", "error", err)
+			return
+		}
+
+		for _, wh := range webhooks {
+			if !matchesFilters(wh.Filters, fromAddr) {
+				continue
+			}
+			d.deliverWithRetry(userID, wh, body, event)
+		}
+	}()
+}
+
+// matchesFilters checks if the sender address matches the webhook's filters.
+func matchesFilters(filters []string, from string) bool {
+	if len(filters) == 0 {
+		return true
+	}
+	if from == "" {
+		return true
+	}
+
+	addr := from
+	if parsed, err := mail.ParseAddress(from); err == nil {
+		addr = parsed.Address
+	}
+	addr = strings.ToLower(addr)
+
+	domain := ""
+	if parts := strings.SplitN(addr, "@", 2); len(parts) == 2 {
+		domain = parts[1]
+	}
+
+	for _, f := range filters {
+		f = strings.ToLower(strings.TrimSpace(f))
+		if f == "" {
+			continue
+		}
+		if f == addr {
+			return true
+		}
+		if domain != "" && f == domain {
+			return true
+		}
+	}
+	return false
+}
+
+// deliverWithRetry attempts to deliver a webhook with exponential backoff retries.
+func (d *Dispatcher) deliverWithRetry(userID uint, wh models.Webhook, body []byte, event string) {
+	var lastErr string
+	var lastStatus int
+
+	start := time.Now()
+
+	for attempt := 1; attempt <= d.maxRetries; attempt++ {
+		statusCode, err := d.doRequest(wh.URL, wh.Secret, body)
+		lastStatus = statusCode
+
+		if err == nil && statusCode < 400 {
+			d.recordDelivery(userID, wh.ID, wh.WorkspaceID, event, models.WebhookDeliverySuccess, statusCode, "", attempt)
+			if d.onDeliverySuccess != nil {
+				d.onDeliverySuccess()
+			}
+			if d.onDeliveryDone != nil {
+				d.onDeliveryDone(time.Since(start).Seconds())
+			}
+			logger.Info("webhook delivered", "url", wh.URL, "event", event, "attempt", attempt)
+			return
+		}
+
+		if err != nil {
+			lastErr = err.Error()
+			logger.Warn("webhook delivery failed", "url", wh.URL, "attempt", attempt, "error", err)
+		} else {
+			lastErr = fmt.Sprintf("HTTP %d", statusCode)
+			logger.Warn("webhook returned error status", "url", wh.URL, "attempt", attempt, "status", statusCode)
+		}
+
+		if attempt < d.maxRetries {
+			time.Sleep(defaultRetryBaseWait * time.Duration(attempt))
+		}
+	}
+
+	// All retries exhausted
+	d.recordDelivery(userID, wh.ID, wh.WorkspaceID, event, models.WebhookDeliveryFailed, lastStatus, lastErr, d.maxRetries)
+	if d.onDeliveryFailed != nil {
+		d.onDeliveryFailed()
+	}
+	if d.onDeliveryDone != nil {
+		d.onDeliveryDone(time.Since(start).Seconds())
+	}
+}
+
+// signPayload computes an HMAC-SHA256 signature of body using the given secret.
+func signPayload(secret string, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// doRequest sends a single HTTP POST to the webhook URL with an HMAC signature.
+func (d *Dispatcher) doRequest(url string, secret string, body []byte) (int, error) {
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return 0, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Posta-Webhook/1.0")
+	if secret != "" {
+		req.Header.Set("X-Posta-Signature", "sha256="+signPayload(secret, body))
+	}
+
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
+// recordDelivery persists a webhook delivery record if the delivery repo is configured.
+func (d *Dispatcher) recordDelivery(userID, webhookID uint, workspaceID *uint, event string, status models.WebhookDeliveryStatus, httpStatus int, errMsg string, attempt int) {
+	if d.deliveryRepo == nil {
+		return
+	}
+	delivery := &models.WebhookDelivery{
+		WebhookID:      webhookID,
+		UserID:         userID,
+		WorkspaceID:    workspaceID,
+		Event:          event,
+		Status:         status,
+		HTTPStatusCode: httpStatus,
+		ErrorMessage:   errMsg,
+		Attempt:        attempt,
+	}
+	if err := d.deliveryRepo.Create(delivery); err != nil {
+		logger.Error("failed to record webhook delivery", "error", err)
+	}
+}
+
+// Validate ensures the webhook URL is reachable.
+func (d *Dispatcher) Validate(url string) error {
+	req, err := http.NewRequest(http.MethodHead, url, nil)
+	if err != nil {
+		return fmt.Errorf("invalid webhook URL: %w", err)
+	}
+
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("webhook URL unreachable: %w", err)
+	}
+	_ = resp.Body.Close()
+
+	return nil
+}

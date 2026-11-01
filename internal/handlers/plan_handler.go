@@ -1,0 +1,427 @@
+// Copyright (c) 2026 Jonas Kaninda.
+//
+// This file is part of Posta.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package handlers
+
+import (
+	"fmt"
+	"net/http"
+
+	"github.com/goposta/posta/internal/dto"
+	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/audit"
+	planpkg "github.com/goposta/posta/internal/services/plan"
+	"github.com/goposta/posta/internal/storage/repositories"
+	"github.com/jkaninda/okapi"
+	"gorm.io/gorm"
+)
+
+// PlanHandler handles admin management of plans/packages.
+type PlanHandler struct {
+	planRepo      *repositories.PlanRepository
+	workspaceRepo *repositories.WorkspaceRepository
+	userRepo      *repositories.UserRepository
+	planService   *planpkg.Service
+	audit         *audit.Logger
+}
+
+func NewPlanHandler(
+	planRepo *repositories.PlanRepository,
+	workspaceRepo *repositories.WorkspaceRepository,
+	userRepo *repositories.UserRepository,
+	planService *planpkg.Service,
+	audit *audit.Logger,
+) *PlanHandler {
+	return &PlanHandler{
+		planRepo:      planRepo,
+		workspaceRepo: workspaceRepo,
+		userRepo:      userRepo,
+		planService:   planService,
+		audit:         audit,
+	}
+}
+
+// Request types
+
+type CreatePlanRequest struct {
+	Body struct {
+		Name                  string `json:"name" required:"true"`
+		Description           string `json:"description"`
+		IsDefault             bool   `json:"is_default"`
+		DailyRateLimit        int    `json:"daily_rate_limit"`
+		HourlyRateLimit       int    `json:"hourly_rate_limit"`
+		MaxAttachmentSizeMB   int    `json:"max_attachment_size_mb"`
+		MaxBatchSize          int    `json:"max_batch_size"`
+		MaxAPIKeys            int    `json:"max_api_keys"`
+		MaxDomains            int    `json:"max_domains"`
+		MaxSMTPServers        int    `json:"max_smtp_servers"`
+		MaxWorkspaces         int    `json:"max_workspaces"`
+		EmailLogRetentionDays int    `json:"email_log_retention_days"`
+	} `json:"body"`
+}
+
+type UpdatePlanRequest struct {
+	ID   int `param:"id"`
+	Body struct {
+		Name                  *string `json:"name"`
+		Description           *string `json:"description"`
+		IsDefault             *bool   `json:"is_default"`
+		IsActive              *bool   `json:"is_active"`
+		DailyRateLimit        *int    `json:"daily_rate_limit"`
+		HourlyRateLimit       *int    `json:"hourly_rate_limit"`
+		MaxAttachmentSizeMB   *int    `json:"max_attachment_size_mb"`
+		MaxBatchSize          *int    `json:"max_batch_size"`
+		MaxAPIKeys            *int    `json:"max_api_keys"`
+		MaxDomains            *int    `json:"max_domains"`
+		MaxSMTPServers        *int    `json:"max_smtp_servers"`
+		MaxWorkspaces         *int    `json:"max_workspaces"`
+		EmailLogRetentionDays *int    `json:"email_log_retention_days"`
+	} `json:"body"`
+}
+
+type DeletePlanRequest struct {
+	ID    int  `param:"id"`
+	Force bool `query:"force"`
+}
+
+type PlanIDRequest struct {
+	ID int `param:"id"`
+}
+
+type AssignWorkspacePlanRequest struct {
+	ID   int `param:"id"`
+	Body struct {
+		PlanID uint `json:"plan_id" required:"true"`
+	} `json:"body"`
+}
+
+type WorkspacePlanRequest struct {
+	ID int `param:"id"`
+}
+
+// Create creates a new plan.
+func (h *PlanHandler) Create(c *okapi.Context, req *CreatePlanRequest) error {
+	userID := uint(c.GetInt("user_id"))
+
+	plan := &models.Plan{
+		Name:                  req.Body.Name,
+		Description:           req.Body.Description,
+		IsDefault:             req.Body.IsDefault,
+		IsActive:              true,
+		DailyRateLimit:        req.Body.DailyRateLimit,
+		HourlyRateLimit:       req.Body.HourlyRateLimit,
+		MaxAttachmentSizeMB:   req.Body.MaxAttachmentSizeMB,
+		MaxBatchSize:          req.Body.MaxBatchSize,
+		MaxAPIKeys:            req.Body.MaxAPIKeys,
+		MaxDomains:            req.Body.MaxDomains,
+		MaxSMTPServers:        req.Body.MaxSMTPServers,
+		MaxWorkspaces:         req.Body.MaxWorkspaces,
+		EmailLogRetentionDays: req.Body.EmailLogRetentionDays,
+	}
+
+	if plan.IsDefault {
+		if err := h.planRepo.ClearDefault(); err != nil {
+			return c.AbortInternalServerError("failed to clear existing default plan", err)
+		}
+	}
+
+	if err := h.planRepo.Create(plan); err != nil {
+		return c.AbortWithError(http.StatusConflict, fmt.Errorf("failed to create plan: %w", err))
+	}
+
+	h.audit.Log(userID, c.GetString("email"), c.RealIP(), "plan.created", "Plan created: "+plan.Name, nil)
+
+	return created(c, plan)
+}
+
+type ListPlansRequest struct {
+	Page   int    `query:"page" default:"0"`
+	Size   int    `query:"size" default:"20"`
+	Search string `query:"search"`
+}
+
+func (h *PlanHandler) List(c *okapi.Context, req *ListPlansRequest) error {
+	page, size, offset := normalizePageParams(req.Page, req.Size)
+
+	plans, total, err := h.planRepo.FindAll(req.Search, size, offset)
+	if err != nil {
+		return c.AbortInternalServerError("failed to list plans")
+	}
+
+	return paginated(c, plans, total, page, size)
+}
+
+// Get returns a single plan by ID.
+func (h *PlanHandler) Get(c *okapi.Context, req *PlanIDRequest) error {
+	plan, err := h.planRepo.FindByID(uint(req.ID))
+	if err != nil {
+		return c.AbortNotFound("plan not found")
+	}
+	return ok(c, plan)
+}
+
+// Update modifies an existing plan.
+func (h *PlanHandler) Update(c *okapi.Context, req *UpdatePlanRequest) error {
+	userID := uint(c.GetInt("user_id"))
+
+	plan, err := h.planRepo.FindByID(uint(req.ID))
+	if err != nil {
+		return c.AbortNotFound("plan not found")
+	}
+
+	if req.Body.Name != nil {
+		plan.Name = *req.Body.Name
+	}
+	if req.Body.Description != nil {
+		plan.Description = *req.Body.Description
+	}
+	if req.Body.IsActive != nil {
+		plan.IsActive = *req.Body.IsActive
+	}
+	if req.Body.DailyRateLimit != nil {
+		plan.DailyRateLimit = *req.Body.DailyRateLimit
+	}
+	if req.Body.HourlyRateLimit != nil {
+		plan.HourlyRateLimit = *req.Body.HourlyRateLimit
+	}
+	if req.Body.MaxAttachmentSizeMB != nil {
+		plan.MaxAttachmentSizeMB = *req.Body.MaxAttachmentSizeMB
+	}
+	if req.Body.MaxBatchSize != nil {
+		plan.MaxBatchSize = *req.Body.MaxBatchSize
+	}
+	if req.Body.MaxAPIKeys != nil {
+		plan.MaxAPIKeys = *req.Body.MaxAPIKeys
+	}
+	if req.Body.MaxDomains != nil {
+		plan.MaxDomains = *req.Body.MaxDomains
+	}
+	if req.Body.MaxSMTPServers != nil {
+		plan.MaxSMTPServers = *req.Body.MaxSMTPServers
+	}
+	if req.Body.MaxWorkspaces != nil {
+		plan.MaxWorkspaces = *req.Body.MaxWorkspaces
+	}
+	if req.Body.EmailLogRetentionDays != nil {
+		plan.EmailLogRetentionDays = *req.Body.EmailLogRetentionDays
+	}
+
+	// Handle default flag change
+	if req.Body.IsDefault != nil && *req.Body.IsDefault && !plan.IsDefault {
+		if err := h.planRepo.ClearDefault(); err != nil {
+			return c.AbortInternalServerError("failed to clear existing default plan", err)
+		}
+		plan.IsDefault = true
+	} else if req.Body.IsDefault != nil && !*req.Body.IsDefault {
+		plan.IsDefault = false
+	}
+
+	if err := h.planRepo.Update(plan); err != nil {
+		return c.AbortInternalServerError("failed to update plan", err)
+	}
+
+	h.audit.Log(userID, c.GetString("email"), c.RealIP(), "plan.updated", "Plan updated: "+plan.Name, nil)
+
+	return ok(c, plan)
+}
+
+// Delete removes a plan. If the plan is assigned to workspaces, it requires ?force=true.
+func (h *PlanHandler) Delete(c *okapi.Context, req *DeletePlanRequest) error {
+	userID := uint(c.GetInt("user_id"))
+
+	plan, err := h.planRepo.FindByID(uint(req.ID))
+	if err != nil {
+		return c.AbortNotFound("plan not found")
+	}
+
+	wsCount, err := h.planRepo.CountWorkspaces(plan.ID)
+	if err != nil {
+		return c.AbortInternalServerError("failed to check plan usage", err)
+	}
+
+	userCount, err := h.planRepo.CountUsers(plan.ID)
+	if err != nil {
+		return c.AbortInternalServerError("failed to check plan usage", err)
+	}
+
+	totalCount := wsCount + userCount
+	if totalCount > 0 && !req.Force {
+		return c.AbortWithError(http.StatusConflict,
+			fmt.Errorf("plan is assigned to %d workspace(s) and %d user(s); use ?force=true to delete", wsCount, userCount))
+	}
+
+	if wsCount > 0 {
+		if err := h.planRepo.UnassignAllFromPlan(plan.ID); err != nil {
+			return c.AbortInternalServerError("failed to unassign workspaces from plan", err)
+		}
+	}
+
+	if userCount > 0 {
+		if err := h.planRepo.UnassignAllUsersFromPlan(plan.ID); err != nil {
+			return c.AbortInternalServerError("failed to unassign users from plan", err)
+		}
+	}
+
+	if err := h.planRepo.Delete(plan.ID); err != nil {
+		return c.AbortInternalServerError("failed to delete plan", err)
+	}
+
+	h.audit.Log(userID, c.GetString("email"), c.RealIP(), "plan.deleted", "Plan deleted: "+plan.Name, nil)
+
+	return noContent(c)
+}
+
+// SetDefault sets a plan as the default, unsetting any previous default.
+func (h *PlanHandler) SetDefault(c *okapi.Context, req *PlanIDRequest) error {
+	userID := uint(c.GetInt("user_id"))
+
+	plan, err := h.planRepo.FindByID(uint(req.ID))
+	if err != nil {
+		return c.AbortNotFound("plan not found")
+	}
+
+	db := h.planRepo.DB()
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := h.planRepo.ClearDefaultTx(tx); err != nil {
+			return err
+		}
+		return tx.Model(plan).Update("is_default", true).Error
+	}); err != nil {
+		return c.AbortInternalServerError("failed to set default plan", err)
+	}
+
+	plan.IsDefault = true
+
+	h.audit.Log(userID, c.GetString("email"), c.RealIP(), "plan.default_set", "Default plan set: "+plan.Name, nil)
+
+	return ok(c, plan)
+}
+
+// AssignToWorkspace assigns a plan to a workspace.
+func (h *PlanHandler) AssignToWorkspace(c *okapi.Context, req *AssignWorkspacePlanRequest) error {
+	userID := uint(c.GetInt("user_id"))
+
+	ws, err := h.workspaceRepo.FindByID(uint(req.ID))
+	if err != nil {
+		return c.AbortNotFound("workspace not found")
+	}
+
+	plan, err := h.planRepo.FindByID(req.Body.PlanID)
+	if err != nil {
+		return c.AbortNotFound("plan not found")
+	}
+
+	if !plan.IsActive {
+		return c.AbortWithError(http.StatusBadRequest, fmt.Errorf("cannot assign inactive plan"))
+	}
+
+	if err := h.planRepo.AssignToWorkspace(ws.ID, plan.ID); err != nil {
+		return c.AbortInternalServerError("failed to assign plan to workspace", err)
+	}
+
+	h.audit.Log(userID, c.GetString("email"), c.RealIP(), "plan.assigned",
+		fmt.Sprintf("Plan '%s' assigned to workspace '%s'", plan.Name, ws.Name), nil)
+
+	return ok(c, dto.MessageData{Message: fmt.Sprintf("plan '%s' assigned to workspace '%s'", plan.Name, ws.Name)})
+}
+
+// GetWorkspacePlan returns the effective plan for a workspace.
+func (h *PlanHandler) GetWorkspacePlan(c *okapi.Context, req *WorkspacePlanRequest) error {
+	wsID := uint(req.ID)
+
+	_, err := h.workspaceRepo.FindByID(wsID)
+	if err != nil {
+		return c.AbortNotFound("workspace not found")
+	}
+
+	plan := h.planService.EffectivePlan(&wsID)
+	if plan == nil {
+		return ok(c, okapi.M{"plan": nil, "source": planSourceGlobalSettings})
+	}
+
+	return ok(c, plan)
+}
+
+// AssignUserPlanRequest is the request type for assigning a plan to a user.
+type AssignUserPlanRequest struct {
+	ID   int `param:"id"`
+	Body struct {
+		PlanID uint `json:"plan_id" required:"true"`
+	} `json:"body"`
+}
+
+// UserPlanRequest is the request type for getting a user's plan.
+type UserPlanRequest struct {
+	ID int `param:"id"`
+}
+
+// AssignToUser assigns a plan to a user.
+func (h *PlanHandler) AssignToUser(c *okapi.Context, req *AssignUserPlanRequest) error {
+	adminID := uint(c.GetInt("user_id"))
+
+	user, err := h.userRepo.FindByID(uint(req.ID))
+	if err != nil {
+		return c.AbortNotFound("user not found")
+	}
+
+	plan, err := h.planRepo.FindByID(req.Body.PlanID)
+	if err != nil {
+		return c.AbortNotFound("plan not found")
+	}
+
+	if !plan.IsActive {
+		return c.AbortWithError(http.StatusBadRequest, fmt.Errorf("cannot assign inactive plan"))
+	}
+
+	if err := h.planRepo.AssignToUser(user.ID, plan.ID); err != nil {
+		return c.AbortInternalServerError("failed to assign plan to user", err)
+	}
+
+	h.audit.Log(adminID, c.GetString("email"), c.RealIP(), "plan.user_assigned",
+		fmt.Sprintf("Plan '%s' assigned to user '%s'", plan.Name, user.Email), nil)
+
+	return ok(c, dto.MessageData{Message: fmt.Sprintf("plan '%s' assigned to user '%s'", plan.Name, user.Email)})
+}
+
+// GetUserPlan returns the effective plan for a user (admin view).
+func (h *PlanHandler) GetUserPlan(c *okapi.Context, req *UserPlanRequest) error {
+	user, err := h.userRepo.FindByID(uint(req.ID))
+	if err != nil {
+		return c.AbortNotFound("user not found")
+	}
+
+	plan := h.planService.EffectiveUserPlan(user.ID)
+	if plan == nil {
+		return ok(c, okapi.M{"plan": nil, "source": planSourceGlobalSettings})
+	}
+
+	return ok(c, plan)
+}
+
+// GetMyPlan returns the effective plan for the authenticated user.
+func (h *PlanHandler) GetMyPlan(c *okapi.Context) error {
+	userID := uint(c.GetInt("user_id"))
+
+	plan := h.planService.EffectiveUserPlan(userID)
+	if plan == nil {
+		return ok(c, okapi.M{"plan": nil, "source": planSourceGlobalSettings})
+	}
+
+	return ok(c, plan)
+}

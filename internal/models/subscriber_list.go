@@ -1,0 +1,99 @@
+// Copyright (c) 2026 Jonas Kaninda.
+//
+// This file is part of Posta.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package models
+
+import (
+	"database/sql/driver"
+	"encoding/json"
+	"time"
+)
+
+type SubscriberListType string
+
+const (
+	SubscriberListTypeStatic  SubscriberListType = "static"
+	SubscriberListTypeDynamic SubscriberListType = "dynamic"
+)
+
+type FilterRule struct {
+	Field    string `json:"field"`
+	Operator string `json:"operator"`
+	Value    any    `json:"value"`
+}
+
+type FilterRules []FilterRule
+
+func (fr FilterRules) Value() (driver.Value, error) {
+	if fr == nil {
+		return "[]", nil
+	}
+	return json.Marshal(fr)
+}
+
+func (fr *FilterRules) Scan(value interface{}) error {
+	if value == nil {
+		*fr = FilterRules{}
+		return nil
+	}
+	bytes, ok := value.([]byte)
+	if !ok {
+		s, ok := value.(string)
+		if !ok {
+			return nil
+		}
+		bytes = []byte(s)
+	}
+	return json.Unmarshal(bytes, fr)
+}
+
+type SubscriberList struct {
+	ID          uint               `json:"id" gorm:"primaryKey"`
+	UserID      uint               `json:"user_id" gorm:"index;not null"`
+	WorkspaceID *uint              `json:"workspace_id,omitempty" gorm:"index"`
+	Name        string             `json:"name" gorm:"not null"`
+	Description string             `json:"description"`
+	Type        SubscriberListType `json:"type" gorm:"type:varchar(10);default:'static';not null"`
+	FilterRules FilterRules        `json:"filter_rules,omitempty" gorm:"type:text"`
+	CreatedAt   time.Time          `json:"created_at"`
+	UpdatedAt   *time.Time         `json:"updated_at"`
+	User        User               `json:"-" gorm:"foreignKey:UserID"`
+}
+
+type SubscriberListMember struct {
+	ID           uint      `json:"id" gorm:"primaryKey"`
+	ListID       uint      `json:"list_id" gorm:"uniqueIndex:idx_sublist_sub;not null"`
+	SubscriberID uint      `json:"subscriber_id" gorm:"uniqueIndex:idx_sublist_sub;not null;index"`
+	CreatedAt    time.Time `json:"created_at"`
+
+	List       SubscriberList `json:"-" gorm:"foreignKey:ListID"`
+	Subscriber Subscriber     `json:"-" gorm:"foreignKey:SubscriberID"`
+}
+
+// SubscriberListUnsubscribe records that a specific subscriber has opted out
+type SubscriberListUnsubscribe struct {
+	ID             uint      `json:"id" gorm:"primaryKey"`
+	ListID         uint      `json:"list_id" gorm:"uniqueIndex:idx_listunsub_sub;not null"`
+	SubscriberID   uint      `json:"subscriber_id" gorm:"uniqueIndex:idx_listunsub_sub;not null;index"`
+	Reason         string    `json:"reason" gorm:"size:64"`
+	UnsubscribedAt time.Time `json:"unsubscribed_at"`
+
+	List       SubscriberList `json:"-" gorm:"foreignKey:ListID"`
+	Subscriber Subscriber     `json:"-" gorm:"foreignKey:SubscriberID"`
+}

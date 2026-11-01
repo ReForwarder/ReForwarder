@@ -1,0 +1,341 @@
+// Copyright (c) 2026 Jonas Kaninda.
+//
+// This file is part of Posta.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package handlers
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/goposta/posta/internal/config"
+	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/audit"
+	"github.com/goposta/posta/internal/storage/blob"
+	"github.com/goposta/posta/internal/storage/repositories"
+	"github.com/jkaninda/okapi"
+	"gorm.io/gorm"
+)
+
+type WorkspaceDataHandler struct {
+	db                 *gorm.DB
+	workspaceRepo      *repositories.WorkspaceRepository
+	templateRepo       *repositories.TemplateRepository
+	versionRepo        *repositories.TemplateVersionRepository
+	localizationRepo   *repositories.TemplateLocalizationRepository
+	stylesheetRepo     *repositories.StyleSheetRepository
+	languageRepo       *repositories.LanguageRepository
+	contactRepo        *repositories.ContactRepository
+	contactListRepo    *repositories.ContactListRepository
+	webhookRepo        *repositories.WebhookRepository
+	suppressionRepo    *repositories.SuppressionRepository
+	smtpRepo           *repositories.SMTPRepository
+	domainRepo         *repositories.DomainRepository
+	subscriberRepo     *repositories.SubscriberRepository
+	subscriberListRepo *repositories.SubscriberListRepository
+	blobStore          blob.Store
+	audit              *audit.Logger
+}
+
+// SetBlobStore lets GDPR erasure remove stored attachments and raw emails.
+func (h *WorkspaceDataHandler) SetBlobStore(bs blob.Store) { h.blobStore = bs }
+
+// SetAuditLogger records destructive data operations in the audit log.
+func (h *WorkspaceDataHandler) SetAuditLogger(l *audit.Logger) { h.audit = l }
+
+func NewWorkspaceDataHandler(
+	db *gorm.DB,
+	workspaceRepo *repositories.WorkspaceRepository,
+	templateRepo *repositories.TemplateRepository,
+	versionRepo *repositories.TemplateVersionRepository,
+	localizationRepo *repositories.TemplateLocalizationRepository,
+	stylesheetRepo *repositories.StyleSheetRepository,
+	languageRepo *repositories.LanguageRepository,
+	contactRepo *repositories.ContactRepository,
+	contactListRepo *repositories.ContactListRepository,
+	webhookRepo *repositories.WebhookRepository,
+	suppressionRepo *repositories.SuppressionRepository,
+	smtpRepo *repositories.SMTPRepository,
+	domainRepo *repositories.DomainRepository,
+	subscriberRepo *repositories.SubscriberRepository,
+	subscriberListRepo *repositories.SubscriberListRepository,
+) *WorkspaceDataHandler {
+	return &WorkspaceDataHandler{
+		db:                 db,
+		workspaceRepo:      workspaceRepo,
+		templateRepo:       templateRepo,
+		versionRepo:        versionRepo,
+		localizationRepo:   localizationRepo,
+		stylesheetRepo:     stylesheetRepo,
+		languageRepo:       languageRepo,
+		contactRepo:        contactRepo,
+		contactListRepo:    contactListRepo,
+		webhookRepo:        webhookRepo,
+		suppressionRepo:    suppressionRepo,
+		smtpRepo:           smtpRepo,
+		domainRepo:         domainRepo,
+		subscriberRepo:     subscriberRepo,
+		subscriberListRepo: subscriberListRepo,
+	}
+}
+
+type WorkspaceDataExport struct {
+	PostaVersion      string                  `json:"posta_version"`
+	ExportedAt        string                  `json:"exported_at"`
+	WorkspaceSettings ExportWorkspaceSettings `json:"workspace_settings"`
+	Templates         []TemplateExport        `json:"templates"`
+	Stylesheets       []ExportStyleSheet      `json:"stylesheets"`
+	Languages         []ExportLanguage        `json:"languages"`
+	Contacts          []ExportContact         `json:"contacts"`
+	ContactLists      []ExportContactList     `json:"contact_lists"`
+	Suppressions      []ExportSuppression     `json:"suppressions"`
+	Webhooks          []ExportWebhook         `json:"webhooks"`
+	SMTPServers       []ExportSMTPServer      `json:"smtp_servers"`
+	Domains           []ExportDomain          `json:"domains"`
+	Subscribers       []ExportSubscriber      `json:"subscribers"`
+	SubscriberLists   []ExportSubscriberList  `json:"subscriber_lists"`
+}
+
+type ImportWorkspaceDataRequest struct {
+	Body WorkspaceDataExport `json:"body"`
+}
+
+func (h *WorkspaceDataHandler) Export(c *okapi.Context) error {
+	wsID := uint(c.GetInt("workspace_id"))
+	scope := repositories.ResourceScope{WorkspaceID: &wsID}
+
+	ws, err := h.workspaceRepo.FindByID(wsID)
+	if err != nil {
+		return c.AbortNotFound("workspace not found")
+	}
+
+	templates, _, err := h.templateRepo.FindByScope(scope, "", exportLimit, 0)
+	if err != nil {
+		return c.AbortInternalServerError("failed to load templates")
+	}
+	tmplExport, err := exportTemplates(templates, h.versionRepo, h.localizationRepo)
+	if err != nil {
+		return c.AbortInternalServerError("failed to load template details")
+	}
+
+	stylesheets, _, err := h.stylesheetRepo.FindByScope(scope, exportLimit, 0)
+	if err != nil {
+		return c.AbortInternalServerError("failed to load stylesheets")
+	}
+
+	languages, _, err := h.languageRepo.FindByScope(scope, exportLimit, 0)
+	if err != nil {
+		return c.AbortInternalServerError("failed to load languages")
+	}
+
+	contacts, _, err := h.contactRepo.FindByScope(scope, "", exportLimit, 0)
+	if err != nil {
+		return c.AbortInternalServerError("failed to load contacts")
+	}
+
+	contactLists, _, err := h.contactListRepo.FindByScope(scope, exportLimit, 0)
+	if err != nil {
+		return c.AbortInternalServerError("failed to load contact lists")
+	}
+
+	suppressions, _, err := h.suppressionRepo.FindByScope(scope, exportLimit, 0)
+	if err != nil {
+		return c.AbortInternalServerError("failed to load suppressions")
+	}
+
+	webhooks, _, err := h.webhookRepo.FindByScope(scope, exportLimit, 0)
+	if err != nil {
+		return c.AbortInternalServerError("failed to load webhooks")
+	}
+
+	smtpServers, _, err := h.smtpRepo.FindByScope(scope, exportLimit, 0)
+	if err != nil {
+		return c.AbortInternalServerError("failed to load SMTP servers")
+	}
+
+	domains, _, err := h.domainRepo.FindByScope(scope, exportLimit, 0)
+	if err != nil {
+		return c.AbortInternalServerError("failed to load domains")
+	}
+
+	subscribers, _, err := h.subscriberRepo.FindByScope(scope, "", "", exportLimit, 0)
+	if err != nil {
+		return c.AbortInternalServerError("failed to load subscribers")
+	}
+
+	subscriberLists, _, err := h.subscriberListRepo.FindByScope(scope, exportLimit, 0)
+	if err != nil {
+		return c.AbortInternalServerError("failed to load subscriber lists")
+	}
+
+	return ok(c, WorkspaceDataExport{
+		PostaVersion: config.Version,
+		ExportedAt:   time.Now().UTC().Format(time.RFC3339),
+		WorkspaceSettings: ExportWorkspaceSettings{
+			Name:            ws.Name,
+			Description:     ws.Description,
+			DefaultLanguage: ws.DefaultLanguage,
+		},
+		Templates:       tmplExport,
+		Stylesheets:     exportStylesheets(stylesheets),
+		Languages:       exportLanguages(languages),
+		Contacts:        exportContacts(contacts),
+		ContactLists:    exportContactLists(contactLists, h.db),
+		Suppressions:    exportSuppressions(suppressions),
+		Webhooks:        exportWebhooks(webhooks),
+		SMTPServers:     exportSMTPServers(smtpServers),
+		Domains:         exportDomains(domains),
+		Subscribers:     exportSubscribers(subscribers),
+		SubscriberLists: exportSubscriberLists(subscriberLists),
+	})
+}
+
+func (h *WorkspaceDataHandler) Import(c *okapi.Context, req *ImportWorkspaceDataRequest) error {
+	if err := requireEdit(c); err != nil {
+		return c.AbortForbidden("Insufficient workspace permissions", err)
+	}
+	userID := uint(c.GetInt("user_id"))
+	wsID := uint(c.GetInt("workspace_id"))
+	data := req.Body
+
+	// Import workspace settings
+	if data.WorkspaceSettings.Name != "" || data.WorkspaceSettings.Description != "" || data.WorkspaceSettings.DefaultLanguage != "" {
+		ws, err := h.workspaceRepo.FindByID(wsID)
+		if err == nil {
+			if data.WorkspaceSettings.Name != "" {
+				ws.Name = data.WorkspaceSettings.Name
+			}
+			if data.WorkspaceSettings.Description != "" {
+				ws.Description = data.WorkspaceSettings.Description
+			}
+			if data.WorkspaceSettings.DefaultLanguage != "" {
+				ws.DefaultLanguage = data.WorkspaceSettings.DefaultLanguage
+			}
+			ws.UpdatedAt = time.Now()
+			_ = h.workspaceRepo.Update(ws)
+		}
+	}
+
+	var total int
+	total += importLanguages(data.Languages, userID, &wsID, h.languageRepo)
+	total += importStylesheets(data.Stylesheets, userID, &wsID, h.stylesheetRepo)
+	total += importTemplates(data.Templates, userID, &wsID, h.templateRepo, h.versionRepo, h.localizationRepo, h.stylesheetRepo)
+	total += importContacts(data.Contacts, userID, &wsID, h.db)
+	total += importContactLists(data.ContactLists, userID, &wsID, h.db)
+	total += importSuppressions(data.Suppressions, userID, &wsID, h.suppressionRepo)
+	total += importWebhooks(data.Webhooks, userID, &wsID, h.db)
+	total += importSMTPServers(data.SMTPServers, userID, &wsID, h.db)
+	total += importDomains(data.Domains, userID, &wsID, h.db)
+	total += importSubscribers(data.Subscribers, userID, &wsID, h.db)
+	total += importSubscriberLists(data.SubscriberLists, userID, &wsID, h.db)
+
+	return ok(c, map[string]any{
+		"message":        "Workspace data imported successfully",
+		"imported_count": total,
+	})
+}
+
+type GDPRDeleteContactsRequest struct {
+	Body struct {
+		Email string `json:"email"`
+	} `json:"body"`
+}
+
+type GDPRDeleteEmailLogsRequest struct {
+	Body struct {
+		OlderThanDays int `json:"older_than_days"`
+	} `json:"body"`
+}
+
+type GDPRDeleteResult struct {
+	Deleted int64  `json:"deleted"`
+	Message string `json:"message"`
+}
+
+// DeleteContacts (GDPR) removes contact data scoped to the active workspace.
+func (h *WorkspaceDataHandler) DeleteContacts(c *okapi.Context, req *GDPRDeleteContactsRequest) error {
+	wsID := uint(c.GetInt("workspace_id"))
+	if wsID == 0 {
+		return c.AbortBadRequest("workspace context required")
+	}
+	email := req.Body.Email
+
+	if email == "" {
+		result := h.db.Where("workspace_id = ?", wsID).Delete(&models.Contact{})
+		if result.Error != nil {
+			return c.AbortInternalServerError("failed to delete contacts")
+		}
+		return ok(c, GDPRDeleteResult{Deleted: result.RowsAffected, Message: "All contacts deleted"})
+	}
+
+	result := h.db.Where("workspace_id = ? AND email = ?", wsID, email).Delete(&models.Contact{})
+	if result.Error != nil {
+		return c.AbortInternalServerError("failed to delete contact")
+	}
+
+	h.db.Where("workspace_id = ? AND email = ?", wsID, email).Delete(&models.Suppression{})
+
+	var listIDs []uint
+	h.db.Model(&models.ContactList{}).Where("workspace_id = ?", wsID).Pluck("id", &listIDs)
+	if len(listIDs) > 0 {
+		h.db.Where("list_id IN ? AND email = ?", listIDs, email).Delete(&models.ContactListMember{})
+	}
+
+	return ok(c, GDPRDeleteResult{
+		Deleted: result.RowsAffected,
+		Message: fmt.Sprintf("Contact %s and associated data deleted", email),
+	})
+}
+
+// DeleteEmailLogs (GDPR) purges email logs scoped to the active workspace.
+// Mirrors UserDataHandler.DeleteEmailLogs but scopes by workspace_id.
+func (h *WorkspaceDataHandler) DeleteEmailLogs(c *okapi.Context, req *GDPRDeleteEmailLogsRequest) error {
+	wsID := uint(c.GetInt("workspace_id"))
+	if wsID == 0 {
+		return c.AbortBadRequest("workspace context required")
+	}
+
+	days := req.Body.OlderThanDays
+	if days < 0 {
+		days = 0
+	}
+
+	query := h.db.Where("workspace_id = ?", wsID)
+	if days > 0 {
+		before := time.Now().AddDate(0, 0, -days)
+		query = query.Where("created_at < ?", before)
+	}
+
+	var emailIDs []uint
+	query.Model(&models.Email{}).Pluck("id", &emailIDs)
+	if len(emailIDs) > 0 {
+		h.db.Where("email_id IN ?", emailIDs).Delete(&models.Bounce{})
+	}
+
+	result := query.Delete(&models.Email{})
+	if result.Error != nil {
+		return c.AbortInternalServerError("failed to delete email logs")
+	}
+
+	msg := "All email logs deleted"
+	if days > 0 {
+		msg = fmt.Sprintf("Email logs older than %d days deleted", days)
+	}
+
+	return ok(c, GDPRDeleteResult{Deleted: result.RowsAffected, Message: msg})
+}

@@ -1,0 +1,29 @@
+# Line-ending policy for ReForwarder.
+#
+# All text files are stored with LF in the repository. Adding this file does
+# not rewrite files already on disk — normalization applies when files are
+# added to the index or checked out.
+
+* text=auto
+
+# Shell scripts run inside Linux containers (docker/healthcheck.sh is invoked
+# by the Dockerfile HEALTHCHECK); a CRLF copy breaks with "/bin/sh^M".
+*.sh text eol=lf
+
+# Windows-only scripts keep CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets — never line-ending-normalized.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.eot binary

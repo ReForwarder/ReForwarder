@@ -1,0 +1,403 @@
+// Copyright (c) 2026 Jonas Kaninda.
+//
+// This file is part of Posta.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package routes
+
+import (
+	"net/http"
+
+	"github.com/goposta/posta/internal/dto"
+	"github.com/goposta/posta/internal/handlers"
+	"github.com/goposta/posta/internal/middlewares"
+	"github.com/goposta/posta/internal/models"
+	"github.com/jkaninda/okapi"
+)
+
+// workspaceRoutes returns route definitions for workspace management.
+func (r *Router) workspaceRoutes() []okapi.RouteDefinition {
+	// Routes that don't require workspace context (user-level)
+	userGroup := r.v1.Group("/workspaces", r.mw.jwtOnly).WithTagInfo(okapi.GroupTag{
+		Name:        tagWorkspaces,
+		Description: "Create workspaces, manage members and invitations, and configure workspace-scoped settings. Creating and listing workspaces is account-level and requires a dashboard session.",
+	})
+	userGroup.WithBearerAuth()
+
+	routes := make([]okapi.RouteDefinition, 0, 20)
+	routes = append(routes, []okapi.RouteDefinition{
+		{
+			Method:      http.MethodPost,
+			Path:        "",
+			Handler:     okapi.H(r.h.workspace.Create),
+			Group:       userGroup,
+			Middlewares: []okapi.Middleware{r.mw.verifiedEmail},
+			Summary:     "Create workspace",
+			Description: "Create a new workspace. The creator becomes the owner.",
+			Request:     &handlers.CreateWorkspaceRequest{},
+			Options: []okapi.RouteOption{
+				okapi.DocResponse(201, &dto.Response[handlers.WorkspaceResponse]{}),
+				okapi.DocErrorResponse(403, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodGet,
+			Path:        "",
+			Handler:     r.h.workspace.List,
+			Group:       userGroup,
+			Summary:     "List workspaces",
+			Description: "List all workspaces the current user is a member of",
+			Response:    &dto.Response[[]handlers.WorkspaceResponse]{},
+		},
+	}...)
+
+	// Workspace-scoped routes (require workspace context via middleware)
+	wsGroup := r.v1.Group("/workspaces/current", r.mw.auth, r.mw.workspace).WithTagInfo(okapi.GroupTag{
+		Name:        tagWorkspaces,
+		Description: descWorkspacesWithSSO,
+	})
+	wsGroup.WithBearerAuth()
+
+	routes = append(routes, []okapi.RouteDefinition{
+		{
+			Method:   http.MethodGet,
+			Path:     "",
+			Handler:  r.h.workspace.Get,
+			Group:    wsGroup,
+			Summary:  "Get current workspace",
+			Response: &dto.Response[handlers.WorkspaceResponse]{},
+			Options:  []okapi.RouteOption{workspaceHeaderRequired},
+		},
+		{
+			Method:  http.MethodPut,
+			Path:    "",
+			Handler: okapi.H(r.h.workspace.Update),
+			Group:   wsGroup,
+			Middlewares: []okapi.Middleware{
+				middlewares.RequireWorkspaceRole(models.WorkspaceRoleAdmin),
+				middlewares.RequireScope(models.ScopeAdmin),
+			},
+			Summary:     "Update workspace",
+			Description: "Update workspace name and description (admin/owner only)",
+			Request:     &handlers.UpdateWorkspaceRequest{},
+			Response:    &dto.Response[handlers.WorkspaceResponse]{},
+			Options:     []okapi.RouteOption{workspaceHeaderRequired},
+		},
+		{
+			Method:  http.MethodDelete,
+			Path:    "",
+			Handler: r.h.workspace.Delete,
+			Group:   wsGroup,
+			Middlewares: []okapi.Middleware{
+				middlewares.RequireWorkspaceRole(models.WorkspaceRoleOwner),
+				middlewares.RequireScope(models.ScopeAdmin),
+			},
+			Summary:     "Delete workspace",
+			Description: "Delete the workspace (owner only)",
+			Options: []okapi.RouteOption{
+				workspaceHeaderRequired,
+				okapi.DocResponse(204, nil),
+			},
+		},
+
+		// Members
+		{
+			Method:   http.MethodGet,
+			Path:     "/members",
+			Handler:  r.h.workspace.ListMembers,
+			Group:    wsGroup,
+			Summary:  "List workspace members",
+			Response: &dto.Response[[]handlers.WorkspaceMemberResponse]{},
+			Options:  []okapi.RouteOption{workspaceHeaderRequired},
+		},
+		{
+			Method:      http.MethodPut,
+			Path:        "/members/{member_id:int}",
+			Handler:     okapi.H(r.h.workspace.UpdateMemberRole),
+			Group:       wsGroup,
+			Middlewares: []okapi.Middleware{middlewares.RequireWorkspaceRole(models.WorkspaceRoleAdmin)},
+			Summary:     "Update member role",
+			Description: "Change a member's workspace role (admin/owner only)",
+			Request:     &handlers.UpdateMemberRoleRequest{},
+			Response:    &dto.Response[dto.MessageData]{},
+			Options: []okapi.RouteOption{
+				workspaceHeaderRequired,
+				okapi.DocPathParam("member_id", "integer", "User ID of the member"),
+			},
+		},
+		{
+			Method:      http.MethodDelete,
+			Path:        "/members/{member_id:int}",
+			Handler:     okapi.H(r.h.workspace.RemoveMember),
+			Group:       wsGroup,
+			Middlewares: []okapi.Middleware{middlewares.RequireWorkspaceRole(models.WorkspaceRoleAdmin)},
+			Summary:     "Remove member",
+			Description: "Remove a member from the workspace (admin/owner only)",
+			Options: []okapi.RouteOption{
+				workspaceHeaderRequired,
+				okapi.DocPathParam("member_id", "integer", "User ID of the member"),
+				okapi.DocResponse(204, nil),
+			},
+		},
+
+		// Invitations (workspace-scoped)
+		{
+			Method:  http.MethodPost,
+			Path:    "/invitations",
+			Handler: okapi.H(r.h.workspace.InviteMember),
+			Group:   wsGroup,
+			Middlewares: []okapi.Middleware{
+				middlewares.RequireWorkspaceRole(models.WorkspaceRoleAdmin),
+				r.mw.verifiedEmail,
+			},
+			Summary:     "Invite member",
+			Description: "Invite a user to the workspace via email (admin/owner only)",
+			Request:     &handlers.InviteMemberRequest{},
+			Options: []okapi.RouteOption{
+				workspaceHeaderRequired,
+				okapi.DocResponse(201, &dto.Response[handlers.InvitationResponse]{}),
+				okapi.DocErrorResponse(403, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodGet,
+			Path:        "/invitations",
+			Handler:     r.h.workspace.ListInvitations,
+			Group:       wsGroup,
+			Middlewares: []okapi.Middleware{middlewares.RequireWorkspaceRole(models.WorkspaceRoleAdmin)},
+			Summary:     "List pending invitations",
+			Description: "List the workspace's pending invitations (admin/owner only)",
+			Response:    &dto.Response[[]handlers.InvitationResponse]{},
+			Options:     []okapi.RouteOption{workspaceHeaderRequired},
+		},
+		{
+			Method:      http.MethodDelete,
+			Path:        "/invitations/{invitation_id}",
+			Handler:     okapi.H(r.h.workspace.DeleteInvitation),
+			Group:       wsGroup,
+			Middlewares: []okapi.Middleware{middlewares.RequireWorkspaceRole(models.WorkspaceRoleAdmin)},
+			Summary:     "Cancel invitation",
+			Description: "Revoke a pending invitation in this workspace (admin/owner only)",
+			Options: []okapi.RouteOption{
+				workspaceHeaderRequired,
+				okapi.DocPathParam("invitation_id", "integer", "Invitation ID"),
+				okapi.DocResponse(204, nil),
+			},
+		},
+
+		// Plan
+		{
+			Method:      http.MethodGet,
+			Path:        "/plan",
+			Handler:     r.h.workspace.GetPlan,
+			Group:       wsGroup,
+			Summary:     "Get workspace plan",
+			Description: "Get the effective plan and limits for the current workspace",
+			Response:    &dto.Response[models.Plan]{},
+			Options:     []okapi.RouteOption{workspaceHeaderRequired},
+		},
+
+		// Operational settings
+		{
+			Method:      http.MethodGet,
+			Path:        pathSettings,
+			Handler:     r.h.workspaceSetting.GetSettings,
+			Group:       wsGroup,
+			Summary:     "Get workspace settings",
+			Description: "Get the operational settings for the current workspace (any member)",
+			Response:    &dto.Response[models.WorkspaceSetting]{},
+			Options:     []okapi.RouteOption{workspaceHeaderRequired},
+		},
+		{
+			Method:      http.MethodPut,
+			Path:        pathSettings,
+			Handler:     okapi.H(r.h.workspaceSetting.UpdateSettings),
+			Group:       wsGroup,
+			Middlewares: []okapi.Middleware{middlewares.RequireWorkspaceRole(models.WorkspaceRoleAdmin)},
+			Summary:     "Update workspace settings",
+			Description: "Update the operational settings for the current workspace (admin/owner only)",
+			Request:     &handlers.UpdateWorkspaceSettingsRequest{},
+			Response:    &dto.Response[models.WorkspaceSetting]{},
+			Options:     []okapi.RouteOption{workspaceHeaderRequired},
+		},
+
+		// Audit log (workspace-scoped): events WHERE workspace_id = ? AND category = 'audit'.
+		{
+			Method:      http.MethodGet,
+			Path:        "/audit-log",
+			Handler:     okapi.H(r.h.event.WorkspaceAuditLog),
+			Group:       wsGroup,
+			Middlewares: []okapi.Middleware{middlewares.RequireWorkspaceRole(models.WorkspaceRoleAdmin)},
+			Summary:     "List workspace audit log",
+			Description: "Returns the audit trail for the current workspace (admin/owner only)",
+			Request:     &handlers.ListEventsRequest{},
+			Response:    &dto.PageableResponse[models.Event]{},
+			Options:     []okapi.RouteOption{workspaceHeaderRequired},
+		},
+		{
+			Method:      http.MethodGet,
+			Path:        "/audit-log/{id:int}",
+			Handler:     okapi.H(r.h.event.WorkspaceAuditLogDetail),
+			Group:       wsGroup,
+			Middlewares: []okapi.Middleware{middlewares.RequireWorkspaceRole(models.WorkspaceRoleAdmin)},
+			Summary:     "Get workspace audit event",
+			Description: "Returns a single audit event for the current workspace (admin/owner only)",
+			Request:     &handlers.AuditEventRequest{},
+			Response:    &dto.Response[models.Event]{},
+			Options:     []okapi.RouteOption{workspaceHeaderRequired},
+		},
+
+		// Data Export/Import — a full tenant dump and a bulk overwrite, so both
+		// are admin/owner only rather than ordinary workspace content.
+		{
+			Method:  http.MethodGet,
+			Path:    "/data/export",
+			Handler: r.h.workspaceData.Export,
+			Group:   wsGroup,
+			Middlewares: []okapi.Middleware{
+				middlewares.RequireWorkspaceRole(models.WorkspaceRoleAdmin),
+				middlewares.RequireScope(models.ScopeAdmin),
+			},
+			Summary:     "Export workspace data",
+			Description: "Export all workspace data including settings, templates, stylesheets, languages, contacts, contact lists, webhooks, SMTP servers, domains, subscribers, subscriber lists, and suppressions as JSON (admin/owner only)",
+			Response:    &dto.Response[handlers.WorkspaceDataExport]{},
+			Options:     []okapi.RouteOption{workspaceHeaderRequired},
+		},
+		{
+			Method:  http.MethodPost,
+			Path:    "/data/import",
+			Handler: okapi.H(r.h.workspaceData.Import),
+			Group:   wsGroup,
+			Middlewares: []okapi.Middleware{
+				middlewares.RequireWorkspaceRole(models.WorkspaceRoleAdmin),
+				middlewares.RequireScope(models.ScopeAdmin),
+			},
+			Summary:     "Import workspace data",
+			Description: "Import workspace data from a previously exported JSON payload (admin/owner only). Duplicates are skipped. SMTP servers are imported as disabled (passwords excluded). Domains require re-verification.",
+			Request:     &handlers.ImportWorkspaceDataRequest{},
+			Response:    &dto.Response[any]{},
+			Options:     []okapi.RouteOption{workspaceHeaderRequired},
+		},
+
+		// Data Management (GDPR) — destructive, admin/owner only.
+		{
+			Method:      http.MethodPost,
+			Path:        "/gdpr/delete-contacts",
+			Handler:     okapi.H(r.h.workspaceData.DeleteContacts),
+			Group:       wsGroup,
+			Middlewares: []okapi.Middleware{middlewares.RequireWorkspaceRole(models.WorkspaceRoleAdmin)},
+			Summary:     "Delete workspace contact data (GDPR)",
+			Description: "Delete a specific contact (by email) or all contacts in the workspace, with associated suppressions and list memberships.",
+			Request:     &handlers.GDPRDeleteContactsRequest{},
+			Response:    &dto.Response[handlers.GDPRDeleteResult]{},
+			Options:     []okapi.RouteOption{workspaceHeaderRequired},
+		},
+		{
+			Method:      http.MethodPost,
+			Path:        "/gdpr/delete-email-logs",
+			Handler:     okapi.H(r.h.workspaceData.DeleteEmailLogs),
+			Group:       wsGroup,
+			Middlewares: []okapi.Middleware{middlewares.RequireWorkspaceRole(models.WorkspaceRoleAdmin)},
+			Summary:     "Delete workspace email logs (GDPR)",
+			Description: "Purge the workspace's email logs (optionally only those older than a given number of days) and their bounce records.",
+			Request:     &handlers.GDPRDeleteEmailLogsRequest{},
+			Response:    &dto.Response[handlers.GDPRDeleteResult]{},
+			Options:     []okapi.RouteOption{workspaceHeaderRequired},
+		},
+		{
+			Method:      http.MethodPost,
+			Path:        "/gdpr/delete-messages",
+			Handler:     okapi.H(r.h.workspaceData.DeleteMessages),
+			Group:       wsGroup,
+			Middlewares: []okapi.Middleware{middlewares.RequireWorkspaceRole(models.WorkspaceRoleAdmin)},
+			Summary:     "Delete a person's web form messages (GDPR)",
+			Description: "Erase every web form message submitted from an address, with its thread replies, the inbound emails those replies arrived as, and all stored attachments.",
+			Request:     &handlers.GDPRDeleteMessagesRequest{},
+			Response:    &dto.Response[handlers.GDPRDeleteResult]{},
+			Options:     []okapi.RouteOption{workspaceHeaderRequired},
+		},
+	}...)
+
+	// User-level invitation actions (no workspace context needed)
+	invGroup := r.v1.Group("/invitations", r.mw.jwtOnly).WithTagInfo(okapi.GroupTag{
+		Name:        tagWorkspaces,
+		Description: descWorkspacesWithSSO,
+	})
+	invGroup.WithBearerAuth()
+
+	routes = append(routes, []okapi.RouteDefinition{
+		{
+			Method:      http.MethodGet,
+			Path:        "",
+			Handler:     r.h.workspace.MyInvitations,
+			Group:       invGroup,
+			Summary:     "My pending invitations",
+			Description: "List all pending workspace invitations for the current user",
+			Response:    &dto.Response[[]handlers.InvitationResponse]{},
+		},
+		{
+			Method:      http.MethodPost,
+			Path:        "/accept",
+			Handler:     okapi.H(r.h.workspace.AcceptInvitation),
+			Group:       invGroup,
+			Summary:     "Accept invitation",
+			Description: "Accept a workspace invitation using the invitation token",
+			Request:     &handlers.AcceptInvitationRequest{},
+			Response:    &dto.Response[okapi.M]{},
+		},
+		{
+			Method:      http.MethodPost,
+			Path:        "/decline",
+			Handler:     okapi.H(r.h.workspace.DeclineInvitation),
+			Group:       invGroup,
+			Summary:     "Decline invitation by token",
+			Description: "Decline a workspace invitation using the invitation token",
+			Request:     &handlers.DeclineInvitationRequest{},
+			Response:    &dto.Response[okapi.M]{},
+		},
+		{
+			Method:      http.MethodPost,
+			Path:        "/{id:int}/accept",
+			Handler:     okapi.H(r.h.workspace.AcceptInvitationByID),
+			Group:       invGroup,
+			Summary:     "Accept invitation by ID",
+			Description: "Accept a workspace invitation by its ID",
+			Response:    &dto.Response[okapi.M]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Invitation ID"),
+			},
+		},
+		{
+			Method:      http.MethodPost,
+			Path:        "/{id:int}/decline",
+			Handler:     okapi.H(r.h.workspace.DeclineInvitationByID),
+			Group:       invGroup,
+			Summary:     "Decline invitation by ID",
+			Description: "Decline a workspace invitation by its ID",
+			Response:    &dto.Response[okapi.M]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Invitation ID"),
+			},
+		},
+	}...)
+
+	return routes
+}
+
+// Ignore unused imports for linting
+var _ = models.WorkspaceRoleOwner
