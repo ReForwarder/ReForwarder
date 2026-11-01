@@ -1,0 +1,755 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ReForwarder — Self-Hosted, API-First Email Platform</title>
+  <meta name="description" content="ReForwarder is a self-hosted, developer-first email platform. Send, receive, and relay through one HTTP API — your domains, your data, your deliverability." />
+  <meta name="keywords" content="self-hosted email platform, email API, sendgrid alternative" />
+  <meta name="robots" content="index,follow" />
+  <meta name="theme-color" content="#06060a" />
+  <meta name="color-scheme" content="dark" />
+
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="ReForwarder — Self-Hosted, API-First Email Platform" />
+  <meta property="og:description" content="Send, receive, and relay email through one HTTP API — your domains, your data, your deliverability." />
+  <meta property="og:image" content="/logo.png" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="ReForwarder — Self-Hosted, API-First Email Platform" />
+  <meta name="twitter:description" content="Send, receive, and relay email through one HTTP API — your domains, your data, your deliverability." />
+  <meta name="twitter:image" content="/logo.png" />
+
+  <link rel="icon" type="image/x-icon" href="data:image/x-icon;base64,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" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <style>
+    /* ReForwarder landing — brand canvas matches the auth hero (AuthLayout.vue):
+       #06060a base, white/orange radial glows, Instrument Serif display,
+       Inter body, Geist Mono technical, accent #ff801f. */
+    :root {
+      --canvas: #06060a;
+      --surface: #0a0a0c;
+      --surface-2: #0d0d10;
+      --surface-3: #101012;
+      --text: #fcfdff;
+      --text-2: rgba(252, 253, 255, 0.72);
+      --text-3: #a1a4a5;
+      --muted: #888e90;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-soft: rgba(255, 255, 255, 0.045);
+      --border-input: rgba(255, 255, 255, 0.14);
+      --accent: #ff801f;
+      --accent-strong: #e66a00;
+      --accent-glow: rgba(255, 89, 0, 0.22);
+      --btn-bg: #fcfdff;
+      --btn-fg: #000000;
+      --btn-bg-hover: #ffffff;
+      --radius: 8px;
+      --radius-md: 10px;
+      --radius-lg: 12px;
+      --radius-xl: 16px;
+      --transition: 150ms ease;
+      --transition-slow: 250ms ease;
+      --font-display: 'Instrument Serif', Georgia, 'Times New Roman', serif;
+      --font-body: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      --font-mono: 'Geist Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { overflow-x: hidden; }
+    body { overflow-x: clip; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background:
+        radial-gradient(68% 52% at 56% -4%, rgba(255, 255, 255, 0.055), transparent 55%),
+        radial-gradient(30% 34% at 2% 12%, var(--accent-glow), transparent 65%),
+        var(--canvas);
+      color: var(--text);
+      font-family: var(--font-body);
+      font-size: 16px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    ::selection { background: rgba(255, 128, 31, 0.35); color: var(--text); }
+
+    a { color: var(--accent); text-decoration: none; transition: color var(--transition); }
+    a:hover { color: var(--accent-strong); }
+
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
+    .skip-link {
+      position: absolute; left: -9999px; top: 0; z-index: 100;
+      background: var(--btn-bg); color: var(--btn-fg);
+      padding: 10px 16px; border-radius: 0 0 var(--radius) 0; font-weight: 600; font-size: 14px;
+    }
+    .skip-link:focus { left: 0; }
+
+    .container { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+    section { scroll-margin-top: 84px; }
+    section + section > .container { border-top: 1px solid var(--border-soft); }
+
+    /* ---------- Nav ---------- */
+    .nav {
+      position: sticky; top: 0; z-index: 50;
+      background: rgba(6, 6, 10, 0.82);
+      -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .nav-inner { display: flex; align-items: center; gap: 32px; height: 64px; }
+    .wordmark {
+      font-family: var(--font-display); font-size: 22px; font-weight: 400;
+      letter-spacing: -0.01em; line-height: 1; color: var(--text); white-space: nowrap;
+    }
+    .wordmark .dot { color: var(--accent); margin-left: 1px; }
+    .brand { display: inline-flex; align-items: center; gap: 10px; }
+    .brand-logo { width: 28px; height: 28px; display: block; }
+    .footer-brand { display: flex; align-items: center; gap: 9px; }
+    .footer-brand-logo { width: 24px; height: 24px; display: block; }
+    .nav-links { display: flex; align-items: center; gap: 26px; margin-left: auto; }
+    .nav-links a {
+      color: var(--text-2); font-size: 14px; font-weight: 500; transition: color var(--transition);
+    }
+    .nav-links a:hover { color: var(--text); }
+    .nav-cta { display: flex; align-items: center; gap: 14px; }
+    .nav-cta .gh {
+      color: var(--text-2); font-size: 14px; font-weight: 500;
+      display: inline-flex; align-items: center; gap: 7px;
+    }
+    .nav-cta .gh:hover { color: var(--text); }
+
+    /* ---------- Buttons ---------- */
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      padding: 10px 20px; min-height: 42px;
+      border: 1px solid transparent; border-radius: var(--radius);
+      font-family: var(--font-body); font-size: 14px; font-weight: 500; line-height: 1.4;
+      cursor: pointer; transition: all var(--transition);
+      white-space: nowrap;
+    }
+    .btn-primary { background: var(--btn-bg); color: var(--btn-fg); border-color: var(--btn-bg); }
+    .btn-primary:hover { background: var(--btn-bg-hover); border-color: var(--btn-bg-hover); color: var(--btn-fg); }
+    .btn-ghost { background: transparent; color: var(--text-2); border-color: var(--border-input); }
+    .btn-ghost:hover { background: rgba(255, 255, 255, 0.045); color: var(--text); }
+    .btn-sm { padding: 7px 14px; min-height: 34px; font-size: 13px; }
+
+    /* ---------- Hero ---------- */
+    .hero { position: relative; overflow: hidden; }
+    .hero::after {
+      content: 'R';
+      position: absolute; right: -6%; top: -18%;
+      font-family: var(--font-display); font-size: 34rem; line-height: 1;
+      color: var(--text); opacity: 0.035; pointer-events: none;
+    }
+    .hero-grid {
+      position: relative; z-index: 1;
+      display: grid; grid-template-columns: 1.04fr 0.96fr; gap: 56px; align-items: center;
+      padding: 92px 0 104px;
+    }
+    .kicker {
+      display: inline-flex; align-items: center; gap: 10px;
+      font-family: var(--font-mono); font-size: 11px; font-weight: 500;
+      letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted);
+      margin-bottom: 22px;
+    }
+    .kicker::before {
+      content: ''; width: 24px; height: 2px; border-radius: 1px;
+      background: var(--accent); box-shadow: 0 0 16px var(--accent-glow);
+    }
+    h1 {
+      font-family: var(--font-display); font-weight: 400;
+      font-size: clamp(2.7rem, 4.6vw, 4.15rem); line-height: 1.05; letter-spacing: -0.01em;
+      margin-bottom: 22px;
+    }
+    h1 em { font-style: italic; color: var(--text); }
+    .hero-sub {
+      color: var(--text-2); font-size: 17.5px; line-height: 1.65;
+      max-width: 33.5rem; margin-bottom: 30px;
+    }
+    .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 22px; }
+    .hero-proof {
+      font-family: var(--font-mono); font-size: 12px; color: var(--muted); letter-spacing: 0.02em;
+    }
+
+    /* Terminal card */
+    .term {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.65), 0 4px 12px rgba(0, 0, 0, 0.5);
+      overflow: hidden;
+    }
+    .term-bar {
+      display: flex; align-items: center; gap: 7px;
+      padding: 12px 16px; border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .term-bar i { width: 10px; height: 10px; border-radius: 50%; background: rgba(255, 255, 255, 0.13); }
+    .term-title {
+      margin-left: 8px; font-family: var(--font-mono); font-size: 11px; color: var(--muted); letter-spacing: 0.04em;
+    }
+    .term-body {
+      padding: 18px 20px 20px;
+      font-family: var(--font-mono); font-size: 12.75px; line-height: 1.75;
+      overflow-x: auto;
+    }
+    .term-body pre { margin: 0; font-family: inherit; }
+    .t-p { color: var(--accent); }
+    .t-cmd { color: var(--text); }
+    .t-ok { color: var(--accent); }
+    .t-mut { color: var(--muted); }
+    .t-dim { color: var(--text-3); }
+    .t-str { color: var(--text-2); }
+
+    /* ---------- Sections ---------- */
+    .section { padding: 100px 0; }
+    .section-head { max-width: 46rem; margin-bottom: 52px; }
+    h2 {
+      font-family: var(--font-display); font-weight: 400;
+      font-size: clamp(1.95rem, 3.2vw, 2.7rem); line-height: 1.1; letter-spacing: -0.01em;
+      margin-bottom: 14px;
+    }
+    .section-head p { color: var(--text-2); font-size: 16.5px; max-width: 56ch; }
+
+    /* Problem */
+    .pains { display: grid; grid-template-columns: repeat(3, 1fr); gap: 36px; }
+    .pain { border-top: 1px solid var(--border); padding-top: 24px; }
+    .pain-num {
+      font-family: var(--font-mono); font-size: 12px; color: var(--accent);
+      letter-spacing: 0.1em; display: block; margin-bottom: 14px;
+    }
+    .pain h3 { font-size: 17.5px; font-weight: 600; letter-spacing: -0.005em; margin-bottom: 10px; }
+    .pain p { color: var(--text-2); font-size: 15px; line-height: 1.65; }
+
+    /* Solution */
+    .benefits { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+    .benefit {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); padding: 26px;
+      transition: transform var(--transition-slow), box-shadow var(--transition-slow), border-color var(--transition-slow);
+    }
+    .benefit:hover { transform: translateY(-2px); box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45); border-color: rgba(255, 255, 255, 0.13); }
+    .benefit-icon {
+      width: 38px; height: 38px; border-radius: var(--radius-md);
+      background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.07);
+      display: flex; align-items: center; justify-content: center;
+      color: var(--accent); font-size: 17px; margin-bottom: 18px;
+    }
+    .benefit h3 { font-size: 17px; font-weight: 600; margin-bottom: 9px; letter-spacing: -0.005em; }
+    .benefit p { color: var(--text-2); font-size: 14.5px; line-height: 1.65; }
+    .benefit .detail {
+      margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-soft);
+      font-family: var(--font-mono); font-size: 12px; color: var(--text-3); line-height: 1.6;
+    }
+
+    .chips-wrap { margin-top: 56px; }
+    .chips-label {
+      font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.14em;
+      text-transform: uppercase; color: var(--muted); margin-bottom: 16px;
+    }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip {
+      font-family: var(--font-mono); font-size: 12.5px; color: var(--text-2);
+      padding: 7px 14px; border: 1px solid var(--border); border-radius: 999px;
+      background: rgba(255, 255, 255, 0.03); white-space: nowrap;
+    }
+
+    /* How it works */
+    .steps { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
+    .step {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); padding: 26px;
+    }
+    .step-num {
+      font-family: var(--font-mono); font-size: 12px; color: var(--accent);
+      letter-spacing: 0.1em; display: block; margin-bottom: 14px;
+    }
+    .step h3 { font-size: 17px; font-weight: 600; margin-bottom: 9px; letter-spacing: -0.005em; }
+    .step p { color: var(--text-2); font-size: 14.5px; line-height: 1.65; }
+    .step code.inline {
+      font-family: var(--font-mono); font-size: 12.5px; color: var(--text);
+      background: var(--surface-3); border: 1px solid var(--border);
+      border-radius: 5px; padding: 1.5px 6px; white-space: nowrap;
+    }
+    .code-block {
+      margin-top: 14px; background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 12px 14px; overflow-x: auto;
+    }
+    .code-block pre {
+      margin: 0; font-family: var(--font-mono); font-size: 12.25px; line-height: 1.7; color: var(--text);
+    }
+
+    /* Social proof */
+    .quotes { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
+    .quote-slot {
+      border: 1px dashed rgba(255, 255, 255, 0.16); border-radius: var(--radius-lg);
+      padding: 28px; background: transparent;
+    }
+    .quote-slot-label {
+      font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.14em;
+      text-transform: uppercase; color: var(--muted); display: block; margin-bottom: 16px;
+    }
+    .quote-slot p {
+      font-family: var(--font-display); font-style: italic; font-size: 19px; line-height: 1.45;
+      color: var(--text-3);
+    }
+    .proof-note { margin-top: 26px; color: var(--muted); font-size: 14px; max-width: 62ch; }
+
+    /* Pricing */
+    .price-card {
+      max-width: 620px; margin: 0 auto;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius-xl); padding: 44px 48px; text-align: center;
+    }
+    .price-figure {
+      font-family: var(--font-display); font-size: 4.6rem; line-height: 1;
+      color: var(--text); margin-bottom: 6px;
+    }
+    .price-term {
+      font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.1em;
+      text-transform: uppercase; color: var(--accent); display: block; margin-bottom: 22px;
+    }
+    .price-card > p { color: var(--text-2); font-size: 15.5px; max-width: 46ch; margin: 0 auto 8px; }
+    .price-worth {
+      margin-top: 26px; padding-top: 22px; border-top: 1px solid var(--border-soft);
+      font-family: var(--font-display); font-style: italic; font-size: 20px; color: var(--text);
+    }
+
+    .hosted-note {
+      margin-top: 26px; text-align: center;
+      font-family: var(--font-mono); font-size: 12.5px; letter-spacing: 0.02em; color: var(--muted);
+    }
+    .hosted-note a {
+      color: var(--text-2); text-decoration: underline;
+      text-decoration-color: var(--border-input); text-underline-offset: 3px;
+      transition: color var(--transition), text-decoration-color var(--transition);
+    }
+    .hosted-note a:hover { color: var(--accent); text-decoration-color: var(--accent); }
+
+    /* FAQ */
+    .faq-list { max-width: 780px; }
+    .faq-list details { border-bottom: 1px solid var(--border); }
+    .faq-list details:first-child { border-top: 1px solid var(--border); }
+    .faq-list summary {
+      list-style: none; cursor: pointer; display: flex; align-items: center; justify-content: space-between;
+      gap: 20px; padding: 20px 2px; font-size: 16.5px; font-weight: 500; color: var(--text);
+      transition: color var(--transition);
+    }
+    .faq-list summary::-webkit-details-marker { display: none; }
+    .faq-list summary:hover { color: var(--accent); }
+    .faq-list summary::after {
+      content: '+'; font-family: var(--font-mono); font-weight: 400; font-size: 19px;
+      color: var(--accent); flex: none; transition: transform var(--transition-slow);
+    }
+    .faq-list details[open] summary::after { transform: rotate(45deg); }
+    .faq-list details p { color: var(--text-2); font-size: 15px; line-height: 1.7; padding: 0 40px 22px 2px; }
+
+    /* Final CTA */
+    .cta { position: relative; overflow: hidden; }
+    .cta::before {
+      content: ''; position: absolute; inset: 0; pointer-events: none;
+      background: radial-gradient(46% 64% at 50% 108%, var(--accent-glow), transparent 70%);
+    }
+    .cta-inner { position: relative; text-align: center; max-width: 44rem; margin: 0 auto; }
+    .cta .kicker { justify-content: center; }
+    .cta h2 { font-size: clamp(2.2rem, 4vw, 3.3rem); margin-bottom: 16px; }
+    .cta p { color: var(--text-2); font-size: 16.5px; max-width: 52ch; margin: 0 auto 30px; }
+    .cta-actions { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-bottom: 22px; }
+    .cta-proof { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+
+    /* Footer */
+    footer { border-top: 1px solid var(--border-soft); padding: 56px 0 44px; }
+    .footer-grid { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 40px; }
+    .footer-tag { color: var(--text-2); font-size: 14px; margin-top: 12px; max-width: 30ch; }
+    .footer-col h4 {
+      font-family: var(--font-mono); font-size: 11px; font-weight: 500; letter-spacing: 0.14em;
+      text-transform: uppercase; color: var(--muted); margin-bottom: 14px;
+    }
+    .footer-col ul { list-style: none; }
+    .footer-col li { margin-bottom: 9px; }
+    .footer-col a { color: var(--text-2); font-size: 14px; }
+    .footer-col a:hover { color: var(--text); }
+    .footer-base {
+      margin-top: 44px; padding-top: 22px; border-top: 1px solid var(--border-soft);
+      display: flex; flex-wrap: wrap; gap: 8px 24px; justify-content: space-between;
+      color: var(--muted); font-size: 12.5px;
+    }
+    .footer-base .attr { max-width: 68ch; }
+    .footer-base a { color: var(--text-3); }
+
+    /* Entrance */
+    .fade-up { animation: fadeUp 0.55s ease both; }
+    .fade-up.d1 { animation-delay: 0.07s; }
+    .fade-up.d2 { animation-delay: 0.14s; }
+    .fade-up.d3 { animation-delay: 0.21s; }
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(12px); }
+      to { opacity: 1; transform: none; }
+    }
+
+    /* ---------- Responsive ---------- */
+    @media (max-width: 1024px) {
+      .hero-grid { grid-template-columns: 1fr; gap: 44px; padding: 68px 0 84px; }
+      .pains { grid-template-columns: 1fr; gap: 28px; }
+      .benefits { grid-template-columns: 1fr; gap: 16px; }
+      .hero::after { font-size: 24rem; top: auto; bottom: -28%; right: -12%; }
+      .footer-grid { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 760px) {
+      .nav-links { display: none; }
+      .steps { grid-template-columns: 1fr; }
+      .quotes { grid-template-columns: 1fr; }
+      .section { padding: 72px 0; }
+      .price-card { padding: 34px 26px; }
+      .hero-actions .btn { flex: 1 1 auto; }
+      .footer-grid { grid-template-columns: 1fr; gap: 30px; }
+      .faq-list details p { padding-right: 12px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="nav">
+    <div class="container nav-inner">
+      <a class="brand" href="index.html" aria-label="ReForwarder home">
+        <img class="brand-logo" src="data:image/png;base64,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" alt="" width="28" height="28" />
+        <span class="wordmark">ReForwarder<span class="dot">.</span></span>
+      </a>
+      <nav class="nav-links" aria-label="Page sections">
+        <a href="#product">Product</a>
+        <a href="#how">How it works</a>
+        <a href="#pricing">Pricing</a>
+        <a href="#faq">FAQ</a>
+        <a href="hosted.html">Hosted</a>
+      </nav>
+      <div class="nav-cta">
+        <a class="gh" href="https://github.com/ReForwarder/ReForwarder" target="_blank" rel="noopener">GitHub</a>
+        <a class="btn btn-primary btn-sm" href="#how">Deploy ReForwarder</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+
+    <!-- Hero -->
+    <section class="hero" aria-label="Introduction">
+      <div class="container hero-grid">
+        <div>
+          <p class="kicker fade-up">Self-hosted email platform</p>
+          <h1 class="fade-up d1">Email infrastructure,<br /><em>under your control.</em></h1>
+          <p class="hero-sub fade-up d2">
+            ReForwarder is a self-hosted, developer-first email platform. Send, receive, and
+            relay mail through a single HTTP API — with SMTP for the paths that need it.
+          </p>
+          <div class="hero-actions fade-up d3">
+            <a class="btn btn-primary" href="#how">Deploy ReForwarder</a>
+                </div>
+          <p class="hero-proof fade-up d3">Open source (AGPL-3.0) &nbsp;·&nbsp; Docker Compose &nbsp;·&nbsp; Go · PostgreSQL · Redis</p>
+        </div>
+        <div class="fade-up d2">
+          <div class="term" role="img" aria-label="Terminal showing ReForwarder starting with Docker Compose, then an email send request returning queued">
+            <div class="term-bar" aria-hidden="true">
+              <i></i><i></i><i></i>
+              <span class="term-title">reforwarder — compose</span>
+            </div>
+            <div class="term-body">
+<pre><span class="t-p">$</span> <span class="t-cmd">docker compose up -d</span>
+<span class="t-ok">✔</span> reforwarder-posta-1      <span class="t-mut">Started</span>
+<span class="t-ok">✔</span> reforwarder-worker-1     <span class="t-mut">Started</span>
+<span class="t-ok">✔</span> reforwarder-posta-db-1   <span class="t-mut">Started</span>
+<span class="t-ok">✔</span> reforwarder-redis-1      <span class="t-mut">Started</span>
+
+<span class="t-p">$</span> <span class="t-cmd">curl -X POST localhost:9000/api/v1/emails/send \</span>
+    <span class="t-dim">-H</span> <span class="t-str">"Authorization: Bearer psk_••••"</span> <span class="t-dim">\</span>
+    <span class="t-dim">-d</span> <span class="t-str">'{"to":"you@example.com","subject":"Hello"}'</span>
+
+{ <span class="t-str">"status"</span>: <span class="t-ok">"queued"</span> }</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Problem -->
+    <section aria-labelledby="problem-title">
+      <div class="container section">
+        <div class="section-head">
+          <p class="kicker">The problem</p>
+          <h2 id="problem-title">Your email — someone else's rules.</h2>
+          <p>Hosted email APIs price you by the message and keep the keys to your reputation.
+             Three things every growing team runs into:</p>
+        </div>
+        <div class="pains">
+          <div class="pain">
+            <span class="pain-num">01</span>
+            <h3><strong>Every send is a line item.</strong></h3>
+            <p>Password resets, receipts, campaigns — each one bills. The better your product
+               does, the bigger the invoice gets.</p>
+          </div>
+          <div class="pain">
+            <span class="pain-num">02</span>
+            <h3><strong>Your reputation lives on shared infrastructure.</strong></h3>
+            <p>You warm IPs you'll never own and share pools with strangers. One bad neighbor,
+               and your deliverability pays for it.</p>
+          </div>
+          <div class="pain">
+            <span class="pain-num">03</span>
+            <h3><strong>Your audience data is a hostage.</strong></h3>
+            <p>Subscribers, engagement history, suppression lists — exported as CSVs on request,
+               stored on someone else's terms.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Solution -->
+    <section id="product" aria-labelledby="product-title">
+      <div class="container section">
+        <div class="section-head">
+          <p class="kicker">The alternative</p>
+          <h2 id="product-title">Bring the platform in-house.</h2>
+          <p>ReForwarder is the whole stack — the API, the pipeline, the database — running on
+             hardware you own, behind domains you control.</p>
+        </div>
+        <div class="benefits">
+          <div class="benefit">
+            <div class="benefit-icon" aria-hidden="true">⇄</div>
+            <h3>One API, every path</h3>
+            <p>Send transactional email, run Campaigns, receive inbound mail, and relay legacy
+               SMTP clients — all through one HTTP API instead of three vendors.</p>
+            <div class="detail">Official SDKs: Go · Node · PHP · Java · .NET</div>
+          </div>
+          <div class="benefit">
+            <div class="benefit-icon" aria-hidden="true">✓</div>
+            <h3>Your domains, your deliverability</h3>
+            <p>Verify your Domains once, publish SPF, DKIM, and DMARC, and route delivery
+               through SMTP Servers you choose. Reputation accrues to you — not a pool.</p>
+            <div class="detail">SPF · DKIM · DMARC — configured in the dashboard</div>
+          </div>
+          <div class="benefit">
+            <div class="benefit-icon" aria-hidden="true">◈</div>
+            <h3>Your data never leaves</h3>
+            <p>Subscribers, Contacts, Templates, and analytics live in your own PostgreSQL.
+               Export anytime — it was always your database.</p>
+            <div class="detail">CSV export · per-workspace isolation · RBAC</div>
+          </div>
+        </div>
+        <div class="chips-wrap">
+          <p class="chips-label">One dashboard, every surface</p>
+          <div class="chips">
+            <span class="chip">Emails</span>
+            <span class="chip">Campaigns</span>
+            <span class="chip">Templates</span>
+            <span class="chip">Subscribers</span>
+            <span class="chip">Inbound Emails</span>
+            <span class="chip">Forms</span>
+            <span class="chip">Domains</span>
+            <span class="chip">SMTP Relay</span>
+            <span class="chip">API Keys</span>
+            <span class="chip">Webhooks</span>
+            <span class="chip">Analytics</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- How it works -->
+    <section id="how" aria-labelledby="how-title">
+      <div class="container section">
+        <div class="section-head">
+          <p class="kicker">Zero to first send</p>
+          <h2 id="how-title">Running it takes minutes, not migrations.</h2>
+          <p>No sales call, no provisioning wait. The stack starts on your machine and the
+             dashboard comes up with it.</p>
+        </div>
+        <div class="steps">
+          <div class="step">
+            <span class="step-num">STEP 01</span>
+            <h3>Start the stack</h3>
+            <p>One Docker Compose command brings up the API, dashboard, worker, PostgreSQL,
+               and Redis. The dashboard answers on port 9000.</p>
+            <div class="code-block">
+<pre>$ docker compose up -d</pre>
+            </div>
+          </div>
+          <div class="step">
+            <span class="step-num">STEP 02</span>
+            <h3>Verify a domain</h3>
+            <p>Add your sending domain and publish the SPF, DKIM, and DMARC records the
+               dashboard shows you. Mail from your domain, authenticated by your records.</p>
+          </div>
+          <div class="step">
+            <span class="step-num">STEP 03</span>
+            <h3>Attach an SMTP route</h3>
+            <p>Connect any SMTP server — your own MTA or a provider you already trust — and
+               delivery flows through your pipeline, under your throttles.</p>
+          </div>
+          <div class="step">
+            <span class="step-num">STEP 04</span>
+            <h3>Send your first email</h3>
+            <p>Create an <code class="inline">API Key</code> and make one call to
+               <code class="inline">/api/v1/emails/send</code>. Watch it land in
+               <code class="inline">Emails</code> with full event history.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Social proof -->
+    <section aria-labelledby="proof-title">
+      <div class="container section">
+        <div class="section-head">
+          <p class="kicker">Field notes</p>
+          <h2 id="proof-title">Proof, as it arrives.</h2>
+          <p>ReForwarder is young. These slots fill with real deployment stories as the first
+             production installs report back — no invented quotes.</p>
+        </div>
+        <div class="quotes">
+          <div class="quote-slot">
+            <span class="quote-slot-label">Slot 01 — platform engineer</span>
+            <p>[ Quote from a platform engineer: hours of deliverability triage saved per
+               week, and what they ran before. ]</p>
+          </div>
+          <div class="quote-slot">
+            <span class="quote-slot-label">Slot 02 — indie founder</span>
+            <p>[ Quote from an indie founder: monthly email spend before and after
+               self-hosting, and what surprised them. ]</p>
+          </div>
+        </div>
+        <p class="proof-note">The engine behind it isn't new: ReForwarder is a distribution of
+           Posta, the open-source email platform by Jonas Kaninda — battle-tested,
+           AGPL-licensed, and fully attributed.</p>
+      </div>
+    </section>
+
+    <!-- Pricing -->
+    <section id="pricing" aria-labelledby="pricing-title">
+      <div class="container section">
+        <div class="section-head">
+          <p class="kicker">Pricing</p>
+          <h2 id="pricing-title">Free. As in software.</h2>
+        </div>
+        <div class="price-card">
+          <div class="price-figure">$0</div>
+          <span class="price-term">AGPL-3.0 · self-hosted forever</span>
+          <p>The complete platform — outbound, inbound, relay, campaigns — with no paid tiers
+             and no feature gates. You cover your own infrastructure.</p>
+          <p>Your real costs: a server, a domain, and whatever SMTP route delivery takes.</p>
+          <div class="price-worth">If you send 100,000 emails a month, that's 100,000 emails you're not renting.</div>
+        </div>
+        <p class="hosted-note">
+          Prefer managed? A <a href="hosted.html">hosted ReForwarder</a> is coming soon.
+        </p>
+      </div>
+    </section>
+
+    <!-- FAQ -->
+    <section id="faq" aria-labelledby="faq-title">
+      <div class="container section">
+        <div class="section-head">
+          <p class="kicker">FAQ</p>
+          <h2 id="faq-title">Fair questions.</h2>
+        </div>
+        <div class="faq-list">
+          <details>
+            <summary>Is ReForwarder really free?</summary>
+            <p>Yes — AGPL-3.0-or-later, no paid tiers or feature gates. You cover your own
+               infrastructure. If you modify it and offer it as a network service, the license
+               asks you to share your modified source.</p>
+          </details>
+          <details>
+            <summary>What do I need to run it?</summary>
+            <p>A machine with Docker Compose, a domain you control, and an SMTP route for
+               delivery — your own mail server or any provider. PostgreSQL and Redis ship in
+               the Compose file, and the dashboard lives at <code class="inline">localhost:9000</code>
+               out of the box.</p>
+          </details>
+          <details>
+            <summary>How is this different from SendGrid or Mailgun?</summary>
+            <p>They're hosted services that bill per message and keep your data and reputation
+               on their infrastructure. ReForwarder is the same kind of platform running on
+               your hardware — one HTTP API instead of a dashboard you rent.</p>
+          </details>
+          <details>
+            <summary>Can I migrate from my current provider gradually?</summary>
+            <p>Yes. Point existing SMTP clients at the built-in relay — no code changes — and
+               move API calls over endpoint by endpoint. Your domains just need their DNS
+               records pointed at your setup.</p>
+          </details>
+          <details>
+            <summary>Where does my data actually live?</summary>
+            <p>In your PostgreSQL, on your disks. API keys are stored hashed, accounts support
+               two-factor authentication, workspaces enforce role-based access, and every
+               administrative action lands in the audit log. Email content never leaves your
+               infrastructure — the only outside call is a version update check.</p>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <!-- Final CTA -->
+    <section class="cta" aria-labelledby="cta-title">
+      <div class="container section">
+        <div class="cta-inner">
+          <p class="kicker">Ready when you are</p>
+          <h2 id="cta-title">The next invoice is optional.</h2>
+          <p>One command starts the stack. Your domains, your data, your deliverability —
+             from the first send.</p>
+          <div class="cta-actions">
+            <a class="btn btn-primary" href="#how">Deploy ReForwarder</a>
+          </div>
+          <p class="cta-proof">No per-email fees · No contact limits · AGPL-3.0 — free to run</p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer>
+    <div class="container">
+      <div class="footer-grid">
+        <div>
+          <div class="footer-brand">
+            <img class="footer-brand-logo" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAYAAADimHc4AAAWuUlEQVR42u1dCXRT1da+J+nA0DKPKjI8RQZ56EKhIB3QhUw/g4rK9HgyWGVQ2vBbfU/9RRAKlRYEH6ILKogiWiiK8OMPglBaA7QUSgcoLbUZSqc0adokTXLPOfnXvs1Nb5KbNgXeWk1fNuusTDch3fvs6dt7nzCMn/zkJz/5yU9+8pOf/OQnP/nJT36y09ChQ4PGjRsXEhYWFjo+LCx0woQJoeHh4SGwIiIi+PudIyIi+BUiXOHh4aETJ04MtV/vukIjIiK6TJo0KTQqMirU/jg0MiIyJCoiir9G9HNhRUZGhsKC+5MnTw5esmSJJDo6Gq1atQrNmzePGT16NCOVSn1bAG+tWjXs6tWr+4qKitKKi4vTS0pKLpSWlqYpYCkUFxQKxXmlUnlWpVSeVSpV55RK5XmVfSmVyjSlUpluXxfgsUqpguf5Bc9n8NeolMoMlVLVeJ1KdUGlVKWplMrfVUrV7433VfB55+wrzf56mlKhgMcniouKDxQUFHySc+XKvNxLl4akp6cHzZo1CwUHB/uuAOLi4iRnzpyZXFNTU4wxtlJKWViEUEwIwZRSTCnBlFBMCcGEEu55wXIlLLI4ooQ6rmn83MblfK3zYyp4jJuet9TX198qKSk5mJ6evmrDhg1/iYmJkS5fvhz169fPtwTQt29fZuzYsejjj9aNVavVJyilVsEfTSilHOPg1pUEDKWCJXxeKBba+CncJ1GO7J/c9F77Sy6f4HjUJE7+vfAKrq+vL6mqrDp8PTdv6e4vdnceM2aM72nCkCFDmI0bNz5QWlp6EDSB37eU56kXCxPMLV4QAgZSoQCE7xE+x+ka/zyl7v+H/TMc7xOKChPCWllTfn7Bd4d/Pjxh/IQw33MOPXv2ZN59990+ZWVlZ5q2Lf+nNjHMW4G4LspvfC+vFTLe6TX7Z9godRII/7rRaCo/e+bMivHjx0t8zkl36dKF+fjjdY+r1eqTdhtMWsUsbxd2M1stC4U6axCvWe7aRanFbNFdyczc+o5M1n/8+PHIp4TQv39/ZtOmTQPK75SftCt5o3Hmd5srIygV2HdxM+MkKOz0PO9EuMc2Yrs3LWvSViC2srLy/DfffDMmLCwMde3a1XeE8PDDDzPJycmjjUajQsxs0Ls0QSKfQVycbiu1jbp9H+oSMVRUVMiPHz8+ZtKkSb6jCWA7hw0bJsnKzPwn7CRe1V0Y6BwV0aZoyTVq4lksMGmOx3CtTRBtibzX7f/2pF2CIMDp/zAYDNl79+4d0atXL9/RgsDAQGbdunUDVSr1z4Z6w2WT0ZRpbmiAddlkMl0yGAwXjSbTRZPJJNdUa9J1Ol1aeXl5mlqlOq9Wqc9XV1enmS3mCyaL6QLG+A+M8RWM8TXM4myWZTNYlv2dZdlzLMumE4zlhJAsQkgBIURFCKmDeJ8QyEkI8WTePPoV7NAGQomNk41arT62adOmnp06dfIdIQwYMADt3Pl55+8Ofddt/4/7ul2/fr3bn0VF3RQKRdfs7OwutXW1XfV6fZfbxbdDVSpVSG5ubkhWVha3ioqKQgwNhtC6hrpQQkhXQkgvQkhfjHFvlmW7Wa3WUJZlu1gslu6EkJ6U0j6U0ocppSO0Wu1Uq9UK2neYEKIV5gxUzOy4mkXeMVOBg8bEcvr06aVDhw5FPqUFoaGhTI8ePRhIcMaOHcs8+eSTzLPPPsvEx8ejmpoaZLPZvF0Sm80mbWEFCFYgoaSjwWCYU19fn0YIsXobdbn7qEYzptVqr+3evXtQWFhY27H1wGC4BWa3hkAo+/fvR3K5HP3888/o3Llz3gjA0/IoFKvVGlBTo3mwpKRkCyHEIBYaUw9O3jU8BX9WUFDwj7Vr10pa+/f+W6hjx45MVFQUEx4eziVid0NgU0GAjz/+OHPq1ClkNBq5dZfCkHp6raqqqpPJaFxBCKn2JmISy7ThvtFovLVv374hsPHaBM2fPx+NGjWKudcIISAggIFYe9GiRcyXX36Jfv31V3To0CFktVpbqw3NLBpEKFkPO1kARTgzHDvjS045SuObcEZGRvSwYcPaCCDXqxfTs3t3joH3gwAe7tChA/PYY48xkydPZvLz8xHGGNXX17tqxt0IQWowGPrV1dWdJc3kDsKkUYgz8blHaWnp/ujo6LYBVXSSSpng+/RFhg8fzvkU0ITVq1ejr7/+GhFCkFKpRGq1Gmm1WlRbW+utWRJ9nlIq1ev1c8Ef8JCV50QNAELha40y0Ov1N1JSUro9+uij7ae6BowHPwDMBw1YtGgROn36NMdE0ACWZbn7RUVFrYmcRAVUW1vb02w2/9EkANwsmMdDFLwpMpkaquPjNw+BQKLdEEDaM2bMYF566SXm5ZdfZhITEzkf4MpIDz6hVYKAyMhQb9horxC0mCW7LBBb/a5du8YA7tVuaOTIkczmzZvR0aNHuZAUmP/LL794ZGR1dfXdCoPzBRjj/yKEGD3BFGI5gQAANKempk6bOXNm203KIESVSCReXw9F8pSUFHTx4kXO2YKt580OMNpisTRn/1ttinQ63UhCyB237Jd4LuYIBGA9e+bMy+np6ZJBgwa1HaYDw6Em0KdPHy6CAVvuLT333HNMbm4uKigoQGVlZaihoYETgF6vRzdu3OCyZo1G48ZQuI6/D9eCo/ZGAwghAwkhxc0VcKhLQkabiqzWtLS0eQ0NDZLt27ejNle4AUfaWgcF9j8nJwd9++23aM+ePejgwYNclgymBnICiIRa2t0QMYG2CIXSjAkaQDC+xdeJPcIU2KkGwYFzlFDz+fPnZmCMJZmZmcinUNLBgwdzDtcV0gCc6LXXXkMLFixAEAGtW7eOYzyYpJ9++onLA+6D+RFqwCiCyR1KhALw5Ijd6sim9PS08KysLLRx40bUZrLilgiYDKFmZGQkA9kzxNGgLVDAAScMcEZISAiXhD3yyCNcln3ixAmk0+laxeQWtAAEEEAxfpVg0tCUjGF7TcAdlrY1dWE0lsqsVt3BgwdHvvDCC0ybwIS8pWeeeYZZuXIlAhAOTMzrr7/OdapB6DlhwgQHsPfAAw9wSRnc7tixgzNDZrPZjcl1dXWiTOadeLNhaF39ZoIdfUfutQCn+rHd/Nh9cK1OV7pnz57eCQkJ6J133kE+IQTezAAMDeHl+vXr0Ycffoji4uIQZL0PPfQQAwuiJ6EvAX9QWFjoiIh4OAISstLSUo8CaC5E1Wg0vc1mcwbXr4U9AHPYyRFzrWW8G67V6dJ3fPZZMPwdYB59okgDWBHsaLD/Tz/9NLfjwfGCAEAo27ZtQwDCgenhYQnwA7D7IbrhmQdZMazKykpOA4SMppRyr8FzcOvJUVdXVy8BO85xH2MnR8tnxtQZEXUqgd68eWN7ZGQE6t27N+fT2iTBroAdPHDgQKZbt26crYTFw9bQVQfNsjExMZxJgt0ECwQE102fPp2BZMwVmgYGwhLu9tb4B61W20mtVv9k75TzmHi5NBMIySqXZ7wM2uoT+A4wE/IB11gZzBFkvWCGBgwYwGkF7HioLfCFHtCCY8eOcbuZ392wgOmedngLzlly586dRRwQ52hTJM6NY1g8A+adsF6vz7908eKDQ4cObfsCaMk2zpkzx5EvdO7cmdMWoQ8AgqRu8eLFzK5duzh44uTJk97E+qLOF+AHi8WicrTyivUdiVbHHP0W5pLi4jev51yT+GQP6b36EDBbUFOeMmUKV7g5cuSI1zu/qqoqkmD8J9cn7RL5YIw94z+0qRdYW1NzRq1W90hNTfXttvaW4AxPqX1QUBCXM0DmCb4ENIOPjsSWwWCQ6rS6kdVV1f9tMVuKHEEnFpod0uzO529Zq1VTXVkxA/wP+Ky2b36Y1oVmYIJgZy9evBitXbsWQecEJGUQOYFfmDlzJnRgI4VCwaGlAFMA7gOhKB8JQVQEUVNZWVnHgvz8cVVVVfEsy5a7zBo4WtxbrAVju5ViseHPwptvXpbLpcnJySgiIqL97fyVK1cyJSUlqKSkRJKRkdFTLpeP/uqrr549duzYlPT09Cm1tbVTbNQ2lVI6nVI6TafTTc3Ly5uek5Mzo6ysbLqmWjPDYrEsqqys/ECn0x3HGGswxsJES9CnKh798HVf6DEVvGbW67Tx78fFdejbp4/vjzWJ0fjx45kTJ06EVFVVza2oqNhhMBiuAgMhVrfDBQ2EULg1N3a8cbdmgl0eQxuk++SNU2xPRVrWiUsk1FSEJ9ZbhYU7k5KSugDK2+4IkhiAIuRyecfS0tLPuAKJ6PiSyNSMp4kb1+EQTJof3CBNeI/LHIL5dnHxrrUxMT18BmwTg6WbIyg9ZmZmBubk5LzNsqyxWQ5jl/El7EEOYt0O2HlCxk0DHH2IjQ9Zlq2/mp354eGUlC7gi3yWIGyE2N5TWJmQkCDJzspebLVYq122L6HCHYkpxZh4nnppzUwAJm5zZYIObdzQ0FB47cqVN8LDwwMgR/Fpmw/pOkQwYgQZ8uYt8Q/r9fpcYYTSIvNwM8Mb4ni+8IPdOt54rWFZVn/9es7uq1mZIxUKhYTHpHyamoNpQTuOnzi+GJyoU4eaSEnQlekt7XgqMpYpnMoUjukQQnRabc3RkpKSOcl79wYDIPjBBx8gn7X73tKECRNQQcGNHQ5QgC+GCJmNqcfWcQ+JE89ot5nhxpk1rkO6qra29tz5tHOf7t+3b15ZmXpUTY2mAyCus2fPZnxqFOle6IknnkBZWVf22JF20gwWLzo8IbKA+SwltIYSWkYJVVJCizDLZlRXV6WUqdWJ+fl5S+Vy+ajExMSOYBoBJAQ4AxI5gMR9avjiXgmyydu3b3/GVaXswJhYNcp117ew9CzLriSE/BUGNViWHVJeXt7t1q3CwPLyci5ThvaWH374AQHIB/Tiiy8yy5YtY9pVl5s3BMWMX4798gZmMetpcuUuhviI1WrNAwHAgIagXd0JI4JijkwmQwDseTqeALQBhALdb6ApwhYbV8TWJwn+oISEhFEmk0nlCMQ9hpnueL1YVGSPZMGkHbTZbH09CYDvJ8rLy+Nq0mIhMvgDqE+AoObOncv5BghJQTB3OwvR5nKEPXv2BObl5sVzkRB1bgl3mljE4lMsIn6DT9gshnrDPovFMlBMAFDMgSI/9PRAA5kYwRjSq6++yjUO8NUvyNzhetCa1nT9tVn68ccfYRf2UpQqUu2RY4ujpC05Yj5jpo0TkilWqzVETAOgKwM2QWsLTKC5rn1NPkuff/45qqioQKmpqSNgqBuLFEecmY1bznCxE3xhvHXr1ls6nS7IVQDQzQDJFuxm2NnQ49kubHtzBLAENGbxBP2gYGdXrFiB5H/88Rqc0cBj8K7xPxbzB06jRWLaQInVymrNZvM/KKWdXYVw7do1tHPnTnTgwAHO1LSrdnMxxwY7TthNwP/BsPt+PXky8Fr2lb+bTKYyKiRPMIPLaScekjOeAMrepNVogmvsDb4qlYprf5w4cSIzbtw4rvDjCfeBrLjdZ8bR0dGMVquV3Lx582/cOKlzPzL1NErU4hR8E7hdX1lYuHrH9u1S2PnQAsP4ydnBQXK2dOnS4MuXL79ltVq1Lhizu3/w/mAOe08nW1NRXf26Wq2WQObr57oIgRl45cVXAnMu57yLMTYInGqzI0Sir1MXVLTxs+6kpaVFwRlxYiYHAERwxv9RsIQrQdfD0dSjnYqKinbCGQ2CE1RaMU4kmjdwVFVZ+fup/zs1RGzWF4QC/sqnup7vN4HD27JlC/r+++97FBYW7oLEyqUK5m1e4MEcUWw2m+VnzpwZPWLEiP88HMhb6t69O5xD172oqGgvN93uaJJt8RgzbzAlUl9X98exY8cGA9TQLgow/y5tkK1d21+j0WTysb13Trh5LcH2U0yLim7967uD33WNjY1FCPn9sig9//zzjOJPxTiT0ZTretyY+66nzTRbuTltIIvRZDjyw6FDg0Hj/CRC0Ah7p+wOunTx0tja2trr3jplLxbvUHD5nbL/fe+9d3sA2NYugLb7SRAWwghrXV2d5MaNG88YDIZiXgDY++MtPSy+NEwtCkXJv+QZab0iIsLv23cPDmCYwX0ZNG8Og6LCIMryQQEAFn/lyhUOQmBZFoQw12KxVBAvqmS4GQCvyU84FMJaUlz4RXz8ppB7/s6dGGbBxADp+peCHk5dHjhL/pFkyak46bS46dIe4QOkqEOQDwkAcBqAD3gQrby8PCA7O3ux1WrVEJejZTx1TzgEgZ2LO85CaMSN5BnpMfdyNtzQXgyzcV7QgIL3O8UbtgYUkG0SE9mKWLwV1dd8EpBx6c0g2aoI1K+jr6Qa0CW9d+9ep3EknU4XWFBQsMxqsda7OWUsvvvFTs91OxuIEGoyGsuOHzs8feMnGyRQs1i+fLnX3zVqHMOc/Wevx/TbOp4j2yRWmiTBNBERbm2FxcCttepjybn3xqAhwb4SeC1dupRJS0tzOqSjrKysg1qt/gSadB3gaQsFneaPJWg6gb2+rq7wWrZ8otFokMAAoTffEcrGH70Z2LEiqfO3ZBtiaSLCNMnO/EREbLwAPmUITmDI9Ri0Y1I/xje8AtRhp06dykybNo3Jzs7m5gO2bt2Kfvvtty6FhYW77b9d4KglND96Sl2mIgVCaGrqwnV6XVZ5WeHjixYt9EoAT48MYNIT+0eR7YFaYL4NGJ8kITahBnyKOAGQBIY0bEHqhMlouE85ZJiSgcIOf7AThI2QLefn5+/iukidagPEm9ZF97Os7TKE30LQVJef3bljyzBvTkVZOL0D+jOp/8c0idv9hCYKmJ/ICITQqAVkK8PuegnF+HyYCnH7/Pnze1RUVHxv/wEJ6nRsPhVHTt0dsasT5w7mINVVFfLk5O1PjBg+CHnKEeBp2cKgANUnHQ5wAuBNj8AECX2B7VPuPj6yRPJFu4GxN2zYMKCysvKk63HFon7AFTvCYgMaTS2kRkPtpazLF4bPmDJV1BxBff/o5q6Bqo0h3xDO9jONu9+TADh/gPCPf5fsaDcJGxwCcvPmzYcA6XQSAqWtaux1HKkvvA8nqauVx48cSH5g9MhhogK49kMnieqjHu/jJMbJ+XL3+cWbokREcCJiDy6RRLcbAQCOD0N0uXm5kXq9vlg4lCf2KxotCoEKhcf9FBCrVtz4XrbshZ5SJHXRQIb521Qpyo7rE44/C6xpZDaEoJLGCIhjPNMkgCQJsSQGFifPDxjMtCeCQntxcbFELpdP1Wg0Be6MbQLmhCNJTae0ujLeMTFJGo+WYK03Mi9sXPji84Fi4F3cwg7B6u09tuIkSQOYGNtWhDnHyzGdIXQb4hZJklhvxwR+OOORdgbBQrMVdDmsWbMGpRw5PMFitlQIjqOHGUiPk/A2+GezuQlBWAbirsas7vql36e/tWCBG/Me6s8w618PCVF92ulrkoQsNJHB3K5PsjN+OyJkG7IW/Y8kJWY46toOZy4bHTKEqE8/9ZT08uVLaywWSy3gPI0/s8XNCLgtOAeOUmqh3H3CX8e6X4stBLMmvbbqSmryV2FPDhriJoTQEMSsXxDc72Z8h3W6LdJcvA0ZyXaJGW+T6lTrpfKTSyRxm8aivuEdmPZNIIioqGeDly17IzI2NnaWTCabJZPFzpbJZLNlMu7xTFhrZbLZ9jUTnl/buGavlcXOgSWLjZkti10zRxbz9pzYNatnx769Ymbs6ujpyxa+Mmrogw+KmpCgAIaJeAJJZvxV2v+NZ6STYiZJpy54Sjo2cjDq9peuDOror/34yU9+8pOf/OQnP/nJT37yk5/8JEL/D5On3/Zt6mKUAAAAAElFTkSuQmCC" alt="" width="24" height="24" />
+            <span class="wordmark">ReForwarder<span class="dot">.</span></span>
+          </div>
+          <p class="footer-tag">Self-hosted email — send, receive, and relay.</p>
+        </div>
+        <div class="footer-col">
+          <h4>Product</h4>
+          <ul>
+            <li><a href="#product">What it does</a></li>
+            <li><a href="#how">How it works</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h4>Project</h4>
+          <ul>
+            <li><a href="https://github.com/ReForwarder/ReForwarder" target="_blank" rel="noopener">GitHub</a></li>
+            <li><a href="https://www.gnu.org/licenses/agpl-3.0/" target="_blank" rel="noopener">AGPL-3.0 License</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-base">
+        <span class="attr">Built on <a href="https://github.com/goposta/posta" target="_blank" rel="noopener">Posta</a>,
+          the open-source email platform by Jonas Kaninda and contributors.
+          ReForwarder is a rebranded distribution under AGPL-3.0-or-later.</span>
+        <span>© 2026 ReForwarder</span>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>
