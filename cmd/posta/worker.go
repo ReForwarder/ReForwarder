@@ -33,6 +33,7 @@ import (
 	"github.com/goposta/posta/internal/services/inbound"
 	"github.com/goposta/posta/internal/services/notification"
 	"github.com/goposta/posta/internal/services/realtime"
+	"github.com/goposta/posta/internal/services/settings"
 	"github.com/goposta/posta/internal/services/tracking"
 	"github.com/goposta/posta/internal/services/workermon"
 	"github.com/goposta/posta/internal/storage/blob"
@@ -140,6 +141,7 @@ func runWorker() error {
 	campaignProducer := worker.NewProducer(cfg.Redis.AsynqRedisOpt(), cfg.WorkerMaxRetries)
 	trackingRepo := repositories.NewTrackingRepository(db)
 	trackingService := tracking.NewService(trackingRepo, cfg.AppWebURL, []byte(cfg.JWTSecret))
+	settingsProvider := settings.NewProvider(repositories.NewSettingRepository(db))
 	campaignDispatcher := newWebhookDispatcher(db, cfg)
 	campaignProcessor := worker.NewCampaignProcessor(
 		repositories.NewCampaignRepository(db),
@@ -151,6 +153,7 @@ func runWorker() error {
 		repositories.NewTemplateVersionRepository(db),
 		repositories.NewTemplateLocalizationRepository(db),
 		trackingService,
+		settingsProvider,
 		campaignProducer,
 		campaignDispatcher,
 	)

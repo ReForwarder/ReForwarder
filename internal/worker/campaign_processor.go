@@ -29,6 +29,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/email"
+	"github.com/goposta/posta/internal/services/settings"
 	"github.com/goposta/posta/internal/services/tracking"
 	"github.com/goposta/posta/internal/services/webhook"
 	"github.com/goposta/posta/internal/storage/repositories"
@@ -49,6 +50,7 @@ type CampaignProcessor struct {
 	versionRepo      *repositories.TemplateVersionRepository
 	localizationRepo *repositories.TemplateLocalizationRepository
 	trackingService  *tracking.Service
+	settingsProvider *settings.Provider
 	producer         *Producer
 	dispatcher       *webhook.Dispatcher
 }
@@ -63,6 +65,7 @@ func NewCampaignProcessor(
 	versionRepo *repositories.TemplateVersionRepository,
 	localizationRepo *repositories.TemplateLocalizationRepository,
 	trackingService *tracking.Service,
+	settingsProvider *settings.Provider,
 	producer *Producer,
 	dispatcher *webhook.Dispatcher,
 ) *CampaignProcessor {
@@ -76,6 +79,7 @@ func NewCampaignProcessor(
 		versionRepo:      versionRepo,
 		localizationRepo: localizationRepo,
 		trackingService:  trackingService,
+		settingsProvider: settingsProvider,
 		producer:         producer,
 		dispatcher:       dispatcher,
 	}
@@ -277,6 +281,14 @@ func (p *CampaignProcessor) HandleCampaignBatch(_ context.Context, t *asynq.Task
 		return fmt.Errorf("failed to resolve template content for campaign %d", campaign.ID)
 	}
 
+	// Click tracking is a global platform setting read once per batch; the
+	// provider caches it, so a change takes effect on the next batch without
+	// a restart. Open tracking and unsubscribe links are unaffected by it.
+	clickTrackingEnabled := true
+	if p.settingsProvider != nil {
+		clickTrackingEnabled = p.settingsProvider.CampaignClickTrackingEnabled()
+	}
+
 	for i := range pendingMessages {
 		msg := &pendingMessages[i]
 
@@ -338,9 +350,15 @@ func (p *CampaignProcessor) HandleCampaignBatch(_ context.Context, t *asynq.Task
 			em.TextBody = email.SubstituteSystemLinks(em.TextBody, webViewURL, unsubscribeURL)
 			em.Subject = email.SubstituteSystemLinks(em.Subject, webViewURL, unsubscribeURL)
 
-			// Rewrite links for click tracking and inject open pixel
+			// Rewrite links for click tracking, then inject the open pixel. The
+			// two are independent: with click tracking disabled the original
+			// URLs are preserved and only the open pixel is added.
 			if em.HTMLBody != "" {
-				em.HTMLBody = p.trackingService.ProcessHTML(em.HTMLBody, campaign.ID, msg.ID)
+				if clickTrackingEnabled {
+					em.HTMLBody = p.trackingService.ProcessHTML(em.HTMLBody, campaign.ID, msg.ID)
+				} else {
+					em.HTMLBody = p.trackingService.InjectOpenPixel(em.HTMLBody, msg.ID)
+				}
 			}
 			em.ListUnsubscribeURL = unsubscribeURL
 			em.ListUnsubscribePost = true
