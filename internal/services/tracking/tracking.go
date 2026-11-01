@@ -31,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/storage/repositories"
 )
 
@@ -44,10 +45,20 @@ type Service struct {
 	repo    *repositories.TrackingRepository
 	baseURL string // e.g. "https://posta.example.com"
 	hmacKey []byte
+
+	// findOrCreateLink persists the hash→URL mapping behind a click-tracking
+	// redirect. It defaults to repo.FindOrCreateLink and is a field only so
+	// tests can stub persistence without a database.
+	findOrCreateLink func(campaignID uint, originalURL, hash string) (*models.TrackedLink, error)
 }
 
 func NewService(repo *repositories.TrackingRepository, baseURL string, hmacKey []byte) *Service {
-	return &Service{repo: repo, baseURL: strings.TrimRight(baseURL, "/"), hmacKey: hmacKey}
+	return &Service{
+		repo:             repo,
+		baseURL:          strings.TrimRight(baseURL, "/"),
+		hmacKey:          hmacKey,
+		findOrCreateLink: repo.FindOrCreateLink,
+	}
 }
 
 // (?i) makes the href match case-insensitive so HREF="…" still matches.
@@ -55,14 +66,22 @@ var linkRegex = regexp.MustCompile(`(?i)href\s*=\s*["'](https?://[^"']+)["']`)
 
 // ProcessHTML rewrites links for click tracking and injects the open tracking pixel.
 func (s *Service) ProcessHTML(html string, campaignID uint, messageID uint) string {
+	html = s.RewriteLinksForClicks(html, campaignID, messageID)
+	return s.InjectOpenPixel(html, messageID)
+}
+
+// RewriteLinksForClicks rewrites http(s) links in campaign HTML to signed
+// click-tracking redirect URLs. Our own /t/ system links and non-http schemes
+// are left untouched. Campaigns sent with click tracking disabled never call
+// this, so their original URLs are preserved byte-for-byte.
+func (s *Service) RewriteLinksForClicks(html string, campaignID uint, messageID uint) string {
 	if html == "" {
 		return html
 	}
 
 	trackingPrefix := s.baseURL + "/t/"
 
-	// Rewrite links for click tracking
-	html = linkRegex.ReplaceAllStringFunc(html, func(match string) string {
+	return linkRegex.ReplaceAllStringFunc(html, func(match string) string {
 		sub := linkRegex.FindStringSubmatch(match)
 		if len(sub) < 2 {
 			return match
@@ -82,26 +101,29 @@ func (s *Service) ProcessHTML(html string, campaignID uint, messageID uint) stri
 		}
 
 		hash := hashLink(campaignID, originalURL)
-		_, err := s.repo.FindOrCreateLink(campaignID, originalURL, hash)
-		if err != nil {
+		if _, err := s.findOrCreateLink(campaignID, originalURL, hash); err != nil {
 			return match
 		}
 
 		trackedURL := s.ClickURL(messageID, hash)
 		return strings.Replace(match, originalURL, trackedURL, 1)
 	})
+}
 
-	// Inject open tracking pixel before </body>. The URL is HMAC-signed so
-	// metrics can't be inflated by a third party hitting the predictable
-	// /t/o/<msg_id> path.
-	pixel := fmt.Sprintf(`<img src="%s" width="1" height="1" alt="" style="display:none" />`, s.OpenURL(messageID))
-	if strings.Contains(html, "</body>") {
-		html = strings.Replace(html, "</body>", pixel+"</body>", 1)
-	} else {
-		html += pixel
+// InjectOpenPixel injects the open tracking pixel before </body>. The URL is
+// HMAC-signed so metrics can't be inflated by a third party hitting the
+// predictable /t/o/<msg_id> path. Open tracking is independent of click
+// tracking: campaigns sent with click tracking disabled still get the pixel.
+func (s *Service) InjectOpenPixel(html string, messageID uint) string {
+	if html == "" {
+		return html
 	}
 
-	return html
+	pixel := fmt.Sprintf(`<img src="%s" width="1" height="1" alt="" style="display:none" />`, s.OpenURL(messageID))
+	if strings.Contains(html, "</body>") {
+		return strings.Replace(html, "</body>", pixel+"</body>", 1)
+	}
+	return html + pixel
 }
 
 // OpenURL builds a signed open-tracking pixel URL.

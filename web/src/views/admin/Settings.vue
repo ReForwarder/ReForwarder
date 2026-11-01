@@ -14,6 +14,7 @@ const settings = ref<AdminSetting[]>([])
 const settingMeta: Record<string, { label: string; description: string; category: string; advanced?: boolean }> = {
   registration_enabled: { label: 'User Registration', description: 'Allow new users to self-register.', category: 'General' },
   allowed_signup_domains: { label: 'Allowed Signup Domains', description: 'Restrict registration to specific email domains (comma-separated). Leave empty to allow all.', category: 'General' },
+  campaign_click_tracking_enabled: { label: 'Campaign Click Tracking', description: 'Automatically rewrite campaign URLs to track recipient clicks. Disable this option to preserve original URLs and avoid tracking redirects.', category: 'General' },
   maintenance_mode: { label: 'Maintenance Mode', description: 'Disable all email sending and show a maintenance banner.', category: 'General' },
   require_email_verification: { label: 'Require Email Verification', description: 'New users must verify their email before sending.', category: 'Security' },
   require_domain_verification: { label: 'Require Domain Verification', description: 'Users must verify domain ownership before sending.', category: 'Security' },

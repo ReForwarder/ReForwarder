@@ -167,3 +167,11 @@ func (p *Provider) CustomHeadersEnabled() bool {
 func (p *Provider) PasswordResetEnabled() bool {
 	return p.GetBool("password_reset_enabled", false)
 }
+
+// CampaignClickTrackingEnabled controls whether campaign emails get their URLs
+// rewritten into signed click-tracking redirects. It defaults to true so that
+// installations upgraded without the key keep the existing tracking behavior.
+// Open tracking and unsubscribe links are independent of this setting.
+func (p *Provider) CampaignClickTrackingEnabled() bool {
+	return p.GetBool("campaign_click_tracking_enabled", true)
+}

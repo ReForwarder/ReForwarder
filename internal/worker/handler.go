@@ -287,12 +287,16 @@ func (h *EmailSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error
 			}
 		}
 		if campMsg != nil {
-			// Opens and clicks are rewritten together in the tracking service's
+			// Opens and clicks are independent since the global click-tracking
+			// toggle: the pixel is always injected for campaign mail, but the
+			// /t/c/ rewrite only happened when the setting was enabled at batch
+			// time. Report each flag from what the body actually contains.
 			tracked := em.HTMLBody != "" && em.ListUnsubscribeURL != ""
+			clickTracked := tracked && strings.Contains(em.HTMLBody, "/t/c/")
 			h.stamper.StampCampaign(
 				headers, em,
 				campMsg.CampaignID, campMsg.ID,
-				tracked, tracked,
+				tracked, clickTracked,
 			)
 		} else {
 			h.stamper.StampTransactional(headers, em)
