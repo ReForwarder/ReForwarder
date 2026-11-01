@@ -43,6 +43,7 @@ import (
 	planpkg "github.com/goposta/posta/internal/services/plan"
 	"github.com/goposta/posta/internal/services/ratelimit"
 	"github.com/goposta/posta/internal/services/realtime"
+	"github.com/goposta/posta/internal/services/security"
 	"github.com/goposta/posta/internal/services/seeder"
 	sessionpkg "github.com/goposta/posta/internal/services/session"
 	"github.com/goposta/posta/internal/services/settings"
@@ -66,6 +67,9 @@ import (
 type Router struct {
 	app *okapi.Okapi
 	cfg *config.Config
+	// eng is the security engine, nil when it is disabled or not wired in.
+	// Its ban middleware runs after RequestID and before every route group.
+	eng *security.Engine
 	v1  *okapi.Group
 	mw  routerMiddleware
 	h   routerHandlers
@@ -122,6 +126,7 @@ type routerHandlers struct {
 	setting          *handlers.SettingHandler
 	userSetting      *handlers.UserSettingHandler
 	workspaceSetting *handlers.WorkspaceSettingHandler
+	security         *handlers.SecurityHandler
 	session          *handlers.SessionHandler
 	cron             *handlers.CronHandler
 	oauth            *handlers.OAuthHandler
@@ -142,7 +147,7 @@ type routerHandlers struct {
 	formIngest       *handlers.FormIngestHandler
 }
 
-func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *config.Config, producer *worker.Producer, cronManager *cronpkg.Manager, blobStore blob.Store, ctx context.Context, notifier ...*notification.Service) *email.Service {
+func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *config.Config, eng *security.Engine, producer *worker.Producer, cronManager *cronpkg.Manager, blobStore blob.Store, ctx context.Context, notifier ...*notification.Service) *email.Service {
 
 	// Repositories
 	userRepo := repositories.NewUserRepository(db)
@@ -177,6 +182,17 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	// Services
 	bus := eventbus.New(eventRepo)
 	auditLogger := audit.NewLogger(bus)
+
+	// Login-failure feed: the event bus is created here, inside InitRoutes,
+	// so the feed consuming it starts here too (the engine itself is built in
+	// cmd/posta without a bus). It turns failed dashboard logins into
+	// auth-failure signals so brute force against the UI is scored by the
+	// same engine as SMTP abuse. Start blocks; run it as a background loop.
+	if eng != nil {
+		feed := security.NewFeed(bus, eng.Detect)
+		go feed.Start(ctx)
+	}
+
 	inboxService := inbox.NewService(db, notificationRepo)
 	apiKeyService := auth.NewAPIKeyService(apiKeyRepo)
 	settingsProvider := settings.NewProvider(settingRepo)
@@ -246,6 +262,7 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	r := &Router{
 		app: app,
 		cfg: cfg,
+		eng: eng,
 		v1:  app.Group("/api/v1"),
 		mw: routerMiddleware{
 			jwtAdminAuth:      jwtAdminAuth,
@@ -285,6 +302,7 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 			unsubscribeList:  handlers.NewUnsubscribeListHandler(unsubListRepo),
 			contact:          handlers.NewContactHandler(contactRepo, suppressionRepo),
 			admin:            handlers.NewAdminHandler(db, statsCache, userRepo, apiKeyRepo, emailRepo, webhookDeliveryRepo, inspector, redisClient, bus, userSeeder, cfg.EmbeddedWorker),
+			security:         handlers.NewSecurityHandler(db, eng, bus),
 			workspace:        handlers.NewWorkspaceHandler(workspaceRepo, userRepo, db),
 			server:           handlers.NewServerHandler(serverRepo, auditLogger),
 			event:            handlers.NewEventHandler(eventRepo, bus),
@@ -301,6 +319,9 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	r.h.user.SetSessionRepo(sessionRepo)
 	r.h.admin.SetSessionRepo(sessionRepo, sessionStore)
 	r.h.admin.SetMigrator(migrator)
+
+	// Security rules read/write through the settings repository
+	r.h.security.SetSettingRepo(settingRepo)
 
 	// Plans
 	r.h.plan = handlers.NewPlanHandler(planRepo, workspaceRepo, userRepo, planService, auditLogger)
@@ -556,6 +577,13 @@ func (r *Router) registerRoutes() {
 	// Request ID middleware
 	r.app.Use(okapi.RequestID())
 
+	// Security engine ban enforcement: allowlisted IPs pass, banned IPs are
+	// refused with a 403 before reaching any group, everything else is counted
+	// as a new connection. Sits after RequestID and before all route groups.
+	if r.eng != nil {
+		r.app.Use(r.eng.Middleware())
+	}
+
 	// Prometheus metrics
 	if r.cfg.MetricsEnabled {
 		r.app.Use(metrics.PrometheusMiddleware())
@@ -584,6 +612,13 @@ func (r *Router) registerRoutes() {
 	}
 	r.app.Register(r.adminSSERoutes()...)
 	r.app.Register(r.adminRoutes()...)
+
+	// Security admin routes. The SSE stream is registered before the plain
+	// security routes so a later param route can never shadow
+	// /admin/security/events/stream (see admin_sse_route_order_test.go for
+	// the convention).
+	r.app.Register(r.securitySSERoutes()...)
+	r.app.Register(r.securityRoutes()...)
 
 	// Documentation-only OpenAPI webhooks (events Posta POSTs to subscribers).
 	r.registerWebhookDocs()

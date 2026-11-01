@@ -109,6 +109,8 @@ interface NavItem {
   workspaceSubpath?: string
   /** Additional route path prefixes that should keep this item highlighted (grouped tab pages). */
   matchPaths?: string[]
+  /** Match only the exact path — for children whose parent path is their prefix. */
+  exact?: boolean
   /** Nested items shown indented under this entry. */
   children?: NavItem[]
 }
@@ -234,6 +236,19 @@ const navSections: NavSection[] = [
       { name: 'OAuth', path: '/admin/oauth', icon: 'shield' },
       { name: 'Jobs', path: '/admin/jobs', icon: 'clock' },
       { name: 'Events', path: '/admin/events', icon: 'zap' },
+      {
+        name: 'Security',
+        path: '/admin/security',
+        icon: 'shield',
+        children: [
+          // Overview shares the group's path, so it matches exactly only.
+          { name: 'Overview', path: '/admin/security', icon: 'shield', exact: true },
+          { name: 'Blocked IPs', path: '/admin/security/blocked', icon: 'alert-triangle' },
+          { name: 'Detection Events', path: '/admin/security/events', icon: 'zap' },
+          { name: 'Rules', path: '/admin/security/rules', icon: 'settings' },
+          { name: 'Allowlist', path: '/admin/security/allowlist', icon: 'user-check' },
+        ],
+      },
       { name: 'Platform Settings', path: '/admin/settings', icon: 'settings' },
     ],
   },
@@ -309,6 +324,9 @@ function isItemActive(item: NavItem): boolean {
   // not on a workspace detail/tab page.
   if (item.path === '/workspaces') return route.path === '/workspaces'
   if (item.matchPaths?.some((p) => route.path === p || route.path.startsWith(p + '/'))) return true
+  // Group children that live under their parent's path (Admin · Security)
+  // must not stay lit on their siblings' pages.
+  if (item.exact) return route.path === item.path
   return isActive(item.path)
 }
 
@@ -955,6 +973,10 @@ function getIcon(name: string): string {
 /* ─── Main wrapper ─── */
 .main-wrapper {
   flex: 1;
+  /* As a flex item of .layout, allow shrinking below the content's minimum
+     width — without this, any page whose content has a large min-content
+     (tables, grids) blows the whole layout past the mobile viewport. */
+  min-width: 0;
   margin-left: 240px;
   display: flex;
   flex-direction: column;
@@ -1606,7 +1628,9 @@ function getIcon(name: string): string {
   .main-content {
     padding: 20px 16px;
     width: 100%;
-    max-width: 100vw;
+    /* 100% not 100vw: 100vw includes the vertical-scrollbar area and makes
+       every scrolled admin page 5px wider than the viewport on mobile. */
+    max-width: 100%;
     box-sizing: border-box;
     min-width: 0;
     overflow-x: hidden;
