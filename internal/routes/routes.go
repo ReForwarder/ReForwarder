@@ -59,6 +59,7 @@ import (
 	"github.com/goposta/posta/internal/web"
 	"github.com/goposta/posta/internal/worker"
 	"github.com/hibiken/asynq"
+	"github.com/jkaninda/logger"
 	"github.com/jkaninda/okapi"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
@@ -190,7 +191,11 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	// same engine as SMTP abuse. Start blocks; run it as a background loop.
 	if eng != nil {
 		feed := security.NewFeed(bus, eng.Detect)
-		go feed.Start(ctx)
+		go func() {
+			if err := feed.Start(ctx); err != nil {
+				logger.Error("security feed stopped", "error", err)
+			}
+		}()
 	}
 
 	inboxService := inbox.NewService(db, notificationRepo)

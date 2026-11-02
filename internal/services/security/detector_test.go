@@ -157,7 +157,7 @@ func newTestDetector(t *testing.T, clock *fakeClock, store *fakeWindowStore, ban
 		now:      clock.Now,
 		failOpen: failOpen,
 		notified: newNotifyCache(notifyCacheCap),
-		limiter:  newLogThrottle(30 * time.Second),
+		limiter:  newLogThrottle(),
 	}
 }
 

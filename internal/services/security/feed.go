@@ -60,7 +60,7 @@ type Feed struct {
 
 // NewFeed returns a Feed consuming from bus and feeding det.
 func NewFeed(bus EventPublisher, det *Detector) *Feed {
-	return &Feed{bus: bus, det: det, limiter: newLogThrottle(30 * time.Second)}
+	return &Feed{bus: bus, det: det, limiter: newLogThrottle()}
 }
 
 // Start subscribes to the event bus and forwards failed logins to the

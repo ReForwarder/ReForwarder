@@ -176,7 +176,13 @@ func runServer(cli *okapicli.CLI) {
 			// login-failure feed is started by the route wiring.
 			var secEng *security.Engine
 			if cfg.SecurityEnabled {
-				secEng = security.NewEngine(res.db, res.redis, cfg, settings.NewProvider(repositories.NewSettingRepository(res.db)), nil)
+				secEng = security.NewEngine(
+					res.db,
+					res.redis,
+					cfg,
+					settings.NewProvider(repositories.NewSettingRepository(res.db)),
+					nil,
+				)
 				if err := secEng.Start(context.Background()); err != nil {
 					logger.Error("security engine initial resync failed (continuing fail-open)", "error", err)
 				}
@@ -411,7 +417,9 @@ func startInboundSMTPServer(
 // startSMTPRelayServer configures and launches the built-in SMTP Relay
 // (AUTH-gated relay) listener. Returns the server so it can be
 // gracefully shut down on exit.
-func startSMTPRelayServer(db *gorm.DB, cfg *config.Config, emailSvc *email.Service, secEng *security.Engine) (*smtp.Server, error) {
+func startSMTPRelayServer(
+	db *gorm.DB, cfg *config.Config, emailSvc *email.Service, secEng *security.Engine,
+) (*smtp.Server, error) {
 	credRepo := repositories.NewSMTPCredentialRepository(db)
 	userRepo := repositories.NewUserRepository(db)
 	backend := smtprelay.NewBackend(credRepo, userRepo, emailSvc, cfg.SMTPRelayMaxMessageSize)

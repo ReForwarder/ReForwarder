@@ -84,7 +84,7 @@ func NewPropagator(rdb *redis.Client, list *BanList, db *gorm.DB) *Propagator {
 // ...}. The payload is the affected ban row for ban/unban; allow/disallow/
 // reload carry no data the subscriber uses (see apply).
 type banMessage struct {
-	Action  string           `json:"action"`
+	Action  string          `json:"action"`
 	Payload json.RawMessage `json:"payload"`
 }
 
@@ -152,7 +152,7 @@ func (p *Propagator) Run(ctx context.Context) {
 // pub/sub channel closes.
 func (p *Propagator) subscribeLoop(ctx context.Context, reconcile <-chan time.Time) error {
 	ps := p.rdb.Subscribe(ctx, BansChannel)
-	defer ps.Close()
+	defer func() { _ = ps.Close() }()
 	msgs := ps.Channel()
 
 	for {

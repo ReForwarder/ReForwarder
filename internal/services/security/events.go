@@ -45,7 +45,7 @@ type EventRecorder struct {
 func NewEventRecorder(repo *repositories.SecurityEventRepository) *EventRecorder {
 	return &EventRecorder{
 		repo:    repo,
-		limiter: newLogThrottle(30 * time.Second),
+		limiter: newLogThrottle(),
 		now:     time.Now,
 	}
 }
@@ -147,8 +147,12 @@ type logThrottle struct {
 	max  int
 }
 
-func newLogThrottle(ttl time.Duration) *logThrottle {
-	return &logThrottle{seen: make(map[string]time.Time), ttl: ttl, max: 512}
+// logThrottleTTL is how long a repeated log line stays suppressed. Every
+// logger in the package shares it.
+const logThrottleTTL = 30 * time.Second
+
+func newLogThrottle() *logThrottle {
+	return &logThrottle{seen: make(map[string]time.Time), ttl: logThrottleTTL, max: 512}
 }
 
 // allow reports whether a log line for key should be emitted now, recording

@@ -37,8 +37,12 @@ import (
 // Ban types stored in SecurityBan.BanType.
 const (
 	BanTypeAutomatic = "automatic"
-	BanTypeManual   = "manual"
+	BanTypeManual    = "manual"
 )
+
+// CreatedBySystem marks bans placed by the detection engine rather than by
+// an administrator.
+const CreatedBySystem = "system"
 
 // BanInput describes a ban placement. IP is the address (or, for CIDR bans,
 // the network address); CIDR is set only for CIDR bans, which are placed
@@ -150,7 +154,7 @@ func (s *BanService) Ban(ctx context.Context, in BanInput) (*models.SecurityBan,
 func (s *BanService) ManualBan(ctx context.Context, in BanInput, permanent bool, durationHours int) (*models.SecurityBan, error) {
 	in.BanType = BanTypeManual
 	if in.CreatedBy == "" {
-		in.CreatedBy = "system"
+		in.CreatedBy = CreatedBySystem
 	}
 
 	var expiry *time.Time
@@ -230,7 +234,7 @@ func (s *BanService) applyBan(ctx context.Context, in BanInput, resolveExpiry fu
 		ExpiresAt:         resolveExpiry(offense),
 	}
 	if ban.CreatedBy == "" {
-		ban.CreatedBy = "system"
+		ban.CreatedBy = CreatedBySystem
 	}
 
 	if err := s.createBan(&ban); err != nil {

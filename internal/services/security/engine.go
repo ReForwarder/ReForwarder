@@ -126,7 +126,7 @@ func tierHoursFunc(loader *RulesLoader) func(offense int) int {
 // minimal embeds).
 type nullSettingsSource struct{}
 
-func (nullSettingsSource) GetInt(_ string, def int) int { return def }
+func (nullSettingsSource) GetInt(_ string, def int) int    { return def }
 func (nullSettingsSource) GetBool(_ string, def bool) bool { return def }
 
 // Enabled reports whether the security engine is switched on
