@@ -62,6 +62,11 @@ func runConstraints(db *gorm.DB) {
 		END IF;
 	END $$`)
 
+	// Email-keyed click tracking rewrites links outside campaign flows
+	// (tracked_links.campaign_id = 0 means "no campaign"), so the campaign
+	// foreign key cannot hold on that table.
+	db.Exec(`ALTER TABLE tracked_links DROP CONSTRAINT IF EXISTS fk_tracked_links_campaign`)
+
 	rebuildUniqueIndexes(db)
 
 	// Every analytics query filters one workspace over a date range and groups by
@@ -71,6 +76,15 @@ func runConstraints(db *gorm.DB) {
 		ON emails (workspace_id, created_at)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_bounces_workspace_created
 		ON bounces (workspace_id, created_at)`)
+
+	// Message history: the logs views filter one workspace over a time range,
+	// and the detail view walks one message's events in order.
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_email_events_workspace_created
+		ON email_events (workspace_id, occurred_at)`)
+	// Provider message ids are looked up exactly but are empty for direct SMTP
+	// sends, so the index only carries the populated rows.
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_emails_external_id
+		ON emails (external_id) WHERE external_id <> ''`)
 
 	// Partial unique index: at most one unresolved notification per user and
 	// condition. It is what makes a recurring condition update the existing

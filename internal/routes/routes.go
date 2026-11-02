@@ -33,6 +33,7 @@ import (
 	"github.com/goposta/posta/internal/services/auth"
 	"github.com/goposta/posta/internal/services/cache"
 	"github.com/goposta/posta/internal/services/email"
+	"github.com/goposta/posta/internal/services/emailhistory"
 	"github.com/goposta/posta/internal/services/emailverify"
 	"github.com/goposta/posta/internal/services/eventbus"
 	"github.com/goposta/posta/internal/services/inbound"
@@ -146,6 +147,7 @@ type routerHandlers struct {
 	message          *handlers.MessageHandler
 	messageFilter    *handlers.MessageFilterHandler
 	formIngest       *handlers.FormIngestHandler
+	logs             *handlers.LogsHandler
 }
 
 func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *config.Config, eng *security.Engine, producer *worker.Producer, cronManager *cronpkg.Manager, blobStore blob.Store, ctx context.Context, notifier ...*notification.Service) *email.Service {
@@ -208,6 +210,7 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	webhookDeliveryRepo := repositories.NewWebhookDeliveryRepository(db)
 	dispatcher := webhook.NewDispatcher(webhookRepo)
 	dispatcher.SetDeliveryRepo(webhookDeliveryRepo)
+	dispatcher.SetAttemptRepo(repositories.NewWebhookDeliveryAttemptRepository(db))
 	dispatcher.SetConfig(webhook.Config{
 		MaxRetries: cfg.WebhookMaxRetries,
 		Timeout:    time.Duration(cfg.WebhookTimeoutSecs) * time.Second,
@@ -231,6 +234,13 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	emailService.OnSent(metrics.IncrementEmailSent)
 	emailService.OnFailed(metrics.IncrementEmailFailed)
 	emailService.OnQueued(metrics.IncrementEmailQueued)
+
+	// Message-history recorder: every email lifecycle event (sent, failed,
+	// opened, clicked, bounced, …) flows into email_events through it. One
+	// recorder instance backs the HTTP send path, the tracking handlers and the
+	// bounce webhook here; the worker builds its own in cmd/posta/server.go.
+	logsRecorder := emailhistory.NewRecorder(db)
+	emailService.SetRecorder(logsRecorder)
 
 	// Cache
 	statsCache := cache.New(redisClient)
@@ -414,8 +424,18 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	// variables once an email's identity is known.
 	emailService.SetLinkGenerator(trackingService)
 
+	// Open/click tracking for all email: the send path rewrites links through the
+	// tracking service when the email_tracking_enabled setting allows it, and the
+	// tracking handlers turn callbacks into email_events.
+	emailService.SetTracking(trackingService, settingsProvider.EmailTrackingEnabled)
+	r.h.tracking.SetRecorder(logsRecorder)
+
 	// Bounce webhook
 	r.h.bounceWebhook = handlers.NewBounceWebhookHandler(subscriberRepo, emailRepo, campaignMessageRepo)
+	r.h.bounceWebhook.SetRecorder(logsRecorder)
+
+	// Logs (message history, webhook stores, audit)
+	r.h.logs = handlers.NewLogsHandler(db, logsRecorder, settingsProvider)
 
 	// Inbound email
 	if cfg.InboundEnabled {
@@ -603,6 +623,7 @@ func (r *Router) registerRoutes() {
 	r.app.Register(r.userRoutes()...)
 	r.app.Register(r.workspaceRoutes()...)
 	r.app.Register(r.workspaceResourceRoutes()...)
+	r.app.Register(r.logsRoutes()...)
 	r.app.Register(r.oauthRoutes()...)
 	r.app.Register(r.trackingRoutes()...)
 	r.app.Register(r.trackingAnalyticsRoutes()...)

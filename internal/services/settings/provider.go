@@ -148,6 +148,9 @@ func (p *Provider) MessageSpamRetentionDays() int {
 func (p *Provider) WebhookDeliveryRetentionDays() int {
 	return p.GetInt("webhook_delivery_retention_days", 30)
 }
+func (p *Provider) EmailEventsRetentionDays() int {
+	return p.GetInt("email_events_retention_days", 180)
+}
 func (p *Provider) TrackingEventRetentionDays() int {
 	return p.GetInt("tracking_event_retention_days", 90)
 }
@@ -168,10 +171,20 @@ func (p *Provider) PasswordResetEnabled() bool {
 	return p.GetBool("password_reset_enabled", false)
 }
 
-// CampaignClickTrackingEnabled controls whether campaign emails get their URLs
-// rewritten into signed click-tracking redirects. It defaults to true so that
-// installations upgraded without the key keep the existing tracking behavior.
-// Open tracking and unsubscribe links are independent of this setting.
+// EmailTrackingEnabled controls whether outgoing email gets its URLs rewritten
+// into signed click-tracking redirects and gets an open pixel. It replaces the
+// old campaign-only key and defaults to true so that installations upgraded
+// without the key keep the existing tracking behavior. Open tracking and
+// unsubscribe links are independent of this setting.
+func (p *Provider) EmailTrackingEnabled() bool {
+	return p.GetBool("email_tracking_enabled", true)
+}
+
+// CampaignClickTrackingEnabled is a deprecated alias for EmailTrackingEnabled,
+// which replaced it when tracking was extended to all email. Kept so existing
+// callers keep compiling until they are migrated.
+//
+// Deprecated: use EmailTrackingEnabled.
 func (p *Provider) CampaignClickTrackingEnabled() bool {
-	return p.GetBool("campaign_click_tracking_enabled", true)
+	return p.EmailTrackingEnabled()
 }

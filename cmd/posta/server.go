@@ -35,6 +35,7 @@ import (
 	"github.com/goposta/posta/internal/routes"
 	"github.com/goposta/posta/internal/services/crypto"
 	"github.com/goposta/posta/internal/services/email"
+	"github.com/goposta/posta/internal/services/emailhistory"
 	"github.com/goposta/posta/internal/services/eventbus"
 	"github.com/goposta/posta/internal/services/inbound"
 	"github.com/goposta/posta/internal/services/messages"
@@ -290,6 +291,7 @@ func newWebhookDispatcher(db *gorm.DB, cfg *config.Config) *webhook.Dispatcher {
 	whDeliveryRepo := repositories.NewWebhookDeliveryRepository(db)
 	dispatcher := webhook.NewDispatcher(webhookRepo)
 	dispatcher.SetDeliveryRepo(whDeliveryRepo)
+	dispatcher.SetAttemptRepo(repositories.NewWebhookDeliveryAttemptRepository(db))
 	dispatcher.SetConfig(webhookConfig(cfg))
 	dispatcher.OnDeliverySuccess(func() { metrics.IncrementWebhookDelivery("success") })
 	dispatcher.OnDeliveryFailed(func() { metrics.IncrementWebhookDelivery("failed") })
@@ -489,6 +491,11 @@ func startEmbeddedWorker(db *gorm.DB,
 	handler.SetBounceRepo(repositories.NewBounceRepository(db))
 	handler.SetAutoSuppress(cfg.AutoSuppressOnReject)
 	handler.SetStamper(email.NewStamper("Posta", config.Version, []byte(cfg.JWTSecret)))
+	// Message-history events (sent, failed, bounced, …) recorded by the worker
+	// path — the HTTP send path records through the routes wiring. One recorder
+	// instance backs both the send handler and the exhausted-task handler.
+	logsRecorder := emailhistory.NewRecorder(db)
+	handler.SetRecorder(logsRecorder)
 	handler.OnSent(func() {
 		metrics.IncrementEmailSent()
 		metrics.DecrementEmailQueued()
@@ -504,6 +511,7 @@ func startEmbeddedWorker(db *gorm.DB,
 			metrics.DecrementEmailQueued()
 		},
 	)
+	exhaustedHandler.SetRecorder(logsRecorder)
 
 	errorHandlers := []asynq.ErrorHandler{exhaustedHandler}
 	if cfg.InboundEnabled {
@@ -626,6 +634,9 @@ func initCronManager(
 		repositories.NewTrackingRepository(db),
 		settingsProvider,
 	)
+	retentionJob.SetEmailEventRepo(repositories.NewEmailEventRepository(db))
+	retentionJob.SetIncomingWebhookEventRepo(repositories.NewIncomingWebhookEventRepository(db))
+	retentionJob.SetWebhookDeliveryAttemptRepo(repositories.NewWebhookDeliveryAttemptRepository(db))
 	if cfg.InboundEnabled {
 		retentionJob.SetInboundEmailRepo(repositories.NewInboundEmailRepository(db))
 	}

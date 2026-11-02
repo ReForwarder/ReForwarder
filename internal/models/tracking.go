@@ -29,7 +29,9 @@ const (
 	TrackingEventUnsubscribe TrackingEventType = "unsubscribe"
 )
 
-// TrackedLink stores rewritten links for click tracking.
+// TrackedLink stores rewritten links for click tracking. CampaignID is 0 for
+// links rewritten outside campaign flows (transactional/API email), so no
+// foreign key is declared here — a DB-level FK would reject those rows.
 type TrackedLink struct {
 	ID          uint      `json:"id" gorm:"primaryKey"`
 	CampaignID  uint      `json:"campaign_id" gorm:"index;not null"`
@@ -37,8 +39,6 @@ type TrackedLink struct {
 	Hash        string    `json:"hash" gorm:"uniqueIndex;not null"`
 	ClickCount  int64     `json:"click_count" gorm:"default:0;not null"`
 	CreatedAt   time.Time `json:"created_at"`
-
-	Campaign Campaign `json:"-" gorm:"foreignKey:CampaignID"`
 }
 
 // TrackingEvent records individual open/click/unsubscribe events.

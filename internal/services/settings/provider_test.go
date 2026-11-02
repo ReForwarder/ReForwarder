@@ -30,29 +30,43 @@ func providerWith(values map[string]string) *Provider {
 	return &Provider{cache: values, cacheTTL: time.Hour, loadedAt: time.Now()}
 }
 
-func TestCampaignClickTrackingDefaultsToTrue(t *testing.T) {
+func TestEmailTrackingDefaultsToTrue(t *testing.T) {
 	// Installations upgraded without the key keep the tracking behavior.
 	p := providerWith(map[string]string{"maintenance_mode": "true"})
-	if !p.CampaignClickTrackingEnabled() {
+	if !p.EmailTrackingEnabled() {
 		t.Fatal("missing key must default to true")
 	}
 }
 
-func TestCampaignClickTrackingReadsStoredValue(t *testing.T) {
-	off := providerWith(map[string]string{"campaign_click_tracking_enabled": "false"})
-	if off.CampaignClickTrackingEnabled() {
-		t.Fatal("stored false must disable click tracking")
+func TestEmailTrackingReadsStoredValue(t *testing.T) {
+	off := providerWith(map[string]string{"email_tracking_enabled": "false"})
+	if off.EmailTrackingEnabled() {
+		t.Fatal("stored false must disable tracking")
 	}
 
-	on := providerWith(map[string]string{"campaign_click_tracking_enabled": "true"})
-	if !on.CampaignClickTrackingEnabled() {
-		t.Fatal("stored true must enable click tracking")
+	on := providerWith(map[string]string{"email_tracking_enabled": "true"})
+	if !on.EmailTrackingEnabled() {
+		t.Fatal("stored true must enable tracking")
 	}
 }
 
-func TestCampaignClickTrackingInvalidValueFallsBackToDefault(t *testing.T) {
-	p := providerWith(map[string]string{"campaign_click_tracking_enabled": "banana"})
-	if !p.CampaignClickTrackingEnabled() {
+func TestEmailTrackingInvalidValueFallsBackToDefault(t *testing.T) {
+	p := providerWith(map[string]string{"email_tracking_enabled": "banana"})
+	if !p.EmailTrackingEnabled() {
 		t.Fatal("unparseable value must fall back to the default (true)")
+	}
+}
+
+func TestCampaignClickTrackingIsAliasForEmailTracking(t *testing.T) {
+	// CampaignClickTrackingEnabled is a deprecated alias for
+	// EmailTrackingEnabled (the old key was renamed): it must return exactly
+	// what the new accessor returns.
+	off := providerWith(map[string]string{"email_tracking_enabled": "false"})
+	if off.CampaignClickTrackingEnabled() {
+		t.Fatal("alias must read the email_tracking_enabled key")
+	}
+	on := providerWith(map[string]string{"email_tracking_enabled": "true"})
+	if !on.CampaignClickTrackingEnabled() {
+		t.Fatal("alias must read the email_tracking_enabled key")
 	}
 }

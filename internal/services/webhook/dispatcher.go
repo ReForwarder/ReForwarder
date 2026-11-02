@@ -27,6 +27,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/mail"
@@ -45,6 +46,8 @@ const (
 	defaultMaxRetries    = 3
 	defaultRetryBaseWait = 2 * time.Second
 	defaultTimeout       = 10 * time.Second
+	// maxAttemptBodyBytes caps the response body kept per attempt row.
+	maxAttemptBodyBytes = 2048
 )
 
 // Config holds configurable settings for the webhook dispatcher.
@@ -60,6 +63,7 @@ type Config struct {
 type Dispatcher struct {
 	repo              *repositories.WebhookRepository
 	deliveryRepo      *repositories.WebhookDeliveryRepository
+	attemptRepo       *repositories.WebhookDeliveryAttemptRepository
 	client            *http.Client
 	maxRetries        int
 	onDeliverySuccess func()
@@ -140,6 +144,13 @@ func proxyTransport(rawURL string) (*http.Transport, error) {
 // SetDeliveryRepo sets the repository used to record delivery attempts.
 func (d *Dispatcher) SetDeliveryRepo(repo *repositories.WebhookDeliveryRepository) {
 	d.deliveryRepo = repo
+}
+
+// SetAttemptRepo sets the repository used to record the per-attempt history.
+// Without it the final delivery record is still written, but individual retry
+// attempts are not kept.
+func (d *Dispatcher) SetAttemptRepo(repo *repositories.WebhookDeliveryAttemptRepository) {
+	d.attemptRepo = repo
 }
 
 // OnDeliverySuccess sets a callback invoked after each successful webhook delivery.
@@ -265,18 +276,37 @@ func matchesFilters(filters []string, from string) bool {
 }
 
 // deliverWithRetry attempts to deliver a webhook with exponential backoff retries.
+// Every HTTP attempt — successful or not — is kept as a webhook_delivery_attempts
+// row so the delivery history shows the full retry story, not only its final
+// outcome.
 func (d *Dispatcher) deliverWithRetry(userID uint, wh models.Webhook, body []byte, event string) {
 	var lastErr string
 	var lastStatus int
+	var attempts []models.WebhookDeliveryAttempt
 
 	start := time.Now()
 
 	for attempt := 1; attempt <= d.maxRetries; attempt++ {
-		statusCode, err := d.doRequest(wh.URL, wh.Secret, body)
+		attemptedAt := time.Now().UTC()
+		statusCode, responseBody, err := d.post(wh.URL, wh.Secret, body)
 		lastStatus = statusCode
 
+		// Keep the per-attempt outcome regardless of what happens next: the
+		// rows are attached to the delivery once it exists (below).
+		recorded := models.WebhookDeliveryAttempt{
+			Attempt:      attempt,
+			StatusCode:   statusCode,
+			ResponseBody: responseBody,
+			CreatedAt:    attemptedAt,
+		}
+		if err != nil {
+			recorded.Error = err.Error()
+		}
+		attempts = append(attempts, recorded)
+
 		if err == nil && statusCode < 400 {
-			d.recordDelivery(userID, wh.ID, wh.WorkspaceID, event, models.WebhookDeliverySuccess, statusCode, "", attempt)
+			delivery := d.recordDelivery(userID, wh.ID, wh.WorkspaceID, event, models.WebhookDeliverySuccess, statusCode, "", attempt)
+			d.recordAttempts(delivery, attempts)
 			if d.onDeliverySuccess != nil {
 				d.onDeliverySuccess()
 			}
@@ -301,7 +331,8 @@ func (d *Dispatcher) deliverWithRetry(userID uint, wh models.Webhook, body []byt
 	}
 
 	// All retries exhausted
-	d.recordDelivery(userID, wh.ID, wh.WorkspaceID, event, models.WebhookDeliveryFailed, lastStatus, lastErr, d.maxRetries)
+	delivery := d.recordDelivery(userID, wh.ID, wh.WorkspaceID, event, models.WebhookDeliveryFailed, lastStatus, lastErr, d.maxRetries)
+	d.recordAttempts(delivery, attempts)
 	if d.onDeliveryFailed != nil {
 		d.onDeliveryFailed()
 	}
@@ -319,9 +350,17 @@ func signPayload(secret string, body []byte) string {
 
 // doRequest sends a single HTTP POST to the webhook URL with an HMAC signature.
 func (d *Dispatcher) doRequest(url string, secret string, body []byte) (int, error) {
+	statusCode, _, err := d.post(url, secret, body)
+	return statusCode, err
+}
+
+// post is doRequest with response capture: it returns the status code and the
+// (truncated) response body so the attempt history can keep what the endpoint
+// answered.
+func (d *Dispatcher) post(url string, secret string, body []byte) (int, string, error) {
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return 0, fmt.Errorf("failed to create request: %w", err)
+		return 0, "", fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Posta-Webhook/1.0")
@@ -331,16 +370,33 @@ func (d *Dispatcher) doRequest(url string, secret string, body []byte) (int, err
 
 	resp, err := d.client.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
-	_ = resp.Body.Close()
-	return resp.StatusCode, nil
+	defer func() { _ = resp.Body.Close() }()
+	responseBody := truncateAttemptBody(resp.Body)
+	return resp.StatusCode, responseBody, nil
 }
 
-// recordDelivery persists a webhook delivery record if the delivery repo is configured.
-func (d *Dispatcher) recordDelivery(userID, webhookID uint, workspaceID *uint, event string, status models.WebhookDeliveryStatus, httpStatus int, errMsg string, attempt int) {
+// truncateAttemptBody reads up to maxAttemptBodyBytes from the response body
+// for the attempt history.
+func truncateAttemptBody(r io.Reader) string {
+	buf := make([]byte, maxAttemptBodyBytes+1)
+	n, _ := io.ReadFull(r, buf)
+	if n <= 0 {
+		return ""
+	}
+	if n > maxAttemptBodyBytes {
+		n = maxAttemptBodyBytes
+	}
+	return string(buf[:n])
+}
+
+// recordDelivery persists a webhook delivery record if the delivery repo is
+// configured. It returns the stored delivery (nil when recording is disabled
+// or failed) so per-attempt rows can reference it.
+func (d *Dispatcher) recordDelivery(userID, webhookID uint, workspaceID *uint, event string, status models.WebhookDeliveryStatus, httpStatus int, errMsg string, attempt int) *models.WebhookDelivery {
 	if d.deliveryRepo == nil {
-		return
+		return nil
 	}
 	delivery := &models.WebhookDelivery{
 		WebhookID:      webhookID,
@@ -354,6 +410,24 @@ func (d *Dispatcher) recordDelivery(userID, webhookID uint, workspaceID *uint, e
 	}
 	if err := d.deliveryRepo.Create(delivery); err != nil {
 		logger.Error("failed to record webhook delivery", "error", err)
+		return nil
+	}
+	return delivery
+}
+
+// recordAttempts stores one webhook_delivery_attempts row per HTTP attempt.
+// The rows are buffered until the delivery exists so they can reference it;
+// attempt rows for a delivery that could not be recorded are skipped rather
+// than orphaned.
+func (d *Dispatcher) recordAttempts(delivery *models.WebhookDelivery, attempts []models.WebhookDeliveryAttempt) {
+	if d.attemptRepo == nil || delivery == nil {
+		return
+	}
+	for i := range attempts {
+		attempts[i].DeliveryID = delivery.ID
+		if err := d.attemptRepo.Create(&attempts[i]); err != nil {
+			logger.Error("failed to record webhook delivery attempt", "error", err, "delivery_id", delivery.ID, "attempt", attempts[i].Attempt)
+		}
 	}
 }
 

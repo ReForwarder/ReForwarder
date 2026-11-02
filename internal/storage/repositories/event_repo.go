@@ -142,3 +142,90 @@ func (r *EventRepository) DeleteOlderThan(before time.Time) (int64, error) {
 	result := r.db.Where("created_at < ?", before).Delete(&models.Event{})
 	return result.RowsAffected, result.Error
 }
+
+// AuditEventFilter captures the audit-log list and export filters. Empty
+// fields are ignored. A nil WorkspaceID spans the whole deployment and is
+// reserved for the admin deployment scope; the workspace scope always sets it.
+type AuditEventFilter struct {
+	Action      string
+	Outcome     string
+	Actor       string
+	TargetType  string
+	TargetID    string
+	IP          string
+	WorkspaceID *uint
+	From        *time.Time
+	To          *time.Time
+}
+
+// applyAuditFilter narrows a query to the non-empty audit filters.
+func applyAuditFilter(q *gorm.DB, f AuditEventFilter) *gorm.DB {
+	if f.Action != "" {
+		q = q.Where("type = ?", f.Action)
+	}
+	if f.Outcome != "" {
+		q = q.Where("outcome = ?", f.Outcome)
+	}
+	if f.Actor != "" {
+		q = q.Where("actor_name ILIKE ?", "%"+f.Actor+"%")
+	}
+	if f.TargetType != "" {
+		q = q.Where("target_type = ?", f.TargetType)
+	}
+	if f.TargetID != "" {
+		q = q.Where("target_id = ?", f.TargetID)
+	}
+	if f.IP != "" {
+		q = q.Where("client_ip = ?", f.IP)
+	}
+	if f.WorkspaceID != nil {
+		q = q.Where("workspace_id = ?", *f.WorkspaceID)
+	}
+	if f.From != nil {
+		q = q.Where("created_at >= ?", *f.From)
+	}
+	if f.To != nil {
+		q = q.Where("created_at < ?", *f.To)
+	}
+	return q
+}
+
+// FindFiltered returns a page of audit events matching the filter, newest
+// first, with a total count.
+func (r *EventRepository) FindFiltered(page, size int, f AuditEventFilter) ([]models.Event, int64, error) {
+	limit, offset := normalizeSecurityPage(page, size)
+
+	var events []models.Event
+	var total int64
+
+	if err := applyAuditFilter(r.db.Model(&models.Event{}), f).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	if err := applyAuditFilter(r.db, f).
+		Order("created_at DESC").
+		Limit(limit).Offset(offset).
+		Find(&events).Error; err != nil {
+		return nil, 0, err
+	}
+	return events, total, nil
+}
+
+// maxAuditExportRows caps the audit CSV export so one request cannot stream an
+// unbounded result set.
+const maxAuditExportRows = 100000
+
+// ListForExport returns up to maxRows audit events matching the filter,
+// newest first, for the CSV export stream.
+func (r *EventRepository) ListForExport(f AuditEventFilter, maxRows int) ([]models.Event, error) {
+	if maxRows <= 0 {
+		maxRows = maxAuditExportRows
+	}
+	var events []models.Event
+	if err := applyAuditFilter(r.db, f).
+		Order("created_at DESC").
+		Limit(maxRows).
+		Find(&events).Error; err != nil {
+		return nil, err
+	}
+	return events, nil
+}

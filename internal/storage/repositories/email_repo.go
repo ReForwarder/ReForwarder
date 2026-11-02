@@ -20,6 +20,8 @@
 package repositories
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/goposta/posta/internal/models"
@@ -64,6 +66,54 @@ func (r *EmailRepository) FindByUUIDWithAPIKey(uuid string) (*models.Email, erro
 		return nil, err
 	}
 	return &email, nil
+}
+
+// slimEmailColumns is the column list for message-history queries: every
+// metadata column of an email except the bodies and the attachment/header
+// blobs, so a page of rows never drags megabytes of HTML through the driver.
+// Bodies and render data are served only by the dedicated content endpoint.
+const slimEmailColumns = "id, uuid, external_id, workspace_id, user_id, api_key_id, " +
+	"sender, recipients, subject, template_name, status, error_message, retry_count, " +
+	"provider, smtp_hostname, unsubscribe_list_id, created_at, scheduled_at, sent_at, " +
+	"delivered_at, opened_at, clicked_at, bounced_at, complained_at, unsubscribed_at"
+
+// FindByUUIDSlim returns one email without its bodies or content blobs — the
+// shape the message-history detail endpoint serves. Content lives behind the
+// dedicated content endpoint so a plain Get can never leak HTML.
+func (r *EmailRepository) FindByUUIDSlim(uuid string) (*models.Email, error) {
+	var email models.Email
+	if err := r.db.Select(slimEmailColumns).Where("uuid = ?", uuid).First(&email).Error; err != nil {
+		return nil, err
+	}
+	return &email, nil
+}
+
+// emailStatusTimestampColumns whitelists the write-once lifecycle timestamp
+// columns. UPDATE statements are built only from these constants — user input
+// never reaches the column position.
+var emailStatusTimestampColumns = map[string]string{
+	"sent_at":         "sent_at",
+	"delivered_at":    "delivered_at",
+	"opened_at":       "opened_at",
+	"clicked_at":      "clicked_at",
+	"bounced_at":      "bounced_at",
+	"complained_at":   "complained_at",
+	"unsubscribed_at": "unsubscribed_at",
+}
+
+// UpdateStatusTimestamp writes a write-once lifecycle timestamp on an email
+// row: an existing value is never overwritten, so "first opened" survives
+// repeated open events even when they race. column is a timestamp name such as
+// "opened_at"; anything outside the whitelist is rejected.
+func (r *EmailRepository) UpdateStatusTimestamp(uuid, column string, t time.Time) error {
+	col, ok := emailStatusTimestampColumns[column]
+	if !ok {
+		return fmt.Errorf("email status timestamp column %q is not writable", column)
+	}
+	return r.db.Exec(
+		fmt.Sprintf("UPDATE emails SET %s = ? WHERE uuid = ? AND %s IS NULL", col, col),
+		t, uuid,
+	).Error
 }
 
 func (r *EmailRepository) FindByUserID(userID uint, limit, offset int) ([]models.Email, int64, error) {
@@ -111,6 +161,132 @@ func (r *EmailRepository) FindByScope(scope ResourceScope, limit, offset int) ([
 	return items, total, nil
 }
 
+// statusFlagColumns maps the message-history status flags to write-once
+// timestamp columns: the flag matches any email whose timestamp is set. "sent"
+// is resolved through the timestamp, not the status column, so queued-then-
+// sent mail keeps matching once it left the queue.
+var statusFlagColumns = map[string]string{
+	"sent":         "sent_at",
+	"delivered":    "delivered_at",
+	"opened":       "opened_at",
+	"clicked":      "clicked_at",
+	"bounced":      "bounced_at",
+	"complained":   "complained_at",
+	"unsubscribed": "unsubscribed_at",
+}
+
+// statusFlagValues maps the remaining message-history status flags to
+// Email.Status values.
+var statusFlagValues = map[string]models.EmailStatus{
+	"pending":    models.EmailStatusPending,
+	"queued":     models.EmailStatusQueued,
+	"processing": models.EmailStatusProcessing,
+	"failed":     models.EmailStatusFailed,
+	"suppressed": models.EmailStatusSuppressed,
+	"scheduled":  models.EmailStatusScheduled,
+}
+
+// statusFlagConds builds the OR'd predicate for the message-history status
+// flags: status=sent&status=opened matches mail that is either. Unknown flags
+// are ignored — the UI can only offer the known set.
+func statusFlagConds(flags []string) (string, []any) {
+	var conds []string
+	var args []any
+	seen := make(map[string]bool, len(flags))
+	for _, flag := range flags {
+		flag = strings.ToLower(strings.TrimSpace(flag))
+		if flag == "" || seen[flag] {
+			continue
+		}
+		seen[flag] = true
+		if col, ok := statusFlagColumns[flag]; ok {
+			conds = append(conds, col+" IS NOT NULL")
+			continue
+		}
+		if status, ok := statusFlagValues[flag]; ok {
+			conds = append(conds, "status = ?")
+			args = append(args, status)
+		}
+	}
+	return strings.Join(conds, " OR "), args
+}
+
+// applyEmailFilter narrows a query to the caller's scope and the non-empty
+// fields of an EmailFilter. Shared by the scoped list (full rows) and the
+// message-history list (slim rows) so both stay in lockstep.
+func applyEmailFilter(q *gorm.DB, scope ResourceScope, f EmailFilter) *gorm.DB {
+	q = ApplyScope(q, scope)
+	if f.Sender != "" {
+		q = q.Where("LOWER(sender) LIKE ?", likePattern(f.Sender))
+	}
+	if f.Recipient != "" {
+		q = q.Where("EXISTS (SELECT 1 FROM unnest(recipients) AS r WHERE LOWER(r) LIKE ?)",
+			likePattern(f.Recipient))
+	}
+	if f.Subject != "" {
+		q = q.Where("LOWER(subject) LIKE ?", likePattern(f.Subject))
+	}
+	if f.Text != "" {
+		pat := likePattern(f.Text)
+		q = q.Where("(LOWER(subject) LIKE ? OR EXISTS (SELECT 1 FROM unnest(recipients) AS r WHERE LOWER(r) LIKE ?))",
+			pat, pat)
+	}
+	if f.Template != "" {
+		q = q.Where("LOWER(template_name) LIKE ?", likePattern(f.Template))
+	}
+	if len(f.Providers) > 0 {
+		cond, args := likeAny("LOWER(provider)", f.Providers)
+		q = q.Where(cond, args...)
+	}
+	if len(f.Servers) > 0 {
+		cond, args := likeAny("LOWER(smtp_hostname)", f.Servers)
+		q = q.Where(cond, args...)
+	}
+	if len(f.APIKeys) > 0 {
+		cond, args := likeAny("LOWER(k.name)", f.APIKeys)
+		q = q.Where("EXISTS (SELECT 1 FROM api_keys k WHERE k.id = emails.api_key_id AND "+cond+")", args...)
+	}
+	if len(f.Statuses) > 0 {
+		q = q.Where("status IN ?", f.Statuses)
+	}
+	if len(f.StatusFlags) > 0 {
+		if cond, args := statusFlagConds(f.StatusFlags); cond != "" {
+			q = q.Where("("+cond+")", args...)
+		}
+	}
+	if f.ExternalID != "" {
+		q = q.Where("external_id = ?", f.ExternalID)
+	}
+	if f.MessageUUID != "" {
+		q = q.Where("uuid = ?", f.MessageUUID)
+	}
+	if f.ListID != nil {
+		q = q.Where("unsubscribe_list_id = ?", *f.ListID)
+	}
+	if f.BlockID != nil {
+		// Suppressions link to emails by recipient address: the message
+		// matches when any of its recipients is on that block list.
+		q = q.Where(
+			"EXISTS (SELECT 1 FROM unnest(recipients) AS r WHERE LOWER(r) IN (SELECT LOWER(email) FROM suppressions s WHERE s.list_id = ? AND s.workspace_id = emails.workspace_id))",
+			*f.BlockID,
+		)
+	}
+	if f.BroadcastID != nil {
+		// Campaign mail is linked to its campaign through campaign_messages.
+		q = q.Where("EXISTS (SELECT 1 FROM campaign_messages cm WHERE cm.campaign_id = ? AND cm.email_id = emails.id)", *f.BroadcastID)
+	}
+	if f.HasAttachment {
+		q = q.Where("attachments_json <> '' AND attachments_json <> '[]'")
+	}
+	if f.After != nil {
+		q = q.Where("created_at >= ?", *f.After)
+	}
+	if f.Before != nil {
+		q = q.Where("created_at < ?", *f.Before)
+	}
+	return q
+}
+
 // FindByScopeFiltered returns scoped emails narrowed by the given search filter.
 // sort is an optional sort key (e.g. "subject", "-sent_at"); empty/unknown keeps
 // the default newest-first order.
@@ -118,57 +294,34 @@ func (r *EmailRepository) FindByScopeFiltered(scope ResourceScope, f EmailFilter
 	var items []models.Email
 	var total int64
 
-	apply := func(q *gorm.DB) *gorm.DB {
-		q = ApplyScope(q, scope)
-		if f.Sender != "" {
-			q = q.Where("LOWER(sender) LIKE ?", likePattern(f.Sender))
-		}
-		if f.Recipient != "" {
-			q = q.Where("EXISTS (SELECT 1 FROM unnest(recipients) AS r WHERE LOWER(r) LIKE ?)",
-				likePattern(f.Recipient))
-		}
-		if f.Subject != "" {
-			q = q.Where("LOWER(subject) LIKE ?", likePattern(f.Subject))
-		}
-		if f.Text != "" {
-			pat := likePattern(f.Text)
-			q = q.Where("(LOWER(subject) LIKE ? OR EXISTS (SELECT 1 FROM unnest(recipients) AS r WHERE LOWER(r) LIKE ?))",
-				pat, pat)
-		}
-		if f.Template != "" {
-			q = q.Where("LOWER(template_name) LIKE ?", likePattern(f.Template))
-		}
-		if len(f.Providers) > 0 {
-			cond, args := likeAny("LOWER(provider)", f.Providers)
-			q = q.Where(cond, args...)
-		}
-		if len(f.Servers) > 0 {
-			cond, args := likeAny("LOWER(smtp_hostname)", f.Servers)
-			q = q.Where(cond, args...)
-		}
-		if len(f.APIKeys) > 0 {
-			cond, args := likeAny("LOWER(k.name)", f.APIKeys)
-			q = q.Where("EXISTS (SELECT 1 FROM api_keys k WHERE k.id = emails.api_key_id AND "+cond+")", args...)
-		}
-		if len(f.Statuses) > 0 {
-			q = q.Where("status IN ?", f.Statuses)
-		}
-		if f.HasAttachment {
-			q = q.Where("attachments_json <> '' AND attachments_json <> '[]'")
-		}
-		if f.After != nil {
-			q = q.Where("created_at >= ?", *f.After)
-		}
-		if f.Before != nil {
-			q = q.Where("created_at < ?", *f.Before)
-		}
-		return q
+	applyEmailFilter(r.db.Model(&models.Email{}), scope, f).Count(&total)
+
+	if err := applyEmailFilter(r.db, scope, f).
+		Order(orderClause(sort)).
+		Limit(limit).Offset(offset).
+		Find(&items).Error; err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
+// ListFilteredMessages returns a page of the message history: the same rows as
+// FindByScopeFiltered, narrowed by the message-history filters (status flags,
+// external id), but with bodies and content blobs excluded — see
+// slimEmailColumns. Events and broadcast context are enriched by the caller.
+func (r *EmailRepository) ListFilteredMessages(page, size int, scope ResourceScope, f EmailFilter) ([]models.Email, int64, error) {
+	limit, offset := normalizeSecurityPage(page, size)
+
+	var items []models.Email
+	var total int64
+
+	if err := applyEmailFilter(r.db.Model(&models.Email{}), scope, f).Count(&total).Error; err != nil {
+		return nil, 0, err
 	}
 
-	apply(r.db.Model(&models.Email{})).Count(&total)
-
-	if err := apply(r.db).
-		Order(orderClause(sort)).
+	if err := applyEmailFilter(r.db, scope, f).
+		Select(slimEmailColumns).
+		Order("created_at DESC").
 		Limit(limit).Offset(offset).
 		Find(&items).Error; err != nil {
 		return nil, 0, err
