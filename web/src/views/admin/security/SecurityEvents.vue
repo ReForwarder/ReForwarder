@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { adminApi } from '../../../api/admin'
 import type { SecurityEventRecord, Pageable } from '../../../api/types'
 import { usePagination } from '@/composables/usePagination'
@@ -42,12 +42,22 @@ function setEventType(type: string) {
   goToPage(0)
 }
 
-// Filter pills come from the data itself: the distinct event types on the
-// loaded page (capped so the row never overflows on narrow screens).
-const eventTypeOptions = computed(() => {
-  const types = Array.from(new Set(events.value.map(e => e.event_type)))
-  return types.slice(0, 6)
-})
+// Canonical event types, mirroring internal/services/security/signals.go
+// (AllSignals + the ban lifecycle). The list is static on purpose: deriving
+// the pills from the loaded page collapses them to the selected type the
+// moment a server-side filter is applied. `connection.rejected` is defined
+// upstream but has no producer yet, so it is intentionally absent.
+const EVENT_TYPES = [
+  'distinct_ports',
+  'new_connections',
+  'incomplete_handshakes',
+  'connect_aborts',
+  'malformed_preauth',
+  'suspicious_paths',
+  'auth_failures',
+  'ban.created',
+  'ban.lifted',
+] as const
 
 function startStream() {
   const baseUrl = import.meta.env.VITE_API_URL || '/api/v1'
@@ -171,11 +181,12 @@ function openDetail(evt: SecurityEventRecord) {
       </div>
     </div>
 
-    <!-- Event type filter (options derived from the loaded page) -->
-    <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap;">
+    <!-- Event type filter: the complete canonical list, always fully rendered.
+         Only the active state changes; the table refetches from the API. -->
+    <div class="event-type-filter">
       <button class="btn btn-sm" :class="eventType === '' ? 'btn-primary' : 'btn-secondary'" @click="setEventType('')">All</button>
       <button
-        v-for="type in eventTypeOptions"
+        v-for="type in EVENT_TYPES"
         :key="type"
         class="btn btn-sm"
         :class="eventType === type ? 'btn-primary' : 'btn-secondary'"
@@ -298,6 +309,13 @@ function openDetail(evt: SecurityEventRecord) {
 </template>
 
 <style scoped>
+.event-type-filter {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
 .page-description {
   font-size: 13px;
   color: var(--text-muted);
