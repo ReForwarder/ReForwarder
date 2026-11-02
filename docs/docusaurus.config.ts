@@ -3,7 +3,7 @@ import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
-  title: 'Posta',
+  title: 'ReForwarder',
   tagline: 'Self-hosted email delivery platform for developers',
   favicon: 'img/favicon.ico',
 
@@ -52,15 +52,15 @@ const config: Config = {
   ],
 
   themeConfig: {
-    image: 'img/posta-social-card.png',
+    image: 'img/logo.png',
     colorMode: {
       defaultMode: 'dark',
       respectPrefersColorScheme: true,
     },
     navbar: {
-      title: 'Posta',
+      title: 'ReForwarder.',
       logo: {
-        alt: 'Posta Logo',
+        alt: 'ReForwarder Logo',
         src: 'img/logo.png',
       },
       items: [

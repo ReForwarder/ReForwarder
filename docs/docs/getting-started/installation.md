@@ -13,14 +13,14 @@ Deploy the same self-hosted Posta from the [Miabi Marketplace](https://marketpla
 :::
 
 :::tip
-Full Docker Compose examples are available in the [`examples/`](https://github.com/goposta/posta/tree/main/examples) folder of the repository.
+Full Docker Compose examples are available in the [`examples/`](https://github.com/ReForwarder/ReForwarder/tree/main/examples) folder of the repository.
 :::
 
 ## Docker Compose — Embedded Worker (Simple)
 
 This setup runs Posta with the embedded worker enabled. The email processing worker runs inside the main server process, so no separate worker container is required. Ideal for development and small deployments.
 
-See [`examples/compose.yml`](https://github.com/goposta/posta/blob/main/examples/compose.yml)
+See [`examples/compose.yml`](https://github.com/ReForwarder/ReForwarder/blob/main/examples/compose.yml)
 
 ```yaml
 services:
@@ -94,7 +94,7 @@ Posta will be available at `http://localhost:9000`.
 
 For production environments, run the worker as a separate container. This allows the API server and background processing to scale independently.
 
-See [`examples/docker-compose-full.yml`](https://github.com/goposta/posta/blob/main/examples/docker-compose-full.yml)
+See [`examples/docker-compose-full.yml`](https://github.com/ReForwarder/ReForwarder/blob/main/examples/docker-compose-full.yml)
 
 ```yaml
 services:
@@ -194,8 +194,8 @@ You can run multiple worker instances for horizontal scaling. All workers share 
 
 ```bash
 # Clone the repository
-git clone https://github.com/goposta/posta.git
-cd posta
+git clone https://github.com/ReForwarder/ReForwarder.git
+cd ReForwarder
 
 # Build the binary
 make build

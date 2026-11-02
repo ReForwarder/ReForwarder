@@ -8,7 +8,7 @@ import CodeBlock from '@theme/CodeBlock';
 
 import styles from './index.module.css';
 
-const GITHUB_URL = 'https://github.com/goposta/posta';
+const GITHUB_URL = 'https://github.com/ReForwarder/ReForwarder';
 
 const SEND_EXAMPLE = `curl -X POST https://posta.example.com/api/v1/emails/send \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
@@ -16,7 +16,7 @@ const SEND_EXAMPLE = `curl -X POST https://posta.example.com/api/v1/emails/send 
   -d '{
     "from": "Acme <hello@example.com>",
     "to": ["jonas@example.com", "bob@example.com"],
-    "subject": "Hello from Posta",
+    "subject": "Hello from ReForwarder",
     "html": "<h1>Hello!</h1>"
   }'`;
 
@@ -41,9 +41,9 @@ function HomepageHeader() {
         </Heading>
 
         <p className={styles.heroSubtitle}>
-          Send and receive emails through a simple HTTP API. Posta handles SMTP
-          delivery, inbound mail, templates, campaigns, tracking, webhooks, and
-          security — on your own infrastructure.
+          Send and receive emails through a simple HTTP API. ReForwarder handles
+          SMTP delivery, inbound mail, templates, campaigns, tracking, webhooks,
+          and security — on your own infrastructure.
         </p>
 
         <div className={styles.buttons}>
@@ -95,8 +95,8 @@ function QuickStart() {
             Send your first email in seconds
           </Heading>
           <p className={styles.sectionLead}>
-            A single HTTP request is all you need. Posta handles queuing, SMTP
-            delivery, retries, and tracking automatically.
+            A single HTTP request is all you need. ReForwarder handles queuing,
+            SMTP delivery, retries, and tracking automatically.
           </p>
         </div>
 
@@ -233,13 +233,14 @@ function CallToAction() {
             Ready to run your own email platform?
           </Heading>
           <p className={styles.ctaLead}>
-            Deploy Posta with Docker in minutes and send your first email today.
+            Deploy ReForwarder with Docker in minutes and send your first email
+            today.
           </p>
           <div className={styles.buttons}>
             <Link
               className="button button--primary button--lg"
               to="/docs/getting-started/installation">
-              Install Posta
+              Install ReForwarder
             </Link>
             <Link
               className="button button--secondary button--lg"
