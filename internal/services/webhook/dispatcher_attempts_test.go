@@ -218,7 +218,9 @@ func TestDeliverWithRetryRecordsAttemptsOnFailure(t *testing.T) {
 	d.maxRetries = 2 // one 2s backoff between the two attempts
 
 	wh := models.Webhook{ID: 6, UserID: 1, URL: srv.URL}
-	d.deliverWithRetry(1, wh, deliverBody(t, "email.sent", "abc"), "email.sent")
+	// A non-default event type keeps the payload helper's parameter honest
+	// and proves attempt recording is event-agnostic.
+	d.deliverWithRetry(1, wh, deliverBody(t, "email.bounced", "bounce-e2e"), "email.bounced")
 
 	if cap.deliveryCount() != 1 {
 		t.Fatalf("deliveries recorded = %d, want 1", cap.deliveryCount())
