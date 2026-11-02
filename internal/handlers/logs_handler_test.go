@@ -368,9 +368,9 @@ func newLogsServer(t *testing.T, db *gorm.DB, sp *settings.Provider) *okapi.Test
 	return o
 }
 
-// doLogsReq performs one request against the test server.
-func doLogsReq(o *okapi.TestServer, method, path, token, workspace string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(method, path, nil)
+// doLogsReq performs one GET request against the test server.
+func doLogsReq(o *okapi.TestServer, path, token, workspace string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -431,7 +431,7 @@ func TestLogsRoutesRequireAuthentication(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, token := range []string{"", "not-a-jwt"} {
-				rec := doLogsReq(o, http.MethodGet, tc.path, token, "3")
+				rec := doLogsReq(o, tc.path, token, "3")
 				if rec.Code != http.StatusUnauthorized {
 					t.Fatalf("token %q: status = %d, want 401 (body %s)", token, rec.Code, rec.Body.String())
 				}
@@ -450,7 +450,7 @@ func TestLogsMessageListIsSlim(t *testing.T) {
 	o := newLogsServer(t, fakeGorm(t, state), settingsProvider(t, state))
 	token := logsTestJWT(t, "user")
 
-	rec := doLogsReq(o, http.MethodGet, "/workspaces/current/logs/messages", token, "3")
+	rec := doLogsReq(o, "/workspaces/current/logs/messages", token, "3")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -518,7 +518,7 @@ func TestLogsMessageListRejectsBadFilters(t *testing.T) {
 	}
 	for name, path := range cases {
 		t.Run(name, func(t *testing.T) {
-			rec := doLogsReq(o, http.MethodGet, path, token, "3")
+			rec := doLogsReq(o, path, token, "3")
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
 			}
@@ -537,7 +537,7 @@ func TestLogsMessageDetailAuthzAndSlim(t *testing.T) {
 	o := newLogsServer(t, fakeGorm(t, state), settingsProvider(t, state))
 	token := logsTestJWT(t, "user")
 
-	rec := doLogsReq(o, http.MethodGet, "/workspaces/current/logs/messages/em-1", token, "3")
+	rec := doLogsReq(o, "/workspaces/current/logs/messages/em-1", token, "3")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("member status = %d, want 200", rec.Code)
 	}
@@ -558,7 +558,7 @@ func TestLogsMessageDetailAuthzAndSlim(t *testing.T) {
 	}
 
 	// A different workspace gets the not-found answer.
-	rec = doLogsReq(o, http.MethodGet, "/workspaces/current/logs/messages/em-1", token, "9")
+	rec = doLogsReq(o, "/workspaces/current/logs/messages/em-1", token, "9")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("non-member status = %d, want 404 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -572,7 +572,7 @@ func TestLogsMessageEvents(t *testing.T) {
 	o := newLogsServer(t, fakeGorm(t, state), settingsProvider(t, state))
 	token := logsTestJWT(t, "user")
 
-	rec := doLogsReq(o, http.MethodGet, "/workspaces/current/logs/messages/em-1/events", token, "3")
+	rec := doLogsReq(o, "/workspaces/current/logs/messages/em-1/events", token, "3")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("member status = %d, want 200", rec.Code)
 	}
@@ -585,7 +585,7 @@ func TestLogsMessageEvents(t *testing.T) {
 		t.Errorf("event = %v", ev)
 	}
 
-	rec = doLogsReq(o, http.MethodGet, "/workspaces/current/logs/messages/em-1/events", token, "9")
+	rec = doLogsReq(o, "/workspaces/current/logs/messages/em-1/events", token, "9")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("non-member status = %d, want 404", rec.Code)
 	}
@@ -603,7 +603,7 @@ func TestLogsMessageContentHiddenByDefault(t *testing.T) {
 	o := newLogsServer(t, fakeGorm(t, state), sp)
 	token := logsTestJWT(t, "user")
 
-	rec := doLogsReq(o, http.MethodGet, "/workspaces/current/logs/messages/em-1/content", token, "3")
+	rec := doLogsReq(o, "/workspaces/current/logs/messages/em-1/content", token, "3")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (redaction is not an error)", rec.Code)
 	}
@@ -639,7 +639,7 @@ func TestLogsMessageContentServedWhenVisible(t *testing.T) {
 	o := newLogsServer(t, fakeGorm(t, state), settingsProvider(t, state))
 	token := logsTestJWT(t, "user")
 
-	rec := doLogsReq(o, http.MethodGet, "/workspaces/current/logs/messages/em-1/content", token, "3")
+	rec := doLogsReq(o, "/workspaces/current/logs/messages/em-1/content", token, "3")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -674,7 +674,7 @@ func TestLogsMessageContentServedWhenVisible(t *testing.T) {
 	}
 
 	// The content endpoint obeys the same ownership rule as the rest.
-	rec = doLogsReq(o, http.MethodGet, "/workspaces/current/logs/messages/em-1/content", token, "9")
+	rec = doLogsReq(o, "/workspaces/current/logs/messages/em-1/content", token, "9")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("non-member status = %d, want 404", rec.Code)
 	}
@@ -689,12 +689,12 @@ func TestLogsIncomingWebhookUnlinkedNeedsAdmin(t *testing.T) {
 	seedIncomingWebhook(state)
 	o := newLogsServer(t, fakeGorm(t, state), settingsProvider(t, state))
 
-	rec := doLogsReq(o, http.MethodGet, "/workspaces/current/logs/incoming-webhooks/9", logsTestJWT(t, "user"), "3")
+	rec := doLogsReq(o, "/workspaces/current/logs/incoming-webhooks/9", logsTestJWT(t, "user"), "3")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("non-admin status = %d, want 404", rec.Code)
 	}
 
-	rec = doLogsReq(o, http.MethodGet, "/workspaces/current/logs/incoming-webhooks/9", logsTestJWT(t, "admin"), "3")
+	rec = doLogsReq(o, "/workspaces/current/logs/incoming-webhooks/9", logsTestJWT(t, "admin"), "3")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("admin status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -716,7 +716,7 @@ func TestLogsAuditScopes(t *testing.T) {
 	adminToken := logsTestJWT(t, "admin")
 
 	// Workspace scope is the default and needs no role.
-	rec := doLogsReq(o, http.MethodGet, "/workspaces/current/logs/audit", userToken, "3")
+	rec := doLogsReq(o, "/workspaces/current/logs/audit", userToken, "3")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("workspace scope status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -730,11 +730,11 @@ func TestLogsAuditScopes(t *testing.T) {
 	}
 
 	// Deployment scope: refused for a plain user, allowed for an admin.
-	rec = doLogsReq(o, http.MethodGet, "/workspaces/current/logs/audit?scope=deployment", userToken, "3")
+	rec = doLogsReq(o, "/workspaces/current/logs/audit?scope=deployment", userToken, "3")
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("deployment scope as user = %d, want 403", rec.Code)
 	}
-	rec = doLogsReq(o, http.MethodGet, "/workspaces/current/logs/audit?scope=deployment", adminToken, "3")
+	rec = doLogsReq(o, "/workspaces/current/logs/audit?scope=deployment", adminToken, "3")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("deployment scope as admin = %d, want 200", rec.Code)
 	}
@@ -748,7 +748,7 @@ func TestLogsAuditScopes(t *testing.T) {
 		"bad date key": "/workspaces/current/logs/audit?from=2026-05",
 	} {
 		t.Run(name, func(t *testing.T) {
-			rec := doLogsReq(o, http.MethodGet, path, userToken, "3")
+			rec := doLogsReq(o, path, userToken, "3")
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
 			}
@@ -764,7 +764,7 @@ func TestLogsAuditExport(t *testing.T) {
 	o := newLogsServer(t, fakeGorm(t, state), settingsProvider(t, state))
 	userToken := logsTestJWT(t, "user")
 
-	rec := doLogsReq(o, http.MethodGet, "/workspaces/current/logs/audit/export", userToken, "3")
+	rec := doLogsReq(o, "/workspaces/current/logs/audit/export", userToken, "3")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -794,7 +794,7 @@ func TestLogsAuditExport(t *testing.T) {
 	}
 
 	// Same authorization as the list: deployment scope stays admin-only.
-	rec = doLogsReq(o, http.MethodGet, "/workspaces/current/logs/audit/export?scope=deployment", userToken, "3")
+	rec = doLogsReq(o, "/workspaces/current/logs/audit/export?scope=deployment", userToken, "3")
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("export deployment scope as user = %d, want 403", rec.Code)
 	}

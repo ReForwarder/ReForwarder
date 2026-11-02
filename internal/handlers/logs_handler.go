@@ -39,6 +39,13 @@ import (
 	"gorm.io/gorm"
 )
 
+// auditScopeWorkspace / auditScopeDeployment are the two audit-log scope
+// values; deployment-wide rows require an admin session.
+const (
+	auditScopeWorkspace  = "workspace"
+	auditScopeDeployment = "deployment"
+)
+
 // LogsHandler serves the workspace message-history and logs endpoints: the
 // message list and detail (never including bodies — content lives behind the
 // dedicated content endpoint), the message event timeline, the raw incoming
@@ -752,8 +759,7 @@ func (h *LogsHandler) buildAuditFilter(c *okapi.Context, scope, action, outcome,
 	filter.To = toAt
 
 	switch strings.ToLower(strings.TrimSpace(scope)) {
-	case "", "workspace":
-		scope = "workspace"
+	case "", auditScopeWorkspace:
 		if wsID := c.GetInt("workspace_id"); wsID > 0 {
 			wid := uint(wsID)
 			filter.WorkspaceID = &wid
@@ -764,7 +770,7 @@ func (h *LogsHandler) buildAuditFilter(c *okapi.Context, scope, action, outcome,
 			wid := uint(0)
 			filter.WorkspaceID = &wid
 		}
-	case "deployment":
+	case auditScopeDeployment:
 		if !isDeploymentAdmin(c) {
 			return filter, c.AbortForbidden("deployment-wide audit logs require an admin session")
 		}
@@ -822,8 +828,8 @@ func (h *LogsHandler) ExportAudit(c *okapi.Context) error {
 	}
 
 	scopeName := strings.ToLower(strings.TrimSpace(q.Get("scope")))
-	if scopeName != "deployment" {
-		scopeName = "workspace"
+	if scopeName != auditScopeDeployment {
+		scopeName = auditScopeWorkspace
 	}
 
 	w := c.ResponseWriter()
