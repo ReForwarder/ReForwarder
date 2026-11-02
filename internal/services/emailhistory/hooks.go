@@ -20,6 +20,8 @@
 package emailhistory
 
 import (
+	"context"
+
 	"github.com/goposta/posta/internal/models"
 )
 
@@ -56,13 +58,17 @@ func RecordBounced(r *Recorder, em *models.Email, reason, providerEventID string
 	})
 }
 
+// providerTracking marks events recorded by the tracking pixel/redirect
+// handlers rather than by an ESP integration.
+const providerTracking = "tracking"
+
 // RecordOpened records an open of em as seen by the tracking pixel.
 func RecordOpened(r *Recorder, em *models.Email, ip, userAgent string) {
 	r.recordFromEmail(em, EventInput{
 		Type:      models.EmailEventOpened,
 		IP:        ip,
 		UserAgent: userAgent,
-		Provider:  "tracking",
+		Provider:  providerTracking,
 	})
 }
 
@@ -73,7 +79,7 @@ func RecordClicked(r *Recorder, em *models.Email, clickedURL, ip, userAgent stri
 		URL:       clickedURL,
 		IP:        ip,
 		UserAgent: userAgent,
-		Provider:  "tracking",
+		Provider:  providerTracking,
 	})
 }
 
@@ -83,7 +89,7 @@ func RecordUnsubscribed(r *Recorder, em *models.Email, recipient string) {
 	r.recordFromEmail(em, EventInput{
 		Type:      models.EmailEventUnsubscribed,
 		Recipient: recipient,
-		Provider:  "tracking",
+		Provider:  providerTracking,
 	})
 }
 
@@ -100,7 +106,7 @@ func (r *Recorder) recordFromEmail(em *models.Email, in EventInput) {
 	if in.Recipient == "" && len(em.Recipients) > 0 {
 		in.Recipient = em.Recipients[0]
 	}
-	r.Record(nil, in)
+	r.Record(context.TODO(), in)
 }
 
 // firstNonEmpty returns the first argument that is not the empty string.

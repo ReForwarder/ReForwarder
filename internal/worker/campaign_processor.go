@@ -286,7 +286,7 @@ func (p *CampaignProcessor) HandleCampaignBatch(_ context.Context, t *asynq.Task
 	// a restart. Open tracking and unsubscribe links are unaffected by it.
 	clickTrackingEnabled := true
 	if p.settingsProvider != nil {
-		clickTrackingEnabled = p.settingsProvider.CampaignClickTrackingEnabled()
+		clickTrackingEnabled = p.settingsProvider.EmailTrackingEnabled()
 	}
 
 	for i := range pendingMessages {
