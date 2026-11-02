@@ -54,10 +54,7 @@
     body {
       min-height: 100dvh;
       display: flex; flex-direction: column;
-      background:
-        radial-gradient(72% 60% at 50% -6%, rgba(255, 255, 255, 0.06), transparent 55%),
-        radial-gradient(34% 40% at 4% 102%, var(--accent-glow), transparent 65%),
-        var(--canvas);
+      background: var(--canvas);
       color: var(--text);
       font-family: var(--font-body);
       font-size: 16px;
@@ -72,21 +69,24 @@
     :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
 
     .stage {
-      flex: 1; display: flex; flex-direction: column;
+      flex: 1 0 auto; display: flex; flex-direction: column;
       align-items: center; justify-content: center;
-      text-align: center; padding: 48px 24px 32px;
+      text-align: center; padding: 24px 24px 20px;
+      background:
+        radial-gradient(72% 60% at 50% -6%, rgba(255, 255, 255, 0.06), transparent 55%),
+        radial-gradient(34% 40% at 4% 102%, var(--accent-glow), transparent 65%);
     }
 
     .logo {
-      width: 78px; height: 78px; display: block;
-      margin-bottom: 22px;
+      width: 66px; height: 66px; display: block;
+      margin-bottom: 14px;
       filter: drop-shadow(0 6px 24px rgba(255, 89, 0, 0.16));
     }
 
     .wordmark {
       font-family: var(--font-display); font-size: 26px; font-weight: 400;
       letter-spacing: -0.01em; line-height: 1; color: var(--text);
-      margin-bottom: 30px;
+      margin-bottom: 20px;
     }
     .wordmark .dot { color: var(--accent); margin-left: 1px; }
 
@@ -96,7 +96,7 @@
       letter-spacing: 0.16em; text-transform: uppercase; color: var(--text-2);
       padding: 8px 16px; border: 1px solid var(--border); border-radius: 999px;
       background: rgba(255, 255, 255, 0.03);
-      margin-bottom: 28px;
+      margin-bottom: 18px;
     }
     .status i {
       width: 7px; height: 7px; border-radius: 50%;
@@ -111,16 +111,16 @@
     h1 {
       font-family: var(--font-display); font-weight: 400;
       font-size: clamp(2.5rem, 5.4vw, 4rem); line-height: 1.06; letter-spacing: -0.01em;
-      max-width: 15ch; margin-bottom: 20px;
+      max-width: 15ch; margin-bottom: 14px;
     }
     h1 em { font-style: italic; }
 
     .sub {
       color: var(--text-2); font-size: 17px; line-height: 1.65;
-      max-width: 33rem; margin-bottom: 30px;
+      max-width: 33rem; margin-bottom: 20px;
     }
 
-    .actions { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-bottom: 30px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-bottom: 20px; }
     .btn {
       display: inline-flex; align-items: center; justify-content: center; gap: 8px;
       padding: 11px 22px; min-height: 44px;
@@ -142,6 +142,7 @@
     }
 
     footer {
+      background: transparent;
       border-top: 1px solid var(--border-soft);
       padding: 18px 24px;
       display: flex; flex-wrap: wrap; gap: 6px 24px;
@@ -169,6 +170,17 @@
       .actions { margin-bottom: 24px; }
       .actions .btn { flex: 1 1 auto; }
       footer { justify-content: center; text-align: center; }
+    }
+
+    @media (min-width: 561px) and (max-height: 820px) {
+      .stage { padding-top: 18px; padding-bottom: 16px; }
+      .logo { width: 60px; height: 60px; margin-bottom: 12px; }
+      .wordmark { margin-bottom: 16px; }
+      .status { margin-bottom: 14px; }
+      h1 { margin-bottom: 12px; }
+      .sub { margin-bottom: 16px; }
+      .actions { margin-bottom: 16px; }
+      footer { padding-top: 14px; padding-bottom: 14px; }
     }
 
     @media (prefers-reduced-motion: reduce) {
