@@ -109,7 +109,7 @@ func (r *SecurityEventRepository) TrendCounts(days int) ([]SecurityDailyCount, e
 	if days <= 0 {
 		days = 14
 	}
-	start := time.Now().UTC().Truncate(24 * time.Hour).AddDate(0, 0, -(days - 1))
+	start := time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, -(days - 1))
 
 	type datedCount struct {
 		Date  string

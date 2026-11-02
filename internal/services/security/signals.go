@@ -48,7 +48,7 @@ const (
 type Signal string
 
 const (
-	SigDistinctPorts  Signal = "distinct_ports"      // members = port numbers
+	SigDistinctPorts  Signal = "distinct_ports" // members = port numbers
 	SigNewConnections Signal = "new_connections"
 	SigIncompleteHS   Signal = "incomplete_handshakes"
 	SigConnectAborts  Signal = "connect_aborts"
