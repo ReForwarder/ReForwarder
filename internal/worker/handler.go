@@ -31,6 +31,7 @@ import (
 	"github.com/goposta/posta/internal/metrics"
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/email"
+	"github.com/goposta/posta/internal/services/emailhistory"
 	"github.com/goposta/posta/internal/services/webhook"
 	"github.com/goposta/posta/internal/storage/blob"
 	"github.com/goposta/posta/internal/storage/repositories"
@@ -54,6 +55,7 @@ type EmailSendHandler struct {
 	stamper         *email.Stamper
 	dispatcher      *webhook.Dispatcher
 	blobStore       blob.Store
+	recorder        *emailhistory.Recorder
 	onSent          func()
 	onFailed        func()
 }
@@ -109,6 +111,13 @@ func (h *EmailSendHandler) SetSuppressionRepo(r *repositories.SuppressionReposit
 // permanently rejected.
 func (h *EmailSendHandler) SetBounceRepo(r *repositories.BounceRepository) {
 	h.bounceRepo = r
+}
+
+// SetRecorder wires the message-history event recorder so send transitions
+// write their timeline events. Nil (the default) disables recording; recording
+// failures never affect sending either way.
+func (h *EmailSendHandler) SetRecorder(r *emailhistory.Recorder) {
+	h.recorder = r
 }
 
 // SetAutoSuppress toggles auto-suppression on permanent (5xx) recipient
@@ -277,15 +286,18 @@ func (h *EmailSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error
 		}
 	}
 
+	// Resolve the campaign message (if any) once: it drives campaign-aware
+	// header stamping and the campaign_id metadata on history events.
+	var campMsg *models.CampaignMessage
+	if h.messageRepo != nil {
+		if m, err := h.messageRepo.FindByEmailID(em.ID); err == nil {
+			campMsg = m
+		}
+	}
+
 	// Stamp Posta headers. Campaign mail gets campaign-aware headers; everything
 	// else gets transactional headers. A final HMAC signs the message identity.
 	if h.stamper != nil {
-		var campMsg *models.CampaignMessage
-		if h.messageRepo != nil {
-			if m, err := h.messageRepo.FindByEmailID(em.ID); err == nil {
-				campMsg = m
-			}
-		}
 		if campMsg != nil {
 			// Opens and clicks are independent since the global click-tracking
 			// toggle: the pixel is always injected for campaign mail, but the
@@ -323,6 +335,7 @@ func (h *EmailSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error
 		em.Status = models.EmailStatusFailed
 		em.ErrorMessage = err.Error()
 		_ = h.emailRepo.Update(em)
+		emailhistory.RecordFailed(h.recorder, em, em.ErrorMessage, h.eventMetadata(smtpServer, campMsg, sharedServerID, em.RetryCount))
 		logger.Debug("worker: email send failed, will retry", "id", em.ID, "attempt", em.RetryCount, "error", err)
 		// Return error so Asynq retries the task
 		return fmt.Errorf("SMTP send failed: %w", err)
@@ -334,6 +347,7 @@ func (h *EmailSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error
 	em.SentAt = &now
 	em.ErrorMessage = ""
 	_ = h.emailRepo.Update(em)
+	emailhistory.RecordSent(h.recorder, em, h.eventMetadata(smtpServer, campMsg, sharedServerID, 0))
 	// Increment the shared server's success counter
 	if sharedServerID != 0 && h.serverRepo != nil {
 		go h.serverRepo.IncrementSentCount(sharedServerID)
@@ -359,6 +373,7 @@ func (h *EmailSendHandler) markFailed(em *models.Email, reason string) {
 	em.Status = models.EmailStatusFailed
 	em.ErrorMessage = reason
 	_ = h.emailRepo.Update(em)
+	emailhistory.RecordFailed(h.recorder, em, reason, nil)
 	h.dispatcher.Dispatch(em.UserID, em.WorkspaceID, "email.failed", em.UUID, em.Sender)
 	if h.onFailed != nil {
 		h.onFailed()
@@ -371,6 +386,26 @@ func (h *EmailSendHandler) markFailed(em *models.Email, reason string) {
 			_ = h.messageRepo.UpdateStatus(msg.ID, models.CampaignMsgFailed, reason)
 		}
 	}
+}
+
+// eventMetadata builds the denormalized metadata carried on sent/failed
+// history events: which server delivered (or rejected) the message, the
+// campaign it belongs to, and the retry state at the time of the event.
+func (h *EmailSendHandler) eventMetadata(smtpServer *models.SMTPServer, campMsg *models.CampaignMessage, sharedServerID uint, retryCount int) map[string]any {
+	metadata := map[string]any{}
+	if smtpServer != nil && smtpServer.Host != "" {
+		metadata["smtp_hostname"] = smtpServer.Host
+	}
+	if campMsg != nil && campMsg.CampaignID != 0 {
+		metadata["campaign_id"] = campMsg.CampaignID
+	}
+	if sharedServerID != 0 {
+		metadata["shared_server_id"] = sharedServerID
+	}
+	if retryCount > 0 {
+		metadata["retry_count"] = retryCount
+	}
+	return metadata
 }
 
 // permanentRejection reports whether err represents a permanent recipient
@@ -426,6 +461,12 @@ func (h *EmailSendHandler) handlePermanentRejection(em *models.Email, se *email.
 	em.Status = models.EmailStatusFailed
 	em.ErrorMessage = se.Error()
 	_ = h.emailRepo.Update(em)
+	emailhistory.RecordFailed(h.recorder, em, em.ErrorMessage, nil)
+	// A 5xx at RCPT TO is a hard bounce: record it as such on the timeline.
+	// The stable provider event id dedups replays of the same task.
+	emailhistory.RecordBounced(h.recorder, em, reason,
+		fmt.Sprintf("smtp:%d:%s", se.Code, se.Recipient),
+		map[string]any{"smtp_code": se.Code, "smtp_stage": se.Stage, "recipient": se.Recipient})
 
 	h.dispatcher.Dispatch(em.UserID, em.WorkspaceID, "email.failed", em.UUID, em.Sender)
 	if h.onFailed != nil {
@@ -455,6 +496,7 @@ func senderDomain(addr string) string {
 type ExhaustedErrorHandler struct {
 	emailRepo  *repositories.EmailRepository
 	dispatcher *webhook.Dispatcher
+	recorder   *emailhistory.Recorder
 	onFailed   func()
 }
 
@@ -464,6 +506,12 @@ func NewExhaustedErrorHandler(emailRepo *repositories.EmailRepository, dispatche
 		dispatcher: dispatcher,
 		onFailed:   onFailed,
 	}
+}
+
+// SetRecorder wires the message-history event recorder. Nil (the default)
+// disables recording.
+func (e *ExhaustedErrorHandler) SetRecorder(r *emailhistory.Recorder) {
+	e.recorder = r
 }
 
 func (e *ExhaustedErrorHandler) HandleError(_ context.Context, t *asynq.Task, err error) {
@@ -482,6 +530,7 @@ func (e *ExhaustedErrorHandler) HandleError(_ context.Context, t *asynq.Task, er
 	em.Status = models.EmailStatusFailed
 	em.ErrorMessage = fmt.Sprintf("permanently failed after retries: %v", err)
 	_ = e.emailRepo.Update(em)
+	emailhistory.RecordFailed(e.recorder, em, em.ErrorMessage, map[string]any{"retry_count": em.RetryCount})
 	e.dispatcher.Dispatch(em.UserID, em.WorkspaceID, "email.failed", em.UUID, em.Sender)
 	if e.onFailed != nil {
 		e.onFailed()

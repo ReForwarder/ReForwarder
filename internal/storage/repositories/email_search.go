@@ -47,18 +47,37 @@ const (
 
 // EmailFilter captures optional list filters for outbound email queries.
 type EmailFilter struct {
-	Sender        string
-	Recipient     string
-	Subject       string
-	Text          string
-	Template      string
-	Providers     []string
-	Servers       []string
-	APIKeys       []string
-	Statuses      []string
+	Sender    string
+	Recipient string
+	Subject   string
+	Text      string
+	Template  string
+	Providers []string
+	Servers   []string
+	APIKeys   []string
+	Statuses  []string
+	// StatusFlags are the message-history status filters (sent, delivered,
+	// opened, …). Timestamp-backed flags match emails whose write-once
+	// lifecycle timestamp is set; the rest match the status column. See
+	// statusFlagConds in email_repo.go.
+	StatusFlags   []string
+	ExternalID    string
 	HasAttachment bool
 	After         *time.Time
 	Before        *time.Time
+
+	// Message-history-only filters (the logs list). Zero values are ignored.
+	// MessageUUID matches emails.uuid exactly (the message_id filter).
+	MessageUUID string
+	// ListID matches the unsubscribe list an email was sent against
+	// (emails.unsubscribe_list_id).
+	ListID *uint
+	// BlockID matches emails sent to an address currently suppressed under
+	// this block list (suppressions.list_id), matched by recipient address.
+	BlockID *uint
+	// BroadcastID matches the campaign a message was sent by, resolved
+	// through campaign_messages.
+	BroadcastID *uint
 }
 
 // maxSearchQueryLen bounds the raw search string before parsing so a single

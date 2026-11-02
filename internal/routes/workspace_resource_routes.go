@@ -1237,3 +1237,138 @@ func (r *Router) workspaceResourceRoutes() []okapi.RouteDefinition {
 
 	return routes
 }
+
+// logsRoutes returns the message-history and logs endpoints. They live in their
+// own definitions slice so the growing workspace-resource list stays readable;
+// the middleware chain is the same as workspaceResourceRoutes (session or API
+// key + workspace binding). Deployment-wide audit views are gated inside the
+// handler, not here — these routes stay workspace-scoped.
+func (r *Router) logsRoutes() []okapi.RouteDefinition {
+	logsGroup := r.v1.Group("/workspaces/current", r.mw.auth, r.mw.workspace).WithTagInfo(okapi.GroupTag{
+		Name:        tagWorkspaceResources,
+		Description: "Message history and logs scoped to the active workspace: message list and detail, message content, event timeline, incoming webhook payloads, outgoing webhook deliveries and attempts, and the audit log. Authenticated with a dashboard session or an API key bound to the workspace.",
+	})
+	logsGroup.WithBearerAuth()
+
+	return []okapi.RouteDefinition{
+		{
+			Method:      http.MethodGet,
+			Path:        "/logs/messages",
+			Handler:     okapi.H(r.h.logs.ListMessages),
+			Group:       logsGroup,
+			Summary:     "List message history",
+			Description: "Slim message rows without bodies. status is repeatable and non-exclusive (status=sent&status=opened matches either).",
+			Request:     &handlers.ListLogsMessagesRequest{},
+			Response:    &dto.PageableResponse[handlers.MessageRow]{},
+		},
+		{
+			Method:      http.MethodGet,
+			Path:        "/logs/messages/{uuid}",
+			Handler:     okapi.H(r.h.logs.GetMessage),
+			Group:       logsGroup,
+			Summary:     "Get message",
+			Description: "One message without its bodies or content blobs.",
+			Response:    &dto.Response[models.Email]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("uuid", "string", "Message UUID"),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodGet,
+			Path:        "/logs/messages/{uuid}/content",
+			Handler:     okapi.H(r.h.logs.GetMessageContent),
+			Group:       logsGroup,
+			Summary:     "Get message content",
+			Description: "Bodies, render data, headers and the attachment manifest of one message. Answers {redacted: true} when content visibility is disabled.",
+			Response:    &dto.Response[handlers.MessageContent]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("uuid", "string", "Message UUID"),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodGet,
+			Path:        "/logs/messages/{uuid}/events",
+			Handler:     okapi.H(r.h.logs.GetMessageEvents),
+			Group:       logsGroup,
+			Summary:     "Get message events",
+			Description: "The event timeline of one message, oldest first.",
+			Response:    &dto.Response[[]models.EmailEvent]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("uuid", "string", "Message UUID"),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodGet,
+			Path:        "/logs/incoming-webhooks",
+			Handler:     okapi.H(r.h.logs.ListIncomingWebhooks),
+			Group:       logsGroup,
+			Summary:     "List incoming webhook events",
+			Description: "Raw webhook payloads captured before processing, without the payload bodies.",
+			Request:     &handlers.ListIncomingWebhooksRequest{},
+			Response:    &dto.PageableResponse[handlers.IncomingWebhookRow]{},
+		},
+		{
+			Method:      http.MethodGet,
+			Path:        "/logs/incoming-webhooks/{id:int}",
+			Handler:     okapi.H(r.h.logs.GetIncomingWebhook),
+			Group:       logsGroup,
+			Summary:     "Get incoming webhook event",
+			Description: "One stored payload including the raw body.",
+			Request:     &handlers.LogsWebhookEventRequest{},
+			Response:    &dto.Response[models.IncomingWebhookEvent]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Event ID"),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodGet,
+			Path:        "/logs/outgoing-webhooks",
+			Handler:     okapi.H(r.h.logs.ListOutgoingWebhooks),
+			Group:       logsGroup,
+			Summary:     "List outgoing webhook deliveries",
+			Description: "Delivery records with their recorded attempt counts.",
+			Request:     &handlers.ListOutgoingWebhooksRequest{},
+			Response:    &dto.PageableResponse[handlers.OutgoingDeliveryRow]{},
+		},
+		{
+			Method:      http.MethodGet,
+			Path:        "/logs/outgoing-webhooks/{id:int}/attempts",
+			Handler:     okapi.H(r.h.logs.GetOutgoingAttempts),
+			Group:       logsGroup,
+			Summary:     "List delivery attempts",
+			Description: "Every recorded HTTP attempt of one delivery, in attempt order.",
+			Request:     &handlers.LogsWebhookDeliveryRequest{},
+			Response:    &dto.Response[[]models.WebhookDeliveryAttempt]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Delivery ID"),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodGet,
+			Path:        "/logs/audit",
+			Handler:     okapi.H(r.h.logs.ListAudit),
+			Group:       logsGroup,
+			Summary:     "List audit events",
+			Description: "Audit events for the current workspace; scope=deployment spans the platform and requires an admin session.",
+			Request:     &handlers.ListAuditLogsRequest{},
+			Response:    &dto.PageableResponse[models.Event]{},
+		},
+		{
+			Method:      http.MethodGet,
+			Path:        "/logs/audit/export",
+			Handler:     r.h.logs.ExportAudit,
+			Group:       logsGroup,
+			Summary:     "Export audit log as CSV",
+			Description: "Streams the filtered audit log as text/csv (capped at 100000 rows). Same filters and authorization as the audit list.",
+			Options: []okapi.RouteOption{
+				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(403, &dto.ErrorResponseBody{}),
+			},
+		},
+	}
+}

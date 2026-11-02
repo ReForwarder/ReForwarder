@@ -70,11 +70,57 @@ func (s *Service) ProcessHTML(html string, campaignID uint, messageID uint) stri
 	return s.InjectOpenPixel(html, messageID)
 }
 
+// ContainsTracking reports whether html already carries Posta's signed
+// tracking (an open pixel or a click redirect), so callers can skip
+// re-processing content that was tracked earlier — campaign mail, for
+// instance, is tracked once at batch time with campaign-message URLs.
+func ContainsTracking(html string) bool {
+	if html == "" {
+		return false
+	}
+	return strings.Contains(html, "/t/o/") && strings.Contains(html, "?sig=")
+}
+
 // RewriteLinksForClicks rewrites http(s) links in campaign HTML to signed
-// click-tracking redirect URLs. Our own /t/ system links and non-http schemes
-// are left untouched. Campaigns sent with click tracking disabled never call
-// this, so their original URLs are preserved byte-for-byte.
+// click-tracking redirect URLs keyed on the campaign message id. Campaigns
+// sent with click tracking disabled never call this, so their original URLs
+// are preserved byte-for-byte.
 func (s *Service) RewriteLinksForClicks(html string, campaignID uint, messageID uint) string {
+	return s.rewriteLinks(html, func(originalURL string) (string, bool) {
+		hash := hashLink(campaignID, originalURL)
+		if _, err := s.findOrCreateLink(campaignID, originalURL, hash); err != nil {
+			return "", false
+		}
+		return s.ClickURL(messageID, hash), true
+	})
+}
+
+// ProcessHTMLEmail is ProcessHTML for a transactional (non-campaign) email:
+// links are rewritten and the pixel injected with URLs keyed on the email
+// UUID instead of a campaign message id.
+func (s *Service) ProcessHTMLEmail(html, emailUUID string) string {
+	html = s.RewriteLinksForClicksEmail(html, emailUUID)
+	return s.InjectOpenPixelEmail(html, emailUUID)
+}
+
+// RewriteLinksForClicksEmail rewrites http(s) links to signed click-tracking
+// redirect URLs keyed on the email UUID. Our own /t/ system links and
+// non-http schemes are left untouched.
+func (s *Service) RewriteLinksForClicksEmail(html, emailUUID string) string {
+	return s.rewriteLinks(html, func(originalURL string) (string, bool) {
+		trackedURL, err := s.ClickURLEmail(emailUUID, originalURL)
+		if err != nil {
+			return "", false
+		}
+		return trackedURL, true
+	})
+}
+
+// rewriteLinks applies build to every http(s) href in html and swaps it for
+// the returned tracked URL. URLs that already point at our own tracking
+// endpoints and non-http schemes are skipped; when build reports failure the
+// original URL is preserved byte-for-byte.
+func (s *Service) rewriteLinks(html string, build func(originalURL string) (string, bool)) string {
 	if html == "" {
 		return html
 	}
@@ -100,12 +146,10 @@ func (s *Service) RewriteLinksForClicks(html string, campaignID uint, messageID 
 			return match
 		}
 
-		hash := hashLink(campaignID, originalURL)
-		if _, err := s.findOrCreateLink(campaignID, originalURL, hash); err != nil {
+		trackedURL, ok := build(originalURL)
+		if !ok {
 			return match
 		}
-
-		trackedURL := s.ClickURL(messageID, hash)
 		return strings.Replace(match, originalURL, trackedURL, 1)
 	})
 }
@@ -134,6 +178,74 @@ func (s *Service) OpenURL(messageID uint) string {
 // ClickURL builds a signed click-tracking redirect URL.
 func (s *Service) ClickURL(messageID uint, hash string) string {
 	return fmt.Sprintf("%s/t/c/%d/%s?sig=%s", s.baseURL, messageID, hash, s.signClick(messageID, hash))
+}
+
+// OpenURLEmail builds a signed open-tracking pixel URL keyed on the email
+// UUID — the transactional counterpart of OpenURL, whose URLs key on a
+// campaign message id. The "open-email:" payload prefix distinguishes the two
+// signature kinds so a token of one kind verifies only against its own.
+func (s *Service) OpenURLEmail(emailUUID string) (string, error) {
+	if emailUUID == "" {
+		return "", errors.New("email UUID is required")
+	}
+	return fmt.Sprintf("%s/t/o/%s.gif?sig=%s", s.baseURL, emailUUID, s.signOpenEmail(emailUUID)), nil
+}
+
+// ClickURLEmail builds a signed click-tracking redirect URL keyed on the email
+// UUID. The destination URL is persisted in the shared link table (hash → URL)
+// so the redirect handler resolves it the same way it resolves campaign links.
+func (s *Service) ClickURLEmail(emailUUID, originalURL string) (string, error) {
+	if emailUUID == "" {
+		return "", errors.New("email UUID is required")
+	}
+	if originalURL == "" {
+		return "", errors.New("destination URL is required")
+	}
+	hash := hashLink(0, originalURL)
+	if _, err := s.findOrCreateLink(0, originalURL, hash); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s/t/c/%s/%s?sig=%s", s.baseURL, emailUUID, hash, s.signClickEmail(emailUUID, hash)), nil
+}
+
+// InjectOpenPixelEmail injects the open-tracking pixel before </body> with a
+// URL keyed on the email UUID. Open tracking is independent of click tracking.
+func (s *Service) InjectOpenPixelEmail(html, emailUUID string) string {
+	if html == "" || emailUUID == "" {
+		return html
+	}
+
+	pixelURL, err := s.OpenURLEmail(emailUUID)
+	if err != nil {
+		return html
+	}
+	pixel := fmt.Sprintf(`<img src="%s" width="1" height="1" alt="" style="display:none" />`, pixelURL)
+	if strings.Contains(html, "</body>") {
+		return strings.Replace(html, "</body>", pixel+"</body>", 1)
+	}
+	return html + pixel
+}
+
+// VerifyOpenEmailSig checks an email-keyed open-tracking signature.
+func (s *Service) VerifyOpenEmailSig(emailUUID, sig string) bool {
+	return hmac.Equal([]byte(sig), []byte(s.signOpenEmail(emailUUID)))
+}
+
+// VerifyClickEmailSig checks an email-keyed click-tracking signature.
+func (s *Service) VerifyClickEmailSig(emailUUID, hash, sig string) bool {
+	return hmac.Equal([]byte(sig), []byte(s.signClickEmail(emailUUID, hash)))
+}
+
+func (s *Service) signOpenEmail(emailUUID string) string {
+	mac := hmac.New(sha256.New, s.hmacKey)
+	_, _ = fmt.Fprintf(mac, "open-email:%s", emailUUID)
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:16])
+}
+
+func (s *Service) signClickEmail(emailUUID, hash string) string {
+	mac := hmac.New(sha256.New, s.hmacKey)
+	_, _ = fmt.Fprintf(mac, "click-email:%s:%s", emailUUID, hash)
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:16])
 }
 
 // VerifyOpenSig checks an open-tracking signature.
