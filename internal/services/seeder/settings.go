@@ -54,10 +54,15 @@ func SeedDefaultSettings(repo *repositories.SettingRepository) {
 		{Key: "login_rate_limit_window_minutes", Value: "15", Type: models.SettingTypeInt},
 		{Key: "audit_log_retention_days", Value: "90", Type: models.SettingTypeInt},
 		{Key: "webhook_delivery_retention_days", Value: "30", Type: models.SettingTypeInt},
-		{Key: "email_content_visibility", Value: models.SettingFalse, Type: models.SettingTypeBool},
+		{Key: "email_events_retention_days", Value: "180", Type: models.SettingTypeInt},
+		// Content of sent email is visible in the dashboard by default;
+		// operators can flip this off for privacy-sensitive installations.
+		{Key: "email_content_visibility", Value: models.SettingTrue, Type: models.SettingTypeBool},
 		{Key: "custom_headers_enabled", Value: models.SettingFalse, Type: models.SettingTypeBool},
 		{Key: "password_reset_enabled", Value: models.SettingFalse, Type: models.SettingTypeBool},
-		{Key: "campaign_click_tracking_enabled", Value: models.SettingTrue, Type: models.SettingTypeBool},
+		// Tracking for all email (links + open pixel). Replaces the old
+		// campaign-only key, which is migrated below.
+		{Key: "email_tracking_enabled", Value: models.SettingTrue, Type: models.SettingTypeBool},
 		// Security engine tunables (Admin → Security). The master switches are
 		// environment variables (POSTA_SECURITY_*); only tunables are seeded.
 		{Key: "security_risk_threshold", Value: "40", Type: models.SettingTypeInt},
@@ -97,5 +102,23 @@ func SeedDefaultSettings(repo *repositories.SettingRepository) {
 			}
 		}
 	}
+
+	// One-time data migration: campaign click tracking became tracking for all
+	// email, so campaign_click_tracking_enabled is superseded by
+	// email_tracking_enabled. Preserve the operator's value and run only when
+	// the new key is missing — an existing email_tracking_enabled row always
+	// wins, so later changes to the legacy row are never picked up.
+	if _, err := repo.FindByKey("email_tracking_enabled"); err != nil {
+		if legacy, legacyErr := repo.FindByKey("campaign_click_tracking_enabled"); legacyErr == nil && legacy.Value != "" {
+			if err := repo.Upsert(&models.Setting{
+				Key:   "email_tracking_enabled",
+				Value: legacy.Value,
+				Type:  legacy.Type,
+			}); err != nil {
+				logger.Error("failed to migrate campaign_click_tracking_enabled setting", "error", err)
+			}
+		}
+	}
+
 	logger.Info("default platform settings seeded")
 }

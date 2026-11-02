@@ -40,5 +40,10 @@ type Event struct {
 	ClientIP    string        `json:"client_ip,omitempty" gorm:"size:45"`
 	Message     string        `json:"message" gorm:"not null"`
 	Metadata    string        `json:"metadata" gorm:"type:text"`
-	CreatedAt   time.Time     `json:"created_at" gorm:"index"`
+	// Outcome, TargetType and TargetID carry the audit-log filters: what the
+	// action did (success|failure|denied) and which resource it acted on.
+	Outcome    string    `json:"outcome,omitempty" gorm:"size:12;index"` // success|failure|denied
+	TargetType string    `json:"target_type,omitempty" gorm:"size:32;index"`
+	TargetID   string    `json:"target_id,omitempty" gorm:"size:120;index"`
+	CreatedAt  time.Time `json:"created_at" gorm:"index"`
 }

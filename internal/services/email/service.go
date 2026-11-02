@@ -33,8 +33,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/emailhistory"
 	"github.com/goposta/posta/internal/services/ratelimit"
 	"github.com/goposta/posta/internal/services/settings"
+	"github.com/goposta/posta/internal/services/tracking"
 	"github.com/goposta/posta/internal/services/webhook"
 	"github.com/goposta/posta/internal/storage/blob"
 	"github.com/goposta/posta/internal/storage/repositories"
@@ -98,6 +100,9 @@ type Service struct {
 	blobStore        blob.Store
 	planLimits       PlanLimitsProvider
 	linkGen          LinkGenerator
+	recorder         *emailhistory.Recorder
+	trackingSvc      *tracking.Service
+	trackingEnabled  func() bool
 	devMode          bool
 	onSent           func()
 	onFailed         func()
@@ -180,6 +185,22 @@ func (s *Service) SetLinkGenerator(gen LinkGenerator) {
 // (with a storage key) is kept in the database, reducing DB pressure.
 func (s *Service) SetBlobStore(bs blob.Store) {
 	s.blobStore = bs
+}
+
+// SetRecorder wires the message-history event recorder so sends write their
+// sent/failed timeline events. Nil (the default) disables recording; recording
+// failures never affect sending either way.
+func (s *Service) SetRecorder(r *emailhistory.Recorder) {
+	s.recorder = r
+}
+
+// SetTracking wires open/click tracking for every outbound email: ts rewrites
+// links and injects the open pixel (keyed on the email UUID) when enabled()
+// reports true. A nil service disables tracking entirely; a nil enabled func
+// is treated as always enabled.
+func (s *Service) SetTracking(ts *tracking.Service, enabled func() bool) {
+	s.trackingSvc = ts
+	s.trackingEnabled = enabled
 }
 
 // uploadAttachments stores each attachment's content in blob storage and replaces
@@ -319,6 +340,9 @@ type SendRequest struct {
 	Text        string              `json:"text"`
 	Attachments []models.Attachment `json:"attachments,omitempty" doc:"Optional file attachments. Each must include filename, content_type, and base64-encoded content. Subject to per-attachment and total size limits set by your plan."`
 	Headers     map[string]string   `json:"headers,omitempty"`
+	// ExternalID is a caller-supplied correlation id stored on the message so
+	// integrations can find their own sends in the logs API.
+	ExternalID string `json:"external_id,omitempty" doc:"Optional caller-supplied correlation id. Stored on the message and searchable in the message history."`
 	// SystemHeaders are headers Posta itself sets on internal sends, such as the
 	// Message-ID, In-Reply-To, and Reply-To that thread a form reply. They are
 	// never accepted from API callers and apply whether or not the platform
@@ -332,6 +356,11 @@ type SendRequest struct {
 	SendAt              *time.Time `json:"send_at,omitempty"`
 	// TemplateName is populated by internal template-send paths
 	TemplateName string `json:"-"`
+	// TemplateData carries the render data of a template send. It is set by
+	// the internal template-send paths (SendWithTemplate, SendBatch,
+	// SendTestByTemplateID), persisted on the message for the message history,
+	// and never accepted from callers of the raw send endpoint.
+	TemplateData map[string]any `json:"-"`
 }
 
 // resolvedUnsub is the normalized, validated unsubscribe config used internally.
@@ -777,8 +806,10 @@ func (s *Service) Send(ctx context.Context, userID, apiKeyID uint, workspaceID *
 		TemplateName:          req.TemplateName,
 		HTMLBody:              req.HTML,
 		TextBody:              req.Text,
+		ExternalID:            req.ExternalID,
 		AttachmentsJSON:       attachmentsJSON,
 		HeadersJSON:           headersJSON,
+		TemplateData:          marshalTemplateData(req.TemplateData),
 		ListUnsubscribeURL:    luURL,
 		ListUnsubscribeMailto: luMailto,
 		ListUnsubscribePost:   luPost,
@@ -812,11 +843,21 @@ func (s *Service) Send(ctx context.Context, userID, apiKeyID uint, workspaceID *
 		_ = s.emailRepo.Update(em)
 	}
 
+	// Open/click tracking applies to every email, transactional and campaign
+	// alike, once the final content is known (after system-link substitution,
+	// before the enqueue/send decision). Campaign mail was already tracked at
+	// batch time; ContainsTracking keeps this idempotent. The sync path sends
+	// from req, so the rewritten content is mirrored there.
+	s.applyTracking(em)
+	req.HTML = em.HTMLBody
+	req.Text = em.TextBody
+
 	if s.devMode {
 		em.Status = models.EmailStatusSent
 		now := time.Now()
 		em.SentAt = &now
 		_ = s.emailRepo.Update(em)
+		emailhistory.RecordSent(s.recorder, em, map[string]any{"dev_mode": true})
 		if s.onSent != nil {
 			s.onSent()
 		}
@@ -833,6 +874,7 @@ func (s *Service) Send(ctx context.Context, userID, apiKeyID uint, workspaceID *
 			em.Status = models.EmailStatusFailed
 			em.ErrorMessage = fmt.Sprintf("failed to schedule: %v", err)
 			_ = s.emailRepo.Update(em)
+			emailhistory.RecordFailed(s.recorder, em, em.ErrorMessage, nil)
 			return nil, fmt.Errorf("failed to schedule email: %w", err)
 		}
 		return &SendResponse{ID: em.UUID, Status: em.Status}, nil
@@ -846,6 +888,7 @@ func (s *Service) Send(ctx context.Context, userID, apiKeyID uint, workspaceID *
 			em.Status = models.EmailStatusFailed
 			em.ErrorMessage = fmt.Sprintf("failed to enqueue: %v", err)
 			_ = s.emailRepo.Update(em)
+			emailhistory.RecordFailed(s.recorder, em, em.ErrorMessage, nil)
 			if s.onFailed != nil {
 				s.onFailed()
 			}
@@ -862,6 +905,44 @@ func (s *Service) Send(ctx context.Context, userID, apiKeyID uint, workspaceID *
 	return s.sendSync(em, userID, workspaceID, req)
 }
 
+// applyTracking rewrites the HTML body of a not-yet-tracked email with signed
+// open/click tracking URLs keyed on the email UUID, and persists the row. It
+// is a no-op when tracking is not configured or disabled, when the body is
+// empty, or when the content was already tracked (campaign mail is tracked at
+// batch time). A tracking failure never blocks the send.
+func (s *Service) applyTracking(em *models.Email) {
+	if s.trackingSvc == nil || em == nil || em.HTMLBody == "" {
+		return
+	}
+	if s.trackingEnabled != nil && !s.trackingEnabled() {
+		return
+	}
+	if tracking.ContainsTracking(em.HTMLBody) {
+		return
+	}
+	tracked := s.trackingSvc.ProcessHTMLEmail(em.HTMLBody, em.UUID)
+	if tracked == "" || tracked == em.HTMLBody {
+		return
+	}
+	em.HTMLBody = tracked
+	_ = s.emailRepo.Update(em)
+}
+
+// marshalTemplateData renders the template render data as the JSON string the
+// jsonb column expects. An empty map stays empty so the column default
+// applies; a marshal failure degrades to the structural default.
+func marshalTemplateData(data map[string]any) string {
+	if len(data) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(data)
+	if err != nil {
+		logger.Warn("failed to marshal template data", "error", err)
+		return "{}"
+	}
+	return string(b)
+}
+
 // sendSync performs synchronous SMTP delivery (used when no enqueuer is configured).
 func (s *Service) sendSync(em *models.Email, userID uint, workspaceID *uint, req *SendRequest) (*SendResponse, error) {
 	var smtpServer *models.SMTPServer
@@ -875,6 +956,7 @@ func (s *Service) sendSync(em *models.Email, userID uint, workspaceID *uint, req
 		em.Status = models.EmailStatusFailed
 		em.ErrorMessage = "no SMTP server configured"
 		_ = s.emailRepo.Update(em)
+		emailhistory.RecordFailed(s.recorder, em, em.ErrorMessage, nil)
 		s.dispatcher.Dispatch(userID, workspaceID, "email.failed", em.UUID, req.From)
 		if s.onFailed != nil {
 			s.onFailed()
@@ -895,6 +977,7 @@ func (s *Service) sendSync(em *models.Email, userID uint, workspaceID *uint, req
 			em.Status = models.EmailStatusFailed
 			em.ErrorMessage = fmt.Sprintf("sender %q is not in the allowed emails list", req.From)
 			_ = s.emailRepo.Update(em)
+			emailhistory.RecordFailed(s.recorder, em, em.ErrorMessage, nil)
 			s.dispatcher.Dispatch(userID, workspaceID, "email.failed", em.UUID, req.From)
 			if s.onFailed != nil {
 				s.onFailed()
@@ -910,6 +993,7 @@ func (s *Service) sendSync(em *models.Email, userID uint, workspaceID *uint, req
 		em.Status = models.EmailStatusFailed
 		em.ErrorMessage = err.Error()
 		_ = s.emailRepo.Update(em)
+		emailhistory.RecordFailed(s.recorder, em, em.ErrorMessage, map[string]any{"smtp_hostname": smtpServer.Host})
 		s.dispatcher.Dispatch(userID, workspaceID, "email.failed", em.UUID, req.From)
 		if s.onFailed != nil {
 			s.onFailed()
@@ -924,6 +1008,7 @@ func (s *Service) sendSync(em *models.Email, userID uint, workspaceID *uint, req
 	em.Status = models.EmailStatusSent
 	em.SentAt = &now
 	_ = s.emailRepo.Update(em)
+	emailhistory.RecordSent(s.recorder, em, map[string]any{"smtp_hostname": smtpServer.Host})
 	s.dispatcher.Dispatch(userID, workspaceID, "email.sent", em.UUID, req.From)
 	if s.onSent != nil {
 		s.onSent()
@@ -959,6 +1044,7 @@ func (s *Service) SendWithTemplate(ctx context.Context, userID, apiKeyID uint, w
 		Text:         rendered.Text,
 		Attachments:  req.Attachments,
 		TemplateName: tmpl.Name,
+		TemplateData: req.TemplateData,
 		Unsubscribe:  req.Unsubscribe,
 	})
 }
@@ -1071,6 +1157,7 @@ func (s *Service) SendBatch(ctx context.Context, userID, apiKeyID uint, workspac
 			HTML:         rendered.HTML,
 			Text:         rendered.Text,
 			TemplateName: tmpl.Name,
+			TemplateData: recipient.TemplateData,
 			Unsubscribe:  req.Unsubscribe,
 		})
 		if err != nil {
@@ -1119,6 +1206,7 @@ func (s *Service) SendTestByTemplateID(ctx context.Context, userID uint, workspa
 		HTML:         rendered.HTML,
 		Text:         rendered.Text,
 		TemplateName: tmpl.Name,
+		TemplateData: req.TemplateData,
 	})
 }
 

@@ -25,10 +25,12 @@ import (
 	"html/template"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/emailhistory"
 	"github.com/goposta/posta/internal/services/tracking"
 	"github.com/goposta/posta/internal/services/webhook"
 	"github.com/goposta/posta/internal/storage/repositories"
@@ -50,6 +52,7 @@ type TrackingHandler struct {
 	suppressionRepo *repositories.SuppressionRepository
 	trackingService *tracking.Service
 	dispatcher      *webhook.Dispatcher
+	recorder        *emailhistory.Recorder
 }
 
 func NewTrackingHandler(
@@ -77,12 +80,17 @@ func NewTrackingHandler(
 }
 
 type TrackingOpenRequest struct {
-	MessageID int    `param:"message_id"`
+	// MessageID carries the id segment of the tracking URL: either the numeric
+	// campaign-message id (legacy campaign URLs) or the email UUID followed by
+	// the ".gif" pixel suffix. parseTrackingRef tells the two apart.
+	MessageID string `param:"message_id"`
 	Sig       string `query:"sig"`
 }
 
 type TrackingClickRequest struct {
-	MessageID int    `param:"message_id"`
+	// MessageID carries the id segment of the tracking URL: either the numeric
+	// campaign-message id or the email UUID of the message the link was in.
+	MessageID string `param:"message_id"`
 	Hash      string `param:"hash"`
 	Sig       string `query:"sig"`
 }
@@ -95,16 +103,58 @@ type TrackingWebViewRequest struct {
 	Token string `param:"token"`
 }
 
+// trackingRefKind tells which kind of message a tracking URL points at.
+type trackingRefKind int
+
+const (
+	trackingRefCampaign trackingRefKind = iota // legacy campaign-message URLs
+	trackingRefEmail                           // email-UUID URLs (all mail)
+)
+
+// trackingRef is the resolved target of a tracking URL's id segment.
+type trackingRef struct {
+	kind      trackingRefKind
+	messageID uint   // campaign-message id when kind == trackingRefCampaign
+	emailUUID string // email uuid when kind == trackingRefEmail
+}
+
+// parseTrackingRef classifies the id segment of a /t/ URL: a plain integer
+// addresses a campaign message (campaign mail signed before email-keyed
+// tracking existed), anything else is the email UUID. A trailing ".gif" —
+// the pixel suffix on open URLs — is ignored.
+func parseTrackingRef(raw string) trackingRef {
+	raw = strings.TrimSuffix(raw, ".gif")
+	if id, err := strconv.ParseUint(raw, 10, 64); err == nil {
+		return trackingRef{kind: trackingRefCampaign, messageID: uint(id)}
+	}
+	return trackingRef{kind: trackingRefEmail, emailUUID: raw}
+}
+
+// SetRecorder wires the message-history event recorder so opens, clicks and
+// unsubscribes also land on the email event timeline. Nil (the default)
+// disables that recording; bot-filtered hits record nothing either way.
+func (h *TrackingHandler) SetRecorder(r *emailhistory.Recorder) {
+	h.recorder = r
+}
+
 // OpenPixel serves a 1x1 transparent GIF and records the open event.
 // Signature is mandatory; unsigned or bad-sig requests get 404.
 func (h *TrackingHandler) OpenPixel(c *okapi.Context, req *TrackingOpenRequest) error {
-	if req.Sig == "" || !h.trackingService.VerifyOpenSig(uint(req.MessageID), req.Sig) {
+	ref := parseTrackingRef(req.MessageID)
+	if req.Sig == "" {
+		return c.AbortNotFound("not found")
+	}
+	if ref.kind == trackingRefCampaign {
+		if !h.trackingService.VerifyOpenSig(ref.messageID, req.Sig) {
+			return c.AbortNotFound("not found")
+		}
+	} else if !h.trackingService.VerifyOpenEmailSig(ref.emailUUID, req.Sig) {
 		return c.AbortNotFound("not found")
 	}
 
 	ua := c.Request().UserAgent()
 	if !isBotUA(ua) {
-		go h.recordOpen(uint(req.MessageID), c.RealIP(), ua)
+		go h.recordOpen(ref, c.RealIP(), ua)
 	}
 
 	c.ResponseWriter().Header().Set("Content-Type", "image/gif")
@@ -116,7 +166,15 @@ func (h *TrackingHandler) OpenPixel(c *okapi.Context, req *TrackingOpenRequest) 
 
 // ClickRedirect records the click and redirects to the original URL.
 func (h *TrackingHandler) ClickRedirect(c *okapi.Context, req *TrackingClickRequest) error {
-	if req.Sig == "" || !h.trackingService.VerifyClickSig(uint(req.MessageID), req.Hash, req.Sig) {
+	ref := parseTrackingRef(req.MessageID)
+	if req.Sig == "" {
+		return c.AbortNotFound("not found")
+	}
+	if ref.kind == trackingRefCampaign {
+		if !h.trackingService.VerifyClickSig(ref.messageID, req.Hash, req.Sig) {
+			return c.AbortNotFound("not found")
+		}
+	} else if !h.trackingService.VerifyClickEmailSig(ref.emailUUID, req.Hash, req.Sig) {
 		return c.AbortNotFound("not found")
 	}
 
@@ -132,7 +190,7 @@ func (h *TrackingHandler) ClickRedirect(c *okapi.Context, req *TrackingClickRequ
 
 	ua := c.Request().UserAgent()
 	if !isBotUA(ua) {
-		go h.recordClick(uint(req.MessageID), link.ID, c.RealIP(), ua)
+		go h.recordClick(ref, link, c.RealIP(), ua)
 	}
 
 	c.Redirect(http.StatusFound, link.OriginalURL)
@@ -222,6 +280,7 @@ func (h *TrackingHandler) TxUnsubscribeConfirm(c *okapi.Context, req *TrackingUn
 				Kind:        kind,
 				Reason:      "one_click_unsubscribe",
 			})
+			emailhistory.RecordUnsubscribed(h.recorder, em, addr)
 			h.emitUnsubscribed(em, addr)
 		}
 	}
@@ -315,6 +374,10 @@ func (h *TrackingHandler) UnsubscribeConfirm(c *okapi.Context, req *TrackingUnsu
 		UserAgent:         c.Request().UserAgent(),
 	})
 
+	// Mirror the unsubscribe onto the message-history timeline of the email
+	// the campaign message was delivered as (absent for older campaign mail).
+	emailhistory.RecordUnsubscribed(h.recorder, h.emailForMessage(msg), "")
+
 	return trackingNotice(c, http.StatusOK, "You're unsubscribed",
 		"You've been removed from this mailing list. Other lists you're subscribed to are unaffected.", "success")
 }
@@ -357,51 +420,87 @@ func (h *TrackingHandler) CampaignAnalytics(c *okapi.Context, req *CampaignAnaly
 	})
 }
 
-func (h *TrackingHandler) recordOpen(messageID uint, ip, userAgent string) {
-	msg, err := h.messageRepo.FindByCampaignMessageID(messageID)
-	if err != nil {
-		return
-	}
+func (h *TrackingHandler) recordOpen(ref trackingRef, ip, userAgent string) {
+	var em *models.Email
+	if ref.kind == trackingRefCampaign {
+		msg, err := h.messageRepo.FindByCampaignMessageID(ref.messageID)
+		if err != nil {
+			return
+		}
 
-	// Record first open on the campaign message
-	if msg.OpenedAt == nil {
-		now := time.Now()
-		msg.OpenedAt = &now
-		_ = h.messageRepo.UpdateOpenedAt(msg.ID)
-	}
+		// Record first open on the campaign message
+		if msg.OpenedAt == nil {
+			now := time.Now()
+			msg.OpenedAt = &now
+			_ = h.messageRepo.UpdateOpenedAt(msg.ID)
+		}
 
-	// Always record the event (for total open tracking)
-	_ = h.trackingRepo.CreateEvent(&models.TrackingEvent{
-		CampaignMessageID: msg.ID,
-		EventType:         models.TrackingEventOpen,
-		IP:                ip,
-		UserAgent:         userAgent,
-	})
-}
-
-func (h *TrackingHandler) recordClick(messageID uint, linkID uint, ip, userAgent string) {
-	msg, err := h.messageRepo.FindByCampaignMessageID(messageID)
-	if err != nil {
-		return
-	}
-
-	// Record first click on the campaign message
-	if msg.ClickedAt == nil {
-		now := time.Now()
-		msg.ClickedAt = &now
-		_ = h.messageRepo.UpdateClickedAt(msg.ID)
-	}
-
-	// Increment link click count
-	h.trackingRepo.IncrementLinkClickCount(linkID)
-
-	if !h.trackingRepo.HasClickEvent(msg.ID, linkID) {
+		// Always record the event (for total open tracking)
 		_ = h.trackingRepo.CreateEvent(&models.TrackingEvent{
 			CampaignMessageID: msg.ID,
-			EventType:         models.TrackingEventClick,
-			TrackedLinkID:     &linkID,
+			EventType:         models.TrackingEventOpen,
 			IP:                ip,
 			UserAgent:         userAgent,
 		})
+
+		em = h.emailForMessage(msg)
+	} else if e, err := h.emailRepo.FindByUUID(ref.emailUUID); err == nil {
+		em = e
 	}
+
+	// Mirror the open onto the message-history timeline. The write-once
+	// opened_at stamp lives in the Recorder; repeated opens still add rows.
+	emailhistory.RecordOpened(h.recorder, em, ip, userAgent)
+}
+
+func (h *TrackingHandler) recordClick(ref trackingRef, link *models.TrackedLink, ip, userAgent string) {
+	var em *models.Email
+	if ref.kind == trackingRefCampaign {
+		msg, err := h.messageRepo.FindByCampaignMessageID(ref.messageID)
+		if err != nil {
+			return
+		}
+
+		// Record first click on the campaign message
+		if msg.ClickedAt == nil {
+			now := time.Now()
+			msg.ClickedAt = &now
+			_ = h.messageRepo.UpdateClickedAt(msg.ID)
+		}
+
+		// Increment link click count
+		h.trackingRepo.IncrementLinkClickCount(link.ID)
+
+		if !h.trackingRepo.HasClickEvent(msg.ID, link.ID) {
+			_ = h.trackingRepo.CreateEvent(&models.TrackingEvent{
+				CampaignMessageID: msg.ID,
+				EventType:         models.TrackingEventClick,
+				TrackedLinkID:     &link.ID,
+				IP:                ip,
+				UserAgent:         userAgent,
+			})
+		}
+
+		em = h.emailForMessage(msg)
+	} else if e, err := h.emailRepo.FindByUUID(ref.emailUUID); err == nil {
+		em = e
+	}
+
+	// Mirror the click onto the message-history timeline: one row per distinct
+	// interaction, the original destination URL included.
+	emailhistory.RecordClicked(h.recorder, em, link.OriginalURL, ip, userAgent)
+}
+
+// emailForMessage resolves the Email row a campaign message was delivered as,
+// so campaign opens/clicks also land on the message-history timeline. Returns
+// nil when the link does not exist yet (older campaign mail).
+func (h *TrackingHandler) emailForMessage(msg *models.CampaignMessage) *models.Email {
+	if msg == nil || msg.EmailID == nil || h.emailRepo == nil {
+		return nil
+	}
+	em, err := h.emailRepo.FindByID(*msg.EmailID)
+	if err != nil {
+		return nil
+	}
+	return em
 }

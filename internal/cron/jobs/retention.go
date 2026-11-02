@@ -36,16 +36,19 @@ import (
 // delivery records based on platform retention settings. It also scrubs email
 // bodies and attachments off records that outlive their (shorter) content windows.
 type RetentionCleanupJob struct {
-	emailRepo        *repositories.EmailRepository
-	eventRepo        *repositories.EventRepository
-	whDeliveryRepo   *repositories.WebhookDeliveryRepository
-	trackingRepo     *repositories.TrackingRepository
-	inboundEmailRepo *repositories.InboundEmailRepository
-	messageRepo      *repositories.MessageRepository
-	formRepo         *repositories.FormRepository
-	notificationRepo *repositories.NotificationRepository
-	blobStore        blob.Store
-	settings         *settings.Provider
+	emailRepo             *repositories.EmailRepository
+	eventRepo             *repositories.EventRepository
+	whDeliveryRepo        *repositories.WebhookDeliveryRepository
+	whDeliveryAttemptRepo *repositories.WebhookDeliveryAttemptRepository
+	trackingRepo          *repositories.TrackingRepository
+	inboundEmailRepo      *repositories.InboundEmailRepository
+	messageRepo           *repositories.MessageRepository
+	formRepo              *repositories.FormRepository
+	notificationRepo      *repositories.NotificationRepository
+	emailEventRepo        *repositories.EmailEventRepository
+	incomingWebhookRepo   *repositories.IncomingWebhookEventRepository
+	blobStore             blob.Store
+	settings              *settings.Provider
 }
 
 func NewRetentionCleanupJob(
@@ -84,6 +87,23 @@ func (j *RetentionCleanupJob) SetFormRepo(r *repositories.FormRepository) {
 // it is, so age alone never removes it.
 func (j *RetentionCleanupJob) SetNotificationRepo(r *repositories.NotificationRepository) {
 	j.notificationRepo = r
+}
+
+// SetEmailEventRepo enables pruning of the message-history event timeline.
+func (j *RetentionCleanupJob) SetEmailEventRepo(r *repositories.EmailEventRepository) {
+	j.emailEventRepo = r
+}
+
+// SetIncomingWebhookEventRepo enables pruning of the raw webhook payloads
+// captured from bounce posts and tracking callbacks.
+func (j *RetentionCleanupJob) SetIncomingWebhookEventRepo(r *repositories.IncomingWebhookEventRepository) {
+	j.incomingWebhookRepo = r
+}
+
+// SetWebhookDeliveryAttemptRepo enables pruning of the per-attempt history of
+// outgoing webhook deliveries. Attempts share the delivery retention window.
+func (j *RetentionCleanupJob) SetWebhookDeliveryAttemptRepo(r *repositories.WebhookDeliveryAttemptRepository) {
+	j.whDeliveryAttemptRepo = r
 }
 
 // SetBlobStore configures the blob store so retention cleanup can also purge
@@ -363,6 +383,18 @@ func (j *RetentionCleanupJob) Run(_ context.Context, _ *asynq.Client) error {
 		} else if deleted > 0 {
 			logger.Info("retention cleanup: deleted old webhook deliveries", "count", deleted, "older_than_days", whRetention)
 		}
+
+		// Per-attempt rows share the delivery window: their parents are deleted
+		// just above, so an age cutoff on the same setting keeps both tables in
+		// lockstep and no attempt outlives its delivery.
+		if j.whDeliveryAttemptRepo != nil {
+			deleted, err := j.whDeliveryAttemptRepo.DeleteOlderThan(before)
+			if err != nil {
+				logger.Error("retention cleanup: failed to delete old webhook delivery attempts", "error", err)
+			} else if deleted > 0 {
+				logger.Info("retention cleanup: deleted old webhook delivery attempts", "count", deleted, "older_than_days", whRetention)
+			}
+		}
 	}
 
 	// Clean up old tracking events
@@ -374,6 +406,33 @@ func (j *RetentionCleanupJob) Run(_ context.Context, _ *asynq.Client) error {
 			logger.Error("retention cleanup: failed to delete old tracking events", "error", err)
 		} else if deleted > 0 {
 			logger.Info("retention cleanup: deleted old tracking events", "count", deleted, "older_than_days", trackingRetention)
+		}
+	}
+
+	// Clean up the message-history event timeline and the raw webhook payloads
+	// captured from bounce posts and tracking callbacks. Both share the
+	// email-events window: they are the same lifecycle record at different
+	// levels of detail.
+	eventsRetention := j.settings.EmailEventsRetentionDays()
+	if eventsRetention > 0 {
+		before := time.Now().AddDate(0, 0, -eventsRetention)
+
+		if j.emailEventRepo != nil {
+			deleted, err := j.emailEventRepo.DeleteOlderThan(before)
+			if err != nil {
+				logger.Error("retention cleanup: failed to delete old email events", "error", err)
+			} else if deleted > 0 {
+				logger.Info("retention cleanup: deleted old email events", "count", deleted, "older_than_days", eventsRetention)
+			}
+		}
+
+		if j.incomingWebhookRepo != nil {
+			deleted, err := j.incomingWebhookRepo.DeleteOlderThan(before)
+			if err != nil {
+				logger.Error("retention cleanup: failed to delete old incoming webhook events", "error", err)
+			} else if deleted > 0 {
+				logger.Info("retention cleanup: deleted old incoming webhook events", "count", deleted, "older_than_days", eventsRetention)
+			}
 		}
 	}
 

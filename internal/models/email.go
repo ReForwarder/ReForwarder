@@ -38,30 +38,45 @@ const (
 )
 
 type Email struct {
-	ID                    uint           `json:"id" gorm:"primaryKey"`
-	UUID                  string         `json:"uuid" gorm:"type:uuid;default:gen_random_uuid();uniqueIndex;not null"`
-	UserID                uint           `json:"user_id" gorm:"index;not null"`
-	WorkspaceID           *uint          `json:"workspace_id,omitempty" gorm:"index"`
-	APIKeyID              *uint          `json:"api_key_id" gorm:"index"`
-	Sender                string         `json:"sender" gorm:"not null"`
-	Recipients            pq.StringArray `json:"recipients" gorm:"type:text[];not null"`
-	Subject               string         `json:"subject" gorm:"not null"`
-	TemplateName          string         `json:"template_name,omitempty"`
-	HTMLBody              string         `json:"html_body"`
-	TextBody              string         `json:"text_body"`
-	AttachmentsJSON       string         `json:"attachments_json,omitempty" gorm:"type:text"`
-	HeadersJSON           string         `json:"headers_json,omitempty" gorm:"type:text"`
-	ListUnsubscribeURL    string         `json:"list_unsubscribe_url,omitempty" gorm:"type:text"`
-	ListUnsubscribeMailto string         `json:"list_unsubscribe_mailto,omitempty" gorm:"type:text"`
-	ListUnsubscribePost   bool           `json:"list_unsubscribe_post,omitempty"`
-	UnsubscribeListID     *uint          `json:"unsubscribe_list_id,omitempty" gorm:"index"`
-	Status                EmailStatus    `json:"status" gorm:"default:pending;not null"`
-	ErrorMessage          string         `json:"error_message"`
-	RetryCount            int            `json:"retry_count" gorm:"default:0;not null"`
-	CreatedAt             time.Time      `json:"created_at"`
-	SentAt                *time.Time     `json:"sent_at"`
-	ScheduledAt           *time.Time     `json:"scheduled_at"`
-	Provider              string         `json:"provider,omitempty" gorm:"index;size:32"`
+	ID              uint           `json:"id" gorm:"primaryKey"`
+	UUID            string         `json:"uuid" gorm:"type:uuid;default:gen_random_uuid();uniqueIndex;not null"`
+	ExternalID      string         `json:"external_id,omitempty" gorm:"size:120;index"`
+	UserID          uint           `json:"user_id" gorm:"index;not null"`
+	WorkspaceID     *uint          `json:"workspace_id,omitempty" gorm:"index"`
+	APIKeyID        *uint          `json:"api_key_id" gorm:"index"`
+	Sender          string         `json:"sender" gorm:"not null"`
+	Recipients      pq.StringArray `json:"recipients" gorm:"type:text[];not null"`
+	Subject         string         `json:"subject" gorm:"not null"`
+	TemplateName    string         `json:"template_name,omitempty"`
+	HTMLBody        string         `json:"html_body"`
+	TextBody        string         `json:"text_body"`
+	AttachmentsJSON string         `json:"attachments_json,omitempty" gorm:"type:text"`
+	HeadersJSON     string         `json:"headers_json,omitempty" gorm:"type:text"`
+	// TemplateData holds the render data of the template as a JSON object
+	// string. The default keeps Create-safe behavior: gorm omits the zero
+	// value, and jsonb rejects ''.
+	TemplateData          string      `json:"template_data,omitempty" gorm:"type:jsonb;not null;default:'{}'"`
+	ListUnsubscribeURL    string      `json:"list_unsubscribe_url,omitempty" gorm:"type:text"`
+	ListUnsubscribeMailto string      `json:"list_unsubscribe_mailto,omitempty" gorm:"type:text"`
+	ListUnsubscribePost   bool        `json:"list_unsubscribe_post,omitempty"`
+	UnsubscribeListID     *uint       `json:"unsubscribe_list_id,omitempty" gorm:"index"`
+	Status                EmailStatus `json:"status" gorm:"default:pending;not null"`
+	ErrorMessage          string      `json:"error_message"`
+	RetryCount            int         `json:"retry_count" gorm:"default:0;not null"`
+	CreatedAt             time.Time   `json:"created_at"`
+	SentAt                *time.Time  `json:"sent_at"`
+	ScheduledAt           *time.Time  `json:"scheduled_at"`
+	Provider              string      `json:"provider,omitempty" gorm:"index;size:32"`
+
+	// Write-once lifecycle timestamps: denormalized from the message-history
+	// event timeline and set only the first time the state is reached, so the
+	// logs list can filter and sort without joining email_events.
+	DeliveredAt    *time.Time `json:"delivered_at,omitempty"`
+	OpenedAt       *time.Time `json:"opened_at,omitempty"`
+	ClickedAt      *time.Time `json:"clicked_at,omitempty"`
+	BouncedAt      *time.Time `json:"bounced_at,omitempty"`
+	ComplainedAt   *time.Time `json:"complained_at,omitempty"`
+	UnsubscribedAt *time.Time `json:"unsubscribed_at,omitempty"`
 
 	SMTPHostname string `json:"smtp_hostname,omitempty"`
 
