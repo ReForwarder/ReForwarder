@@ -5,7 +5,7 @@ import type * as Preset from '@docusaurus/preset-classic';
 const config: Config = {
   title: 'ReForwarder',
   tagline: 'Self-hosted email delivery platform for developers',
-  favicon: 'img/favicon.ico',
+  favicon: 'img/reforwarder-favicon.ico',
 
   future: {
     v4: true,
@@ -52,7 +52,7 @@ const config: Config = {
   ],
 
   themeConfig: {
-    image: 'img/logo.png',
+    image: 'img/reforwarder-logo.png',
     colorMode: {
       defaultMode: 'dark',
       respectPrefersColorScheme: true,
@@ -61,7 +61,7 @@ const config: Config = {
       title: 'ReForwarder.',
       logo: {
         alt: 'ReForwarder Logo',
-        src: 'img/logo.png',
+        src: 'img/reforwarder-logo.png',
       },
       items: [
         {
