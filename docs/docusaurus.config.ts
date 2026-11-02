@@ -11,11 +11,13 @@ const config: Config = {
     v4: true,
   },
 
-  url: 'https://docs.goposta.dev',
-  baseUrl: '/',
+  // GitHub Pages serves this site from the project sub-path:
+  // https://reforwarder.github.io/ReForwarder/
+  url: 'https://reforwarder.github.io',
+  baseUrl: '/ReForwarder/',
 
-  organizationName: 'goposta',
-  projectName: 'posta',
+  organizationName: 'ReForwarder',
+  projectName: 'ReForwarder',
 
   onBrokenLinks: 'warn',
 
@@ -38,7 +40,7 @@ const config: Config = {
       {
         docs: {
           sidebarPath: './sidebars.ts',
-          editUrl: 'https://github.com/goposta/posta/tree/main/docs/',
+          editUrl: 'https://github.com/ReForwarder/ReForwarder/tree/main/docs/',
           routeBasePath: 'docs',
         },
         blog: false,
@@ -74,12 +76,7 @@ const config: Config = {
           position: 'left',
         },
         {
-          href: 'https://goposta.discourse.group/',
-          label: 'Community',
-          position: 'right',
-        },
-        {
-          href: 'https://github.com/goposta/posta',
+          href: 'https://github.com/ReForwarder/ReForwarder',
           label: 'GitHub',
           position: 'right',
         },
@@ -108,15 +105,11 @@ const config: Config = {
           items: [
             {
               label: 'GitHub',
-              href: 'https://github.com/goposta/posta',
+              href: 'https://github.com/ReForwarder/ReForwarder',
             },
             {
-              label: 'Community',
-              href: 'https://goposta.discourse.group/',
-            },
-            {
-              label: 'Website',
-              href: 'https://goposta.dev',
+              label: 'Report an Issue',
+              href: 'https://github.com/ReForwarder/ReForwarder/issues',
             },
           ],
         },
