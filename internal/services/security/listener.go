@@ -22,6 +22,7 @@ package security
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"net/netip"
 	"strings"
@@ -235,30 +236,34 @@ func (t *tlsServerListener) acceptLoop() {
 				return
 			default:
 			}
-			if ne, ok := err.(net.Error); ok && ne.Temporary() {
-				if tempDelay == 0 {
-					tempDelay = 5 * time.Millisecond
-				} else {
-					tempDelay *= 2
-				}
-				if max := time.Second; tempDelay > max {
-					tempDelay = max
-				}
+			if errors.Is(err, net.ErrClosed) {
+				// The owner closed the listener: surface the sentinel once so
+				// the accept consumer can finish, then wait for shutdown.
 				select {
+				case t.acceptErrs <- err:
 				case <-t.done:
-					return
-				case <-time.After(tempDelay):
 				}
-				continue
+				<-t.done
+				return
 			}
-			// Fatal (e.g. listener closed by an owner that is not us):
-			// deliver once, then wait for Close so Accept never hangs.
+			// Everything else is treated as transient and retried with the
+			// same exponential backoff net/http and go-smtp's Serve use
+			// (5ms doubling to 1s) — net.Error.Temporary is deprecated and
+			// misclassifies several retryable errors anyway.
+			if tempDelay == 0 {
+				tempDelay = 5 * time.Millisecond
+			} else {
+				tempDelay *= 2
+			}
+			if max := time.Second; tempDelay > max {
+				tempDelay = max
+			}
 			select {
-			case t.acceptErrs <- err:
 			case <-t.done:
+				return
+			case <-time.After(tempDelay):
 			}
-			<-t.done
-			return
+			continue
 		}
 
 		tempDelay = 0

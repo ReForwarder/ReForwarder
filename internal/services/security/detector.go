@@ -103,7 +103,7 @@ func NewDetector(rdb *redis.Client, rules *RulesLoader, bans *BanService, ev *Ev
 		now:      now,
 		failOpen: failOpen,
 		notified: newNotifyCache(notifyCacheCap),
-		limiter:  newLogThrottle(30 * time.Second),
+		limiter:  newLogThrottle(),
 	}
 	if rdb != nil {
 		d.store = redisWindowStore{rdb: rdb}
@@ -484,7 +484,7 @@ func (d *Detector) evaluate(ctx context.Context, ip netip.Addr, login string, tr
 		RiskScore:   score,
 		Rule:        decision,
 		BanType:     "automatic",
-		CreatedBy:   "system",
+		CreatedBy:   CreatedBySystem,
 	}); err != nil {
 		return err
 	}
