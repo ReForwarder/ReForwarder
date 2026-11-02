@@ -14,7 +14,7 @@ const settings = ref<AdminSetting[]>([])
 const settingMeta: Record<string, { label: string; description: string; category: string; advanced?: boolean }> = {
   registration_enabled: { label: 'User Registration', description: 'Allow new users to self-register.', category: 'General' },
   allowed_signup_domains: { label: 'Allowed Signup Domains', description: 'Restrict registration to specific email domains (comma-separated). Leave empty to allow all.', category: 'General' },
-  campaign_click_tracking_enabled: { label: 'Campaign Click Tracking', description: 'Automatically rewrite campaign URLs to track recipient clicks. Disable this option to preserve original URLs and avoid tracking redirects.', category: 'General' },
+  email_tracking_enabled: { label: 'Email open & click tracking', description: 'Rewrite links and inject the open pixel in all outbound email so delivery analytics work.', category: 'Privacy' },
   maintenance_mode: { label: 'Maintenance Mode', description: 'Disable all email sending and show a maintenance banner.', category: 'General' },
   require_email_verification: { label: 'Require Email Verification', description: 'New users must verify their email before sending.', category: 'Security' },
   require_domain_verification: { label: 'Require Domain Verification', description: 'Users must verify domain ownership before sending.', category: 'Security' },
@@ -244,6 +244,20 @@ const sensitiveToggles: Record<string, { enable: ConfirmCopy; disable: ConfirmCo
       title: 'Redact Email Content',
       message: 'Email body content will be redacted from the dashboard for privacy. Continue?',
       confirmText: 'Redact Content',
+      variant: 'warning',
+    },
+  },
+  email_tracking_enabled: {
+    enable: {
+      title: 'Enable Email Tracking',
+      message: 'Links in all outbound email will be rewritten and an open pixel injected, so opens and clicks are recorded. Continue?',
+      confirmText: 'Enable Tracking',
+      variant: 'warning',
+    },
+    disable: {
+      title: 'Disable Email Tracking',
+      message: 'Outbound email will keep its original links and no open pixel is injected — open and click analytics will stop. Continue?',
+      confirmText: 'Disable Tracking',
       variant: 'warning',
     },
   },

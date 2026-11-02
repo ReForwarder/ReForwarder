@@ -1465,3 +1465,188 @@ export interface SecurityAllowlistInput {
   ip_cidr: string
   description?: string
 }
+
+// ---- Logs & message history (/workspaces/current/logs/*) ----
+
+/** One timeline entry attached to a message-history row. */
+export interface MessageEventRow {
+  type: string
+  occurred_at: string
+}
+
+/**
+ * Slim message-history list row (handlers.MessageRow): every metadata column
+ * of an email, never its bodies. The event timeline is embedded so the list
+ * can render state icons without one request per row.
+ */
+export interface MessageRow {
+  uuid: string
+  external_id?: string
+  sender: string
+  recipient: string
+  subject: string
+  status: Email['status']
+  template_name?: string
+  broadcast_id?: number
+  broadcast_name?: string
+  list_id?: number
+  events: MessageEventRow[]
+  error?: string
+  provider?: string
+  smtp_hostname?: string
+  api_key_id?: number
+  created_at: string
+  sent_at?: string
+  delivered_at?: string
+  opened_at?: string
+  clicked_at?: string
+  bounced_at?: string
+  complained_at?: string
+  unsubscribed_at?: string
+}
+
+/**
+ * One message without its bodies (GET /logs/messages/{uuid} serves the slim
+ * Email projection): the same metadata columns as the list rows, plus the
+ * unsubscribe header fields. Body fields are empty strings in this projection —
+ * content is only served by the dedicated content endpoint.
+ */
+export interface MessageDetailRow {
+  id: number
+  uuid: string
+  external_id?: string
+  user_id: number
+  workspace_id?: number
+  api_key_id?: number | null
+  api_key_name?: string
+  sender: string
+  recipients: string[] | null
+  subject: string
+  template_name?: string
+  html_body: string
+  text_body: string
+  attachments_json?: string
+  headers_json?: string
+  template_data?: string
+  list_unsubscribe_url?: string
+  list_unsubscribe_mailto?: string
+  list_unsubscribe_post?: boolean
+  unsubscribe_list_id?: number | null
+  status: Email['status']
+  error_message?: string
+  retry_count: number
+  created_at: string
+  sent_at: string | null
+  scheduled_at: string | null
+  provider?: string
+  delivered_at?: string
+  opened_at?: string
+  clicked_at?: string
+  bounced_at?: string
+  complained_at?: string
+  unsubscribed_at?: string
+  smtp_hostname?: string
+}
+
+/** One attachment of a message, without its content. */
+export interface MessageAttachmentInfo {
+  filename: string
+  content_type?: string
+  storage_key?: string
+}
+
+/**
+ * Content payload of the message-content endpoint. Answers
+ * {redacted: true} — and nothing else — when the platform's
+ * email_content_visibility setting hides content.
+ */
+export interface MessageContent {
+  redacted?: boolean
+  html_body?: string
+  text_body?: string
+  template_data?: Record<string, any>
+  headers?: Record<string, any>
+  attachments?: MessageAttachmentInfo[]
+  template_name?: string
+}
+
+/** A full email_events timeline row (GET /logs/messages/{uuid}/events). */
+export interface EmailEventRecord {
+  id: number
+  email_uuid: string
+  workspace_id?: number
+  type: string
+  occurred_at: string
+  provider: string
+  provider_event_id?: string
+  recipient: string
+  ip?: string
+  user_agent?: string
+  url?: string
+  error?: string
+  metadata: string
+  created_at: string
+}
+
+/**
+ * List row of a stored incoming webhook payload — the raw body itself is only
+ * served by the detail endpoint.
+ */
+export interface IncomingWebhookEventRow {
+  id: number
+  source: string
+  type: string
+  email_uuid?: string
+  recipient: string
+  message_id?: string
+  process_error?: string
+  created_at: string
+}
+
+/** Detail of one incoming webhook event: the list row plus the raw payload. */
+export interface IncomingWebhookEventDetail extends IncomingWebhookEventRow {
+  raw_payload: string
+}
+
+/** Outgoing webhook delivery row with its recorded attempt count. */
+export interface OutgoingDeliveryRow {
+  id: number
+  webhook_id: number
+  user_id: number
+  workspace_id?: number
+  event: string
+  status: 'success' | 'failed'
+  http_status_code: number
+  error_message?: string
+  attempt: number
+  created_at: string
+  attempt_count: number
+}
+
+/** One recorded HTTP attempt of a webhook delivery. */
+export interface DeliveryAttemptRow {
+  id: number
+  delivery_id: number
+  attempt: number
+  status_code: number
+  response_body: string
+  error?: string
+  created_at: string
+}
+
+/** One audit event row: what happened, who did it, to what, and how it ended. */
+export interface AuditRow {
+  id: number
+  category: Event['category']
+  type: string
+  workspace_id?: number | null
+  actor_id: number | null
+  actor_name: string
+  client_ip?: string
+  message: string
+  metadata: string
+  outcome?: 'success' | 'failure' | 'denied'
+  target_type?: string
+  target_id?: string
+  created_at: string
+}
