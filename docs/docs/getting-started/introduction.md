@@ -65,5 +65,5 @@ what each process does, how the queues are split, and how to deploy them.
 
 ## Community
 
-Have a question, an idea, or something you've built with Posta? Join the conversation on the [Posta community forum](https://goposta.discourse.group/).
-Bugs and feature requests go to [GitHub issues](https://github.com/goposta/posta/issues).
+Have a question, an idea, or something you've built with ReForwarder? Open a discussion or issue on the [ReForwarder repository](https://github.com/ReForwarder/ReForwarder).
+Bugs and feature requests go to [GitHub issues](https://github.com/ReForwarder/ReForwarder/issues).
