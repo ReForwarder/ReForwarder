@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
+import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useThemeStore } from '../stores/theme'
@@ -111,6 +111,8 @@ interface NavItem {
   matchPaths?: string[]
   /** Match only the exact path — for children whose parent path is their prefix. */
   exact?: boolean
+  /** Render as a collapsible group header instead of a link; clicking toggles the children. */
+  collapsible?: boolean
   /** Nested items shown indented under this entry. */
   children?: NavItem[]
 }
@@ -240,6 +242,8 @@ const navSections: NavSection[] = [
         name: 'Security',
         path: '/admin/security',
         icon: 'shield',
+        // Group header, not a link — Overview is this section's landing page.
+        collapsible: true,
         children: [
           // Overview shares the group's path, so it matches exactly only.
           { name: 'Overview', path: '/admin/security', icon: 'shield', exact: true },
@@ -274,6 +278,31 @@ const sectionOpen = ref<Record<string, boolean>>(loadSectionState())
 function toggleSection(id: string) {
   sectionOpen.value[id] = !sectionOpen.value[id]
   localStorage.setItem(SECTION_STATE_KEY, JSON.stringify(sectionOpen.value))
+}
+
+const GROUP_STATE_KEY = 'posta_nav_groups'
+
+function loadGroupState(): Record<string, boolean> {
+  // Groups start expanded, matching the always-visible children this replaces.
+  const defaults: Record<string, boolean> = {}
+  navSections.forEach((s) => {
+    s.items.forEach((item) => {
+      if (item.collapsible) defaults[item.name] = true
+    })
+  })
+  try {
+    const saved = JSON.parse(localStorage.getItem(GROUP_STATE_KEY) || '{}')
+    return { ...defaults, ...saved }
+  } catch {
+    return defaults
+  }
+}
+
+const groupOpen = ref<Record<string, boolean>>(loadGroupState())
+
+function toggleGroup(name: string) {
+  groupOpen.value[name] = !groupOpen.value[name]
+  localStorage.setItem(GROUP_STATE_KEY, JSON.stringify(groupOpen.value))
 }
 
 const visibleSections = computed(() =>
@@ -329,6 +358,25 @@ function isItemActive(item: NavItem): boolean {
   if (item.exact) return route.path === item.path
   return isActive(item.path)
 }
+
+/** A collapsible group is "in section" when any child matches the current route. */
+function isGroupActive(item: NavItem): boolean {
+  return !!item.children?.some((child) => isItemActive(child))
+}
+
+// Keep collapsible groups expanded while one of their children is the active
+// page — including direct loads of a child URL. Only opens; never force-closes.
+watch(
+  () => route.path,
+  () => {
+    navSections.forEach((section) => {
+      section.items.forEach((item) => {
+        if (item.collapsible && isGroupActive(item)) groupOpen.value[item.name] = true
+      })
+    })
+  },
+  { immediate: true }
+)
 
 function navigate(path: string) {
   router.push(path)
@@ -464,13 +512,25 @@ function getIcon(name: string): string {
                   <span class="nav-icon" v-html="getIcon(item.icon)"></span>
                   <span v-if="!sidebarCollapsed" class="nav-label">{{ item.name }}</span>
                 </a>
+                <button v-else-if="item.collapsible" class="nav-item nav-group-toggle"
+                  :class="{ 'in-section': isGroupActive(item) }" type="button" :aria-expanded="groupOpen[item.name]"
+                  :title="sidebarCollapsed ? item.name : ''" @click="toggleGroup(item.name)">
+                  <span class="nav-icon" v-html="getIcon(item.icon)"></span>
+                  <span v-if="!sidebarCollapsed" class="nav-label">{{ item.name }}</span>
+                  <svg v-if="!sidebarCollapsed" class="nav-section-chevron nav-group-chevron"
+                    :class="{ collapsed: !groupOpen[item.name] }" width="12" height="12" viewBox="0 0 16 16" fill="none">
+                    <path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                      stroke-linejoin="round" />
+                  </svg>
+                </button>
                 <router-link v-else class="nav-item" :class="{ active: isItemActive(item) }"
                   :title="sidebarCollapsed ? item.name : ''" :to="itemTo(item)">
                   <span class="nav-icon" v-html="getIcon(item.icon)"></span>
                   <span v-if="!sidebarCollapsed" class="nav-label">{{ item.name }}</span>
                 </router-link>
-                <router-link v-for="child in item.children" :key="child.path" class="nav-item nav-subitem"
-                  :class="{ active: isItemActive(child) }" :title="sidebarCollapsed ? child.name : ''" :to="child.path">
+                <router-link v-for="child in item.children" v-show="!item.collapsible || groupOpen[item.name]"
+                  :key="child.path" class="nav-item nav-subitem" :class="{ active: isItemActive(child) }"
+                  :title="sidebarCollapsed ? child.name : ''" :to="child.path">
                   <span class="nav-icon" v-html="getIcon(child.icon)"></span>
                   <span v-if="!sidebarCollapsed" class="nav-label">{{ child.name }}</span>
                 </router-link>
@@ -725,13 +785,25 @@ function getIcon(name: string): string {
                   <span class="nav-icon" v-html="getIcon(item.icon)"></span>
                   <span class="nav-label">{{ item.name }}</span>
                 </a>
+                <button v-else-if="item.collapsible" class="nav-item nav-group-toggle"
+                  :class="{ 'in-section': isGroupActive(item) }" type="button" :aria-expanded="groupOpen[item.name]"
+                  @click="toggleGroup(item.name)">
+                  <span class="nav-icon" v-html="getIcon(item.icon)"></span>
+                  <span class="nav-label">{{ item.name }}</span>
+                  <svg class="nav-section-chevron nav-group-chevron" :class="{ collapsed: !groupOpen[item.name] }"
+                    width="12" height="12" viewBox="0 0 16 16" fill="none">
+                    <path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                      stroke-linejoin="round" />
+                  </svg>
+                </button>
                 <router-link v-else class="nav-item" :class="{ active: isItemActive(item) }"
                   @click="mobileOpen = false" :to="itemTo(item)">
                   <span class="nav-icon" v-html="getIcon(item.icon)"></span>
                   <span class="nav-label">{{ item.name }}</span>
                 </router-link>
-                <router-link v-for="child in item.children" :key="child.path" class="nav-item nav-subitem"
-                  :class="{ active: isItemActive(child) }" @click="mobileOpen = false" :to="child.path">
+                <router-link v-for="child in item.children" v-show="!item.collapsible || groupOpen[item.name]"
+                  :key="child.path" class="nav-item nav-subitem" :class="{ active: isItemActive(child) }"
+                  @click="mobileOpen = false" :to="child.path">
                   <span class="nav-icon" v-html="getIcon(child.icon)"></span>
                   <span class="nav-label">{{ child.name }}</span>
                 </router-link>
@@ -903,6 +975,33 @@ function getIcon(name: string): string {
 
 .nav-section-chevron.collapsed {
   transform: rotate(-90deg);
+}
+
+/* Collapsible item groups (Admin · Security): a toggle button styled like a
+   nav item. "In section" brightens text/icon without the selected chip so the
+   parent never reads as the selected child. */
+.nav-group-toggle {
+  width: 100%;
+  background: none;
+  border: none;
+  font-family: inherit;
+  text-align: left;
+}
+
+.nav-group-toggle .nav-label {
+  flex: 1;
+}
+
+.nav-group-toggle.in-section {
+  color: var(--sidebar-text-active);
+}
+
+.nav-group-toggle.in-section .nav-icon {
+  opacity: 1;
+}
+
+.nav-group-chevron {
+  flex-shrink: 0;
 }
 
 .nav-subitem {
