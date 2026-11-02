@@ -189,6 +189,25 @@ const navSections: NavSection[] = [
     ],
   },
   {
+    id: 'logs',
+    title: 'Logs',
+    items: [
+      {
+        name: 'Message History',
+        path: '/logs/messages',
+        icon: 'history',
+        // Group header, not a link — Message History is this group's landing page.
+        collapsible: true,
+        children: [
+          { name: 'Message History', path: '/logs/messages', icon: 'history' },
+          { name: 'Incoming Webhooks', path: '/logs/incoming', icon: 'inbox' },
+          { name: 'Outgoing Webhooks', path: '/logs/outgoing', icon: 'send' },
+          { name: 'Audit Logs', path: '/logs/audit', icon: 'list' },
+        ],
+      },
+    ],
+  },
+  {
     id: 'developers',
     title: 'Developers',
     defaultOpen: true,
