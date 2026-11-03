@@ -227,15 +227,14 @@ func rawJSON(value, fallback string) json.RawMessage {
 	return json.RawMessage(trimmed)
 }
 
-// validateAutomationWorkflow parses and validates a workflow graph. It returns
-// the parsed document (nil when parsing failed) and the problems; an empty
-// problem list means the workflow is valid.
-func validateAutomationWorkflow(nodesJSON, rootNodeID string, listID *uint) (*automation.WorkflowDoc, []string) {
+// validateAutomationWorkflow validates a workflow graph and returns the
+// problems; an empty problem list means the workflow is valid.
+func validateAutomationWorkflow(nodesJSON, rootNodeID string, listID *uint) []string {
 	doc, err := automation.ParseWorkflow(rootNodeID, nodesJSON)
 	if err != nil {
-		return nil, []string{err.Error()}
+		return []string{err.Error()}
 	}
-	return doc, doc.Validate(listID)
+	return doc.Validate(listID)
 }
 
 // validationFailed answers the builder's 400: the error message plus the
@@ -307,7 +306,7 @@ var (
 func (h *AutomationHandler) checkListInScope(c *okapi.Context, listID uint) error {
 	list, err := h.listRepo.FindByID(listID)
 	if err != nil || !ownsResource(c, list.UserID, list.WorkspaceID) {
-		c.AbortBadRequest("list_id does not reference a subscriber list in this workspace")
+		_ = c.AbortBadRequest("list_id does not reference a subscriber list in this workspace")
 		return errListOutOfScope
 	}
 	return nil
@@ -318,7 +317,7 @@ func (h *AutomationHandler) checkListInScope(c *okapi.Context, listID uint) erro
 func (h *AutomationHandler) getAutomation(c *okapi.Context, id int) (*models.Automation, error) {
 	a, err := h.automationRepo.GetByID(uint(id))
 	if err != nil || !ownsResource(c, a.UserID, a.WorkspaceID) {
-		c.AbortNotFound("automation not found")
+		_ = c.AbortNotFound("automation not found")
 		return nil, errAutomationNotFound
 	}
 	return a, nil
@@ -359,7 +358,7 @@ func (h *AutomationHandler) Create(c *okapi.Context, req *SaveAutomationRequest)
 	if nodesJSON == "" {
 		return validationFailed(c, []string{"nodes is required: add a trigger node first"})
 	}
-	if _, errs := validateAutomationWorkflow(nodesJSON, req.Body.RootNodeID, req.Body.ListID); len(errs) > 0 {
+	if errs := validateAutomationWorkflow(nodesJSON, req.Body.RootNodeID, req.Body.ListID); len(errs) > 0 {
 		return validationFailed(c, errs)
 	}
 	if req.Body.ListID != nil && *req.Body.ListID != 0 {
@@ -418,7 +417,7 @@ func (h *AutomationHandler) Update(c *okapi.Context, req *SaveAutomationRequest)
 	if nodesJSON == "" {
 		return validationFailed(c, []string{"nodes is required: add a trigger node first"})
 	}
-	if _, errs := validateAutomationWorkflow(nodesJSON, req.Body.RootNodeID, req.Body.ListID); len(errs) > 0 {
+	if errs := validateAutomationWorkflow(nodesJSON, req.Body.RootNodeID, req.Body.ListID); len(errs) > 0 {
 		return validationFailed(c, errs)
 	}
 	if req.Body.ListID != nil && *req.Body.ListID != 0 {
@@ -474,7 +473,7 @@ func (h *AutomationHandler) Activate(c *okapi.Context, req *AutomationRequest) e
 		return nil
 	}
 
-	if _, errs := validateAutomationWorkflow(a.Nodes, a.RootNodeID, a.ListID); len(errs) > 0 {
+	if errs := validateAutomationWorkflow(a.Nodes, a.RootNodeID, a.ListID); len(errs) > 0 {
 		return validationFailed(c, errs)
 	}
 
