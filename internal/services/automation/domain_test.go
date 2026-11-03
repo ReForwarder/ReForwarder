@@ -39,7 +39,7 @@ func testNode(id, typ string, cfg map[string]any, next *string) *models.Automati
 }
 
 // triggerNode builds a list.subscribed trigger scoped to list 1.
-func triggerNode(id string, next *string) *models.AutomationNode {
+func triggerNode(next *string) *models.AutomationNode {
 	return testNode(id, NodeTypeTrigger, map[string]any{
 		"event_kind": EventKindListSubscribed,
 		"list_id":    1,
@@ -52,7 +52,7 @@ func minimalWorkflow() *WorkflowDoc {
 	return &WorkflowDoc{
 		RootNodeID: "t",
 		Nodes: []*models.AutomationNode{
-			triggerNode("t", strPtr("e1")),
+			triggerNode(strPtr("e1")),
 			testNode("e1", NodeTypeEmail, map[string]any{"template_id": 7}, nil),
 		},
 	}
@@ -78,7 +78,7 @@ func expectError(t *testing.T, errs []string, substr string) {
 
 func TestParseWorkflowRoundTrip(t *testing.T) {
 	nodes := []*models.AutomationNode{
-		triggerNode("t", strPtr("e1")),
+		triggerNode(strPtr("e1")),
 		testNode("e1", NodeTypeEmail, map[string]any{"template_id": 7, "subject_override": "Hi"}, nil),
 	}
 	raw, err := json.Marshal(nodes)
@@ -149,7 +149,7 @@ func TestValidateMissingTrigger(t *testing.T) {
 
 func TestValidateTriggerNotRoot(t *testing.T) {
 	doc := &WorkflowDoc{RootNodeID: "e1", Nodes: []*models.AutomationNode{
-		triggerNode("t", strPtr("e1")),
+		triggerNode(strPtr("e1")),
 		testNode("e1", NodeTypeEmail, map[string]any{"template_id": 7}, nil),
 	}}
 	errs := doc.Validate(uintPtr(3))
