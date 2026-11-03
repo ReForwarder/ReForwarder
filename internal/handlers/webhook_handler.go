@@ -25,6 +25,7 @@ import (
 
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/audit"
+	"github.com/goposta/posta/internal/services/webhook"
 	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/jkaninda/okapi"
 )
@@ -53,6 +54,18 @@ func (h *WebhookHandler) Create(c *okapi.Context, req *CreateWebhookRequest) err
 	if err := requireEdit(c); err != nil {
 		return c.AbortForbidden("Insufficient workspace permissions", err)
 	}
+
+	// Webhook destinations are user-supplied, so the SSRF policy is enforced
+	// before anything is persisted: static checks first, then a real
+	// resolution, so a hostname pointing into private address space is
+	// rejected at the door (upstream goposta/posta#282).
+	if err := webhook.ValidateWebhookURL(req.Body.URL); err != nil {
+		return c.AbortBadRequest("invalid webhook URL: " + err.Error())
+	}
+	if _, err := webhook.ResolvePublicURL(c.Context(), nil, req.Body.URL); err != nil {
+		return c.AbortBadRequest("invalid webhook URL: " + err.Error())
+	}
+
 	scope := getScope(c)
 
 	// Generate a random signing secret for HMAC webhook signatures

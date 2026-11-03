@@ -28,8 +28,10 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -136,9 +138,27 @@ func newCapturingDispatcher(t *testing.T) (*Dispatcher, *attemptCapture) {
 		t.Fatalf("register create capture: %v", err)
 	}
 
-	d := NewDispatcher(nil)
+	d := newPermissiveDispatcher()
 	d.SetDeliveryRepo(repositories.NewWebhookDeliveryRepository(gdb.Session(&gorm.Session{DryRun: true})))
 	d.SetAttemptRepo(repositories.NewWebhookDeliveryAttemptRepository(gdb.Session(&gorm.Session{DryRun: true})))
+	return d, cap
+}
+
+// newGuardedCapturingDispatcher returns the capturing dispatcher in its
+// production posture: the real static URL gate and the guarded transport, with
+// res injected so the guarded dialer's resolution is fully controlled. Used by
+// the end-to-end SSRF policy tests.
+func newGuardedCapturingDispatcher(t *testing.T, res Resolver) (*Dispatcher, *attemptCapture) {
+	t.Helper()
+	d, cap := newCapturingDispatcher(t)
+	d.urlPolicy = ValidateWebhookURL
+	d.client = &http.Client{
+		Timeout:   defaultTimeout,
+		Transport: NewGuardedTransport(res),
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	return d, cap
 }
 
@@ -331,7 +351,7 @@ func TestDeliverWithRetryWithoutReposStillDelivers(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d := NewDispatcher(nil)
+	d := newPermissiveDispatcher()
 	d.maxRetries = 1
 
 	var succeeded, done int
@@ -360,4 +380,61 @@ func TestRecordAttemptsSkipsWithoutDelivery(t *testing.T) {
 	// Without an attempt repo there is nothing to write either.
 	d2 := NewDispatcher(nil)
 	d2.recordAttempts(&models.WebhookDelivery{ID: 1}, []models.WebhookDeliveryAttempt{{Attempt: 1}})
+}
+
+// TestDeliverPolicyBlockFailsFast is the end-to-end SSRF regression for the
+// dispatcher: a webhook whose hostname resolves (via a lying stub resolver) to
+// loopback — where a real server is listening — must be rejected by the
+// guarded transport, recorded exactly once with the sanitized policy message,
+// and NOT retried (policy rejections are deterministic; retrying would only
+// repeat them). The listening server must see nothing.
+func TestDeliverPolicyBlockFailsFast(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	res := &stubResolver{addrs: []netip.Addr{ip(t, "127.0.0.1")}}
+	d, cap := newGuardedCapturingDispatcher(t, res)
+	d.maxRetries = 3 // a retried block would sleep 2s + 4s in backoff
+
+	wh := models.Webhook{ID: 10, UserID: 1, URL: "http://blocked.test/hook", Secret: "s"}
+	start := time.Now()
+	d.deliverWithRetry(1, wh, deliverBody(t, "email.sent", "blocked"), "email.sent")
+	if elapsed := time.Since(start); elapsed >= 2*time.Second {
+		t.Fatalf("delivery took %v; a policy block must fail fast without retry backoff", elapsed)
+	}
+
+	if cap.deliveryCount() != 1 {
+		t.Fatalf("deliveries recorded = %d, want 1", cap.deliveryCount())
+	}
+	delivery := cap.lastDelivery()
+	if delivery.Status != models.WebhookDeliveryFailed {
+		t.Errorf("delivery status = %q, want failed", delivery.Status)
+	}
+	if delivery.ErrorMessage != msgBlocked {
+		t.Errorf("delivery error = %q, want %q", delivery.ErrorMessage, msgBlocked)
+	}
+	if strings.Contains(delivery.ErrorMessage, "127.0.0.1") {
+		t.Errorf("recorded error %q must not leak the resolved address", delivery.ErrorMessage)
+	}
+
+	attempts := cap.allAttempts()
+	if len(attempts) != 1 {
+		t.Fatalf("attempt rows = %d, want 1 (fail fast: no retries after a policy block)", len(attempts))
+	}
+	if attempts[0].Attempt != 1 {
+		t.Errorf("attempt number = %d, want 1", attempts[0].Attempt)
+	}
+	if attempts[0].StatusCode != 0 {
+		t.Errorf("attempt status = %d, want 0 (no HTTP response)", attempts[0].StatusCode)
+	}
+	if attempts[0].Error != msgBlocked {
+		t.Errorf("attempt error = %q, want %q", attempts[0].Error, msgBlocked)
+	}
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("test server received %d requests, want 0", got)
+	}
 }

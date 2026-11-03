@@ -26,6 +26,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -61,11 +62,22 @@ type Config struct {
 }
 
 type Dispatcher struct {
-	repo              *repositories.WebhookRepository
-	deliveryRepo      *repositories.WebhookDeliveryRepository
-	attemptRepo       *repositories.WebhookDeliveryAttemptRepository
-	client            *http.Client
-	maxRetries        int
+	repo         *repositories.WebhookRepository
+	deliveryRepo *repositories.WebhookDeliveryRepository
+	attemptRepo  *repositories.WebhookDeliveryAttemptRepository
+	client       *http.Client
+	maxRetries   int
+	// proxyDial reports that deliveries are routed through a configured
+	// proxy. The guarded dialer cannot see the destination through a proxy,
+	// so post() pre-flights it with a policy-checked resolution instead.
+	proxyDial bool
+	// urlPolicy is the static SSRF gate every delivery URL must pass before a
+	// request is built. Production always uses ValidateWebhookURL; tests that
+	// exercise delivery semantics over loopback httptest servers relax it,
+	// because loopback destinations are blocked by policy. That blocking
+	// behavior itself is covered by ssrf_test.go and
+	// TestDeliverPolicyBlockFailsFast.
+	urlPolicy         func(string) error
 	onDeliverySuccess func()
 	onDeliveryFailed  func()
 	onDeliveryDone    func(float64) // duration in seconds
@@ -75,8 +87,16 @@ func NewDispatcher(repo *repositories.WebhookRepository) *Dispatcher {
 	return &Dispatcher{
 		repo:       repo,
 		maxRetries: defaultMaxRetries,
+		urlPolicy:  ValidateWebhookURL,
 		client: &http.Client{
-			Timeout: defaultTimeout,
+			Timeout:   defaultTimeout,
+			Transport: NewGuardedTransport(nil),
+			// Redirects are not followed (product-wide decision): a 3xx
+			// becomes the final recorded response, so a redirect can never
+			// hop the SSRF policy to another host.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
 }
@@ -95,6 +115,7 @@ func (d *Dispatcher) SetConfig(cfg Config) {
 			logger.Error("invalid webhook proxy URL, requests will be sent directly", "error", err)
 			return
 		}
+		d.proxyDial = true
 		d.client.Transport = transport
 		logger.Info("webhook proxy configured", "proxy", cfg.ProxyURL)
 	}
@@ -102,6 +123,15 @@ func (d *Dispatcher) SetConfig(cfg Config) {
 
 // proxyTransport builds an *http.Transport that routes requests through the
 // given proxy URL. Supported schemes: http, https, socks5.
+//
+// SSRF enforcement differs by mode. Direct deliveries dial through the guarded
+// transport, which pins every connection to a validated public IP. Through a
+// proxy that is impossible: the dial target is the proxy itself (which may
+// legitimately be internal) and the proxy resolves the destination host on its
+// side, so dial-level IP pinning cannot be enforced — a documented limitation.
+// Proxy mode therefore relies on the static URL checks plus a pre-flight
+// policy-checked resolution of the destination (ResolvePublicURL in post)
+// before every delivery. The dial target is never the guarded dialer.
 func proxyTransport(rawURL string) (*http.Transport, error) {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
@@ -112,6 +142,16 @@ func proxyTransport(rawURL string) (*http.Transport, error) {
 	case "http", "https":
 		return &http.Transport{
 			Proxy: http.ProxyURL(parsed),
+			DialContext: (&net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			ResponseHeaderTimeout: 10 * time.Second,
 		}, nil
 
 	case "socks5":
@@ -134,6 +174,12 @@ func proxyTransport(rawURL string) (*http.Transport, error) {
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				return contextDialer.DialContext(ctx, network, addr)
 			},
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			ResponseHeaderTimeout: 10 * time.Second,
 		}, nil
 
 	default:
@@ -292,7 +338,10 @@ func (d *Dispatcher) deliverWithRetry(userID uint, wh models.Webhook, body []byt
 		lastStatus = statusCode
 
 		// Keep the per-attempt outcome regardless of what happens next: the
-		// rows are attached to the delivery once it exists (below).
+		// rows are attached to the delivery once it exists (below). Error text
+		// is sanitized at write time — attempt rows are user-visible delivery
+		// history and must never carry transport internals (IPs, ports,
+		// resolver detail).
 		recorded := models.WebhookDeliveryAttempt{
 			Attempt:      attempt,
 			StatusCode:   statusCode,
@@ -300,7 +349,7 @@ func (d *Dispatcher) deliverWithRetry(userID uint, wh models.Webhook, body []byt
 			CreatedAt:    attemptedAt,
 		}
 		if err != nil {
-			recorded.Error = err.Error()
+			recorded.Error = SanitizeDeliveryError(err.Error())
 		}
 		attempts = append(attempts, recorded)
 
@@ -317,8 +366,19 @@ func (d *Dispatcher) deliverWithRetry(userID uint, wh models.Webhook, body []byt
 			return
 		}
 
+		if errors.Is(err, ErrPolicyBlocked) {
+			// Policy rejections are deterministic: the same URL resolves and
+			// judges the same way on every retry, so retrying would only
+			// repeat the outcome — fail fast, no sleep, no further attempts.
+			// The raw reason stays in server logs; what is recorded is the
+			// sanitized message.
+			logger.Warn("webhook destination blocked by security policy", "url", wh.URL, "attempt", attempt, "error", err)
+			d.failDelivery(userID, wh, event, lastStatus, SanitizeDeliveryError(err.Error()), attempt, attempts, start)
+			return
+		}
+
 		if err != nil {
-			lastErr = err.Error()
+			lastErr = SanitizeDeliveryError(err.Error())
 			logger.Warn("webhook delivery failed", "url", wh.URL, "attempt", attempt, "error", err)
 		} else {
 			lastErr = fmt.Sprintf("HTTP %d", statusCode)
@@ -331,7 +391,14 @@ func (d *Dispatcher) deliverWithRetry(userID uint, wh models.Webhook, body []byt
 	}
 
 	// All retries exhausted
-	delivery := d.recordDelivery(userID, wh.ID, wh.WorkspaceID, event, models.WebhookDeliveryFailed, lastStatus, lastErr, d.maxRetries)
+	d.failDelivery(userID, wh, event, lastStatus, lastErr, d.maxRetries, attempts, start)
+}
+
+// failDelivery records the final failed delivery together with its buffered
+// attempt rows and fires the failure callbacks. Shared by the exhausted-
+// retries path and the fail-fast policy-block path.
+func (d *Dispatcher) failDelivery(userID uint, wh models.Webhook, event string, httpStatus int, errMsg string, attempt int, attempts []models.WebhookDeliveryAttempt, start time.Time) {
+	delivery := d.recordDelivery(userID, wh.ID, wh.WorkspaceID, event, models.WebhookDeliveryFailed, httpStatus, errMsg, attempt)
 	d.recordAttempts(delivery, attempts)
 	if d.onDeliveryFailed != nil {
 		d.onDeliveryFailed()
@@ -348,17 +415,27 @@ func signPayload(secret string, body []byte) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// doRequest sends a single HTTP POST to the webhook URL with an HMAC signature.
-func (d *Dispatcher) doRequest(url string, secret string, body []byte) (int, error) {
-	statusCode, _, err := d.post(url, secret, body)
-	return statusCode, err
-}
+// post sends a single HTTP POST to the webhook URL with an HMAC signature and
+// returns the status code plus the (truncated) response body so the attempt
+// history can keep what the endpoint answered. The SSRF policy is enforced
+// before the request is built: the static URL checks always run, and in proxy
+// mode — where the guarded dialer cannot see the destination — a pre-flight
+// policy-checked resolution doubles as the destination gate. In direct mode
+// the guarded transport re-checks the destination at dial time on every
+// connection.
+func (d *Dispatcher) post(rawURL string, secret string, body []byte) (int, string, error) {
+	if err := d.urlPolicy(rawURL); err != nil {
+		return 0, "", err
+	}
+	if d.proxyDial {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := ResolvePublicURL(ctx, nil, rawURL); err != nil {
+			return 0, "", err
+		}
+	}
 
-// post is doRequest with response capture: it returns the status code and the
-// (truncated) response body so the attempt history can keep what the endpoint
-// answered.
-func (d *Dispatcher) post(url string, secret string, body []byte) (int, string, error) {
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, rawURL, bytes.NewReader(body))
 	if err != nil {
 		return 0, "", fmt.Errorf("failed to create request: %w", err)
 	}
@@ -429,20 +506,4 @@ func (d *Dispatcher) recordAttempts(delivery *models.WebhookDelivery, attempts [
 			logger.Error("failed to record webhook delivery attempt", "error", err, "delivery_id", delivery.ID, "attempt", attempts[i].Attempt)
 		}
 	}
-}
-
-// Validate ensures the webhook URL is reachable.
-func (d *Dispatcher) Validate(url string) error {
-	req, err := http.NewRequest(http.MethodHead, url, nil)
-	if err != nil {
-		return fmt.Errorf("invalid webhook URL: %w", err)
-	}
-
-	resp, err := d.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("webhook URL unreachable: %w", err)
-	}
-	_ = resp.Body.Close()
-
-	return nil
 }
