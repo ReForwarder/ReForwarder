@@ -33,6 +33,7 @@ import (
 	"github.com/goposta/posta/internal/metrics"
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/routes"
+	"github.com/goposta/posta/internal/services/automation"
 	"github.com/goposta/posta/internal/services/crypto"
 	"github.com/goposta/posta/internal/services/email"
 	"github.com/goposta/posta/internal/services/emailhistory"
@@ -40,6 +41,7 @@ import (
 	"github.com/goposta/posta/internal/services/inbound"
 	"github.com/goposta/posta/internal/services/messages"
 	"github.com/goposta/posta/internal/services/notification"
+	"github.com/goposta/posta/internal/services/ratelimit"
 	"github.com/goposta/posta/internal/services/realtime"
 	"github.com/goposta/posta/internal/services/retry"
 	"github.com/goposta/posta/internal/services/security"
@@ -297,6 +299,43 @@ func newWebhookDispatcher(db *gorm.DB, cfg *config.Config) *webhook.Dispatcher {
 	dispatcher.OnDeliveryFailed(func() { metrics.IncrementWebhookDelivery("failed") })
 	dispatcher.OnDeliveryDone(metrics.ObserveWebhookDeliveryDuration)
 	return dispatcher
+}
+
+// newAutomationEmailService builds the email service the automation engine's
+// email nodes send through. It mirrors the HTTP route wiring (settings, template
+// versions, domain verification, link generator, tracking, message-history
+// recorder) so automation mail renders and behaves like platform mail, with its
+// own instance so the HTTP path's metrics callbacks stay independent. Plan
+// limits are intentionally unset: attachment limits fall back to the global
+// settings and the rate limiter keys on the recipient address.
+func newAutomationEmailService(db *gorm.DB, cfg *config.Config, producer *worker.Producer, blobStore blob.Store) *email.Service {
+	limiter := ratelimit.NewRedisLimiter(cfg.Redis.Client, cfg.RateLimitHourly, cfg.RateLimitDaily)
+	svc := email.NewService(
+		repositories.NewEmailRepository(db),
+		repositories.NewSMTPRepository(db),
+		repositories.NewTemplateRepository(db),
+		repositories.NewSuppressionRepository(db),
+		limiter,
+		newWebhookDispatcher(db, cfg),
+		cfg.DevMode,
+	)
+	settingsProvider := settings.NewProvider(repositories.NewSettingRepository(db))
+	svc.SetSettings(settingsProvider)
+	svc.SetVersionRepos(repositories.NewTemplateVersionRepository(db), repositories.NewTemplateLocalizationRepository(db))
+	svc.SetDomainVerification(repositories.NewDomainRepository(db), repositories.NewUserRepository(db), repositories.NewWorkspaceSettingRepository(db))
+	svc.SetUnsubscribeListRepo(repositories.NewUnsubscribeListRepository(db))
+	svc.SetContactRepo(repositories.NewContactRepository(db))
+	if producer != nil {
+		svc.SetEnqueuer(producer)
+	}
+	if blobStore != nil {
+		svc.SetBlobStore(blobStore)
+	}
+	trackingService := tracking.NewService(repositories.NewTrackingRepository(db), cfg.AppWebURL, []byte(cfg.JWTSecret))
+	svc.SetLinkGenerator(trackingService)
+	svc.SetTracking(trackingService, settingsProvider.EmailTrackingEnabled)
+	svc.SetRecorder(emailhistory.NewRecorder(db))
+	return svc
 }
 
 func newInboundServiceForWorker(db *gorm.DB,
@@ -603,6 +642,24 @@ func startEmbeddedWorker(db *gorm.DB,
 		mux.HandleFunc(worker.TypeMessageProcess, messageHandler.ProcessTask)
 		mux.HandleFunc(worker.TypeMessageReply, messageHandler.ProcessReplyTask)
 	}
+
+	// Automation engine: the scheduler polls for due journeys and executes
+	// automation:run tasks. Running alongside a standalone worker is safe —
+	// the claim query uses FOR UPDATE SKIP LOCKED and every cursor write is a
+	// compare-and-swap on the journey status.
+	automationProducer := worker.NewProducer(cfg.Redis.AsynqRedisOpt(), cfg.WorkerMaxRetries)
+	automationEngine := automation.NewEngine(
+		db,
+		automationProducer,
+		automation.NewEmailSenderAdapter(newAutomationEmailService(db, cfg, automationProducer, blobStore), db),
+		repositories.NewSubscriberListRepository(db),
+		repositories.NewSubscriberRepository(db),
+	)
+	mux.HandleFunc(worker.TypeAutomationRun, worker.NewAutomationRunHandler(automationEngine).ProcessTask)
+	// email.bounced automation triggers for the embedded-worker path.
+	handler.SetSubscriberRepo(repositories.NewSubscriberRepository(db))
+	handler.SetAutomationTriggers(automationEngine)
+	automationEngine.Start(context.Background())
 
 	workermon.StartHeartbeat(context.Background(), cfg.Redis.Client, config.Version, config.CommitID)
 

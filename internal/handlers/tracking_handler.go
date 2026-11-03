@@ -20,6 +20,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"html"
 	"html/template"
@@ -30,6 +31,7 @@ import (
 	"time"
 
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/automation"
 	"github.com/goposta/posta/internal/services/emailhistory"
 	"github.com/goposta/posta/internal/services/tracking"
 	"github.com/goposta/posta/internal/services/webhook"
@@ -43,16 +45,17 @@ import (
 var openPixelRe = regexp.MustCompile(`(?i)<img[^>]+src=["'][^"']*/t/o/[^"']*["'][^>]*>`)
 
 type TrackingHandler struct {
-	trackingRepo    *repositories.TrackingRepository
-	messageRepo     *repositories.CampaignMessageRepository
-	campaignRepo    *repositories.CampaignRepository
-	subRepo         *repositories.SubscriberRepository
-	listRepo        *repositories.SubscriberListRepository
-	emailRepo       *repositories.EmailRepository
-	suppressionRepo *repositories.SuppressionRepository
-	trackingService *tracking.Service
-	dispatcher      *webhook.Dispatcher
-	recorder        *emailhistory.Recorder
+	trackingRepo      *repositories.TrackingRepository
+	messageRepo       *repositories.CampaignMessageRepository
+	campaignRepo      *repositories.CampaignRepository
+	subRepo           *repositories.SubscriberRepository
+	listRepo          *repositories.SubscriberListRepository
+	emailRepo         *repositories.EmailRepository
+	suppressionRepo   *repositories.SuppressionRepository
+	trackingService   *tracking.Service
+	dispatcher        *webhook.Dispatcher
+	recorder          *emailhistory.Recorder
+	automationTrigger automation.AutomationTrigger
 }
 
 func NewTrackingHandler(
@@ -135,6 +138,13 @@ func parseTrackingRef(raw string) trackingRef {
 // disables that recording; bot-filtered hits record nothing either way.
 func (h *TrackingHandler) SetRecorder(r *emailhistory.Recorder) {
 	h.recorder = r
+}
+
+// SetAutomationTrigger wires the automation engine behind the tracking hooks:
+// unsubscribes, opens and clicks enroll contacts into live automations. Nil
+// (the default) leaves the hooks inert.
+func (h *TrackingHandler) SetAutomationTrigger(at automation.AutomationTrigger) {
+	h.automationTrigger = at
 }
 
 // OpenPixel serves a 1x1 transparent GIF and records the open event.
@@ -282,11 +292,29 @@ func (h *TrackingHandler) TxUnsubscribeConfirm(c *okapi.Context, req *TrackingUn
 			})
 			emailhistory.RecordUnsubscribed(h.recorder, em, addr)
 			h.emitUnsubscribed(em, addr)
+			h.notifyUnsubscribed(em, addr)
 		}
 	}
 
 	return trackingNotice(c, http.StatusOK, "You're unsubscribed",
 		"You'll no longer receive emails of this type from the sender.", "success")
+}
+
+// notifyUnsubscribed enrolls contact.unsubscribed for the recipient of a
+// transactional one-click unsubscribe. The subscriber is resolved within the
+// email's scope; an unknown subscriber or an unwired engine is a no-op.
+func (h *TrackingHandler) notifyUnsubscribed(em *models.Email, addr string) {
+	if h.automationTrigger == nil || em == nil || addr == "" {
+		return
+	}
+	sub, err := h.subRepo.FindByEmail(repositories.ResourceScope{UserID: em.UserID, WorkspaceID: em.WorkspaceID}, addr)
+	if err != nil || sub == nil {
+		return
+	}
+	notifyAutomation(context.Background(), h.automationTrigger, automation.TriggerEvent{
+		Kind:       models.AutomationEventUnsubscribed,
+		Subscriber: sub,
+	})
 }
 
 func (h *TrackingHandler) emitUnsubscribed(em *models.Email, addr string) {
@@ -378,6 +406,14 @@ func (h *TrackingHandler) UnsubscribeConfirm(c *okapi.Context, req *TrackingUnsu
 	// the campaign message was delivered as (absent for older campaign mail).
 	emailhistory.RecordUnsubscribed(h.recorder, h.emailForMessage(msg), "")
 
+	// Enroll contact.unsubscribed for live automations.
+	if sub, err := h.subRepo.FindByID(msg.SubscriberID); err == nil && sub != nil {
+		notifyAutomation(c.Request().Context(), h.automationTrigger, automation.TriggerEvent{
+			Kind:       models.AutomationEventUnsubscribed,
+			Subscriber: sub,
+		})
+	}
+
 	return trackingNotice(c, http.StatusOK, "You're unsubscribed",
 		"You've been removed from this mailing list. Other lists you're subscribed to are unaffected.", "success")
 }
@@ -451,6 +487,11 @@ func (h *TrackingHandler) recordOpen(ref trackingRef, ip, userAgent string) {
 	// Mirror the open onto the message-history timeline. The write-once
 	// opened_at stamp lives in the Recorder; repeated opens still add rows.
 	emailhistory.RecordOpened(h.recorder, em, ip, userAgent)
+
+	// Enroll email.opened for live automations (enqueue-nudge only: this whole
+	// path runs on the tracking goroutine, and the engine does one indexed
+	// lookup plus an insert).
+	h.notifyAutomationEmailEvent(models.AutomationEventEmailOpened, em)
 }
 
 func (h *TrackingHandler) recordClick(ref trackingRef, link *models.TrackedLink, ip, userAgent string) {
@@ -489,6 +530,27 @@ func (h *TrackingHandler) recordClick(ref trackingRef, link *models.TrackedLink,
 	// Mirror the click onto the message-history timeline: one row per distinct
 	// interaction, the original destination URL included.
 	emailhistory.RecordClicked(h.recorder, em, link.OriginalURL, ip, userAgent)
+
+	// Enroll email.clicked for live automations (enqueue-nudge only).
+	h.notifyAutomationEmailEvent(models.AutomationEventEmailClicked, em)
+}
+
+// notifyAutomationEmailEvent enrolls an email.opened / email.clicked style
+// event for the recipient of a sent email. Callers are the tracking goroutines
+// (never the pixel/redirect response path); the subscriber is resolved within
+// the email's scope and an unknown contact or an unwired engine is a no-op.
+func (h *TrackingHandler) notifyAutomationEmailEvent(kind string, em *models.Email) {
+	if h.automationTrigger == nil || em == nil || len(em.Recipients) == 0 || em.Recipients[0] == "" {
+		return
+	}
+	sub, err := h.subRepo.FindByEmail(repositories.ResourceScope{UserID: em.UserID, WorkspaceID: em.WorkspaceID}, em.Recipients[0])
+	if err != nil || sub == nil {
+		return
+	}
+	notifyAutomation(context.Background(), h.automationTrigger, automation.TriggerEvent{
+		Kind:       kind,
+		Subscriber: sub,
+	})
 }
 
 // emailForMessage resolves the Email row a campaign message was delivered as,

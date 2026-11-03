@@ -25,18 +25,27 @@ import (
 	"time"
 
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/automation"
 	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/jkaninda/okapi"
 	"gorm.io/gorm"
 )
 
 type SubscriberListHandler struct {
-	repo           *repositories.SubscriberListRepository
-	subscriberRepo *repositories.SubscriberRepository
+	repo              *repositories.SubscriberListRepository
+	subscriberRepo    *repositories.SubscriberRepository
+	automationTrigger automation.AutomationTrigger
 }
 
 func NewSubscriberListHandler(repo *repositories.SubscriberListRepository, subscriberRepo *repositories.SubscriberRepository) *SubscriberListHandler {
 	return &SubscriberListHandler{repo: repo, subscriberRepo: subscriberRepo}
+}
+
+// SetAutomationTrigger wires the automation engine behind the membership
+// hooks: every successful add-to-list enrolls the contact into live
+// list.subscribed automations. Nil (the default) leaves the hooks inert.
+func (h *SubscriberListHandler) SetAutomationTrigger(at automation.AutomationTrigger) {
+	h.automationTrigger = at
 }
 
 type CreateSubscriberListRequest struct {
@@ -289,6 +298,11 @@ func (h *SubscriberListHandler) AddMember(c *okapi.Context, req *AddSubscriberTo
 	if err := h.repo.AddMember(member); err != nil {
 		return c.AbortConflict("subscriber already in list")
 	}
+	notifyAutomation(c.Request().Context(), h.automationTrigger, automation.TriggerEvent{
+		Kind:       models.AutomationEventListSubscribed,
+		ListID:     &list.ID,
+		Subscriber: sub,
+	})
 	return ok(c, okapi.M{"message": "subscriber added to list"})
 }
 
@@ -410,6 +424,11 @@ func (h *SubscriberListHandler) Subscribe(c *okapi.Context, req *ListSubscribeRe
 	}); err != nil {
 		return c.AbortInternalServerError("failed to add to list")
 	}
+	notifyAutomation(c.Request().Context(), h.automationTrigger, automation.TriggerEvent{
+		Kind:       models.AutomationEventListSubscribed,
+		ListID:     &list.ID,
+		Subscriber: sub,
+	})
 
 	return ok(c, ListSubscribeResponse{
 		ListID:            list.ID,

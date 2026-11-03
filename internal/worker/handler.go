@@ -30,6 +30,7 @@ import (
 
 	"github.com/goposta/posta/internal/metrics"
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/automation"
 	"github.com/goposta/posta/internal/services/email"
 	"github.com/goposta/posta/internal/services/emailhistory"
 	"github.com/goposta/posta/internal/services/webhook"
@@ -56,6 +57,8 @@ type EmailSendHandler struct {
 	dispatcher      *webhook.Dispatcher
 	blobStore       blob.Store
 	recorder        *emailhistory.Recorder
+	automations     automation.AutomationTrigger
+	subscriberRepo  *repositories.SubscriberRepository
 	onSent          func()
 	onFailed        func()
 }
@@ -118,6 +121,18 @@ func (h *EmailSendHandler) SetBounceRepo(r *repositories.BounceRepository) {
 // failures never affect sending either way.
 func (h *EmailSendHandler) SetRecorder(r *emailhistory.Recorder) {
 	h.recorder = r
+}
+
+// SetSubscriberRepo lets bounced emails resolve the subscriber so automation
+// triggers keyed on email.bounced can fire. Nil (default) disables that.
+func (h *EmailSendHandler) SetSubscriberRepo(r *repositories.SubscriberRepository) {
+	h.subscriberRepo = r
+}
+
+// SetAutomationTriggers wires the automation engine so email.bounced events
+// can enroll matching automations. Nil (the default) disables that.
+func (h *EmailSendHandler) SetAutomationTriggers(t automation.AutomationTrigger) {
+	h.automations = t
 }
 
 // SetAutoSuppress toggles auto-suppression on permanent (5xx) recipient
@@ -468,6 +483,17 @@ func (h *EmailSendHandler) handlePermanentRejection(em *models.Email, se *email.
 		fmt.Sprintf("smtp:%d:%s", se.Code, se.Recipient),
 		map[string]any{"smtp_code": se.Code, "smtp_stage": se.Stage, "recipient": se.Recipient})
 
+	// email.bounced automation trigger: resolve the subscriber so the engine
+	// can enroll matching automations (nil repo/engine skips silently).
+	if h.automations != nil && h.subscriberRepo != nil {
+		if sub, serr := h.subscriberRepo.FindByEmail(repositories.ResourceScope{
+			UserID:      em.UserID,
+			WorkspaceID: em.WorkspaceID,
+		}, se.Recipient); serr == nil {
+			automation.RecordBouncedTrigger(h.automations, sub)
+		}
+	}
+
 	h.dispatcher.Dispatch(em.UserID, em.WorkspaceID, "email.failed", em.UUID, em.Sender)
 	if h.onFailed != nil {
 		h.onFailed()
@@ -536,4 +562,27 @@ func (e *ExhaustedErrorHandler) HandleError(_ context.Context, t *asynq.Task, er
 		e.onFailed()
 	}
 	logger.Error("worker: email permanently failed", "id", em.ID, "error", err)
+}
+
+// AutomationRunHandler processes automation:run tasks by advancing one journey
+// through the automation engine.
+type AutomationRunHandler struct {
+	engine *automation.Engine
+}
+
+// NewAutomationRunHandler wraps an engine for the asynq mux.
+func NewAutomationRunHandler(engine *automation.Engine) *AutomationRunHandler {
+	return &AutomationRunHandler{engine: engine}
+}
+
+// ProcessTask executes the journey named in the payload. Returning an error
+// lets asynq retry the task — correct here: the engine's journey-level CAS
+// makes a re-run after an infra blip safe, while per-node failures and retries
+// are handled inside the engine (which returns nil for them).
+func (h *AutomationRunHandler) ProcessTask(ctx context.Context, t *asynq.Task) error {
+	var payload AutomationRunPayload
+	if err := json.Unmarshal(t.Payload(), &payload); err != nil {
+		return fmt.Errorf("failed to unmarshal automation run payload: %w", err)
+	}
+	return h.engine.ExecuteJourney(ctx, payload.JourneyID)
 }

@@ -190,6 +190,18 @@ func runConstraints(db *gorm.DB) {
 			ON security_events (event_type, created_at);
 	EXCEPTION WHEN others THEN NULL;
 	END $$`)
+
+	// Automation engine: the delay queue is claimed with FOR UPDATE SKIP LOCKED
+	// over active journeys whose scheduled_at is due, so the partial index
+	// carries exactly the claimable rows. The node-run composite backs the
+	// per-node stats canvas (GROUP BY automation_id, node_id, action).
+	db.Exec(`DO $$ BEGIN
+		CREATE INDEX IF NOT EXISTS idx_automation_journeys_queue
+			ON automation_journeys (scheduled_at) WHERE status = 'active' AND scheduled_at IS NOT NULL;
+		CREATE INDEX IF NOT EXISTS idx_automation_node_runs_node
+			ON automation_node_runs (automation_id, node_id, action);
+	EXCEPTION WHEN others THEN NULL;
+	END $$`)
 }
 
 // rebuildUniqueIndexes re-scopes the per-tenant uniqueness constraints to
