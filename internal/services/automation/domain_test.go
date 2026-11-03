@@ -40,7 +40,7 @@ func testNode(id, typ string, cfg map[string]any, next *string) *models.Automati
 
 // triggerNode builds a list.subscribed trigger scoped to list 1.
 func triggerNode(next *string) *models.AutomationNode {
-	return testNode(id, NodeTypeTrigger, map[string]any{
+	return testNode("t", NodeTypeTrigger, map[string]any{
 		"event_kind": EventKindListSubscribed,
 		"list_id":    1,
 		"frequency":  FrequencyOnce,
