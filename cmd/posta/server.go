@@ -323,7 +323,8 @@ func newAutomationEmailService(db *gorm.DB, cfg *config.Config, producer *worker
 	svc.SetSettings(settingsProvider)
 	svc.SetVersionRepos(repositories.NewTemplateVersionRepository(db),
 		repositories.NewTemplateLocalizationRepository(db))
-	svc.SetDomainVerification(repositories.NewDomainRepository(db), repositories.NewUserRepository(db), repositories.NewWorkspaceSettingRepository(db))
+	svc.SetDomainVerification(repositories.NewDomainRepository(db),
+		repositories.NewUserRepository(db), repositories.NewWorkspaceSettingRepository(db))
 	svc.SetUnsubscribeListRepo(repositories.NewUnsubscribeListRepository(db))
 	svc.SetContactRepo(repositories.NewContactRepository(db))
 	if producer != nil {
