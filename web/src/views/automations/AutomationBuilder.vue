@@ -14,6 +14,7 @@ import { automationsApi, automationApiError } from '../../api/automations'
 import { subscriberListsApi } from '../../api/subscriberLists'
 import { templatesApi } from '../../api/templates'
 import { useNotificationStore } from '../../stores/notification'
+import { useWorkspaceStore } from '../../stores/workspace'
 import type { AutomationABVariant, SubscriberListItem, TemplateListItem } from '../../api/types'
 import SearchableSelect from '../../components/SearchableSelect.vue'
 import ConfirmDialog from '../../components/ConfirmDialog.vue'
@@ -31,6 +32,7 @@ import ConfigPanel from './components/ConfigPanel.vue'
 const route = useRoute()
 const router = useRouter()
 const notify = useNotificationStore()
+const wsStore = useWorkspaceStore()
 const { confirm } = useConfirm()
 
 const builder = useAutomationBuilder()
@@ -264,6 +266,7 @@ function fail(e: any, fallback: string) {
 
 async function save() {
   if (saving.value) return
+  if (!wsStore.canEdit) return
   errorBanner.value = null
 
   const payload = toAutomationPayload()
@@ -379,7 +382,7 @@ watch(automationId, async (id, prev) => {
       </div>
 
       <button class="btn btn-secondary" @click="cancel">Cancel</button>
-      <button class="btn btn-primary" :disabled="saving || loading" @click="save">
+      <button v-if="wsStore.canEdit" class="btn btn-primary" :disabled="saving || loading" @click="save">
         {{ saving ? 'Saving…' : 'Save' }}
       </button>
     </header>

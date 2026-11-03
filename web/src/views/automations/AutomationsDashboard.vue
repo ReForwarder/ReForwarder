@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { automationsApi, automationApiError } from '../../api/automations'
 import { subscriberListsApi } from '../../api/subscriberLists'
 import { useNotificationStore } from '../../stores/notification'
+import { useWorkspaceStore } from '../../stores/workspace'
 import type { AutomationRow, AutomationStatus } from '../../api/types'
 import Pagination from '../../components/Pagination.vue'
 import ConfirmDialog from '../../components/ConfirmDialog.vue'
@@ -13,6 +14,7 @@ import { usePagination } from '../../composables/usePagination'
 const route = useRoute()
 const router = useRouter()
 const notify = useNotificationStore()
+const wsStore = useWorkspaceStore()
 const { confirm } = useConfirm()
 
 const loading = ref(true)
@@ -215,7 +217,7 @@ const hasAny = computed(() => automations.value.length > 0)
         <h1>Automations</h1>
         <p class="page-description">Multi-step workflows that react to your contacts: triggers, delays, email sends and branches.</p>
       </div>
-      <button class="btn btn-primary" @click="router.push('/automations/new')">
+      <button v-if="wsStore.canEdit" class="btn btn-primary" @click="router.push('/automations/new')">
         <span class="mdi mdi-plus"></span>
         Create Automation
       </button>
@@ -271,7 +273,7 @@ const hasAny = computed(() => automations.value.length > 0)
       <h3>{{ statusFilter ? 'No automations with this status' : 'No automations yet' }}</h3>
       <p v-if="statusFilter">Try a different status filter.</p>
       <p v-else>Create your first automation</p>
-      <button v-if="!statusFilter" class="btn btn-primary" @click="router.push('/automations/new')">
+      <button v-if="!statusFilter && wsStore.canEdit" class="btn btn-primary" @click="router.push('/automations/new')">
         <span class="mdi mdi-plus"></span>
         Create Automation
       </button>
@@ -334,7 +336,7 @@ const hasAny = computed(() => automations.value.length > 0)
             <span class="auto-card__updated" :title="new Date(a.updated_at).toLocaleString()">
               Updated {{ relativeTime(a.updated_at) }}
             </span>
-            <div class="auto-card__actions">
+            <div v-if="wsStore.canEdit" class="auto-card__actions">
               <button
                 v-if="a.status !== 'live'"
                 class="btn btn-sm btn-primary"
