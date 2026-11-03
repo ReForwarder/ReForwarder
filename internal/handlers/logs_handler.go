@@ -61,6 +61,7 @@ type LogsHandler struct {
 	incomingRepo   *repositories.IncomingWebhookEventRepository
 	deliveryRepo   *repositories.WebhookDeliveryRepository
 	attemptRepo    *repositories.WebhookDeliveryAttemptRepository
+	webhookRepo    *repositories.WebhookRepository
 }
 
 // NewLogsHandler returns a LogsHandler over repositories built on db. The
@@ -77,6 +78,7 @@ func NewLogsHandler(db *gorm.DB, recorder *emailhistory.Recorder, sp *settings.P
 		incomingRepo:   repositories.NewIncomingWebhookEventRepository(db),
 		deliveryRepo:   repositories.NewWebhookDeliveryRepository(db),
 		attemptRepo:    repositories.NewWebhookDeliveryAttemptRepository(db),
+		webhookRepo:    repositories.NewWebhookRepository(db),
 	}
 }
 
@@ -628,6 +630,9 @@ func (h *LogsHandler) ListOutgoingWebhooks(c *okapi.Context, req *ListOutgoingWe
 		}
 	}
 
+	// Raw error text can predate the SSRF guard; sanitize it on the way out.
+	sanitizeDeliveries(deliveries)
+
 	rows, err := h.attachAttemptCounts(deliveries)
 	if err != nil {
 		return c.AbortInternalServerError("failed to list outgoing webhooks")
@@ -658,6 +663,9 @@ func (h *LogsHandler) attachAttemptCounts(deliveries []models.WebhookDelivery) (
 
 // GetOutgoingAttempts returns every recorded HTTP attempt of one delivery, in
 // attempt order — the retry story the delivery row itself only summarizes.
+// Raw error text is sanitized on the way out, and response bodies captured
+// for webhooks whose stored URL could reach a non-public destination are
+// redacted (rows written before the SSRF guard).
 func (h *LogsHandler) GetOutgoingAttempts(c *okapi.Context, req *LogsWebhookDeliveryRequest) error {
 	var delivery models.WebhookDelivery
 	if err := h.db.First(&delivery, uint(req.ID)).Error; err != nil {
@@ -670,6 +678,14 @@ func (h *LogsHandler) GetOutgoingAttempts(c *okapi.Context, req *LogsWebhookDeli
 		return c.AbortNotFound("outgoing webhook delivery not found")
 	}
 
+	// The webhook's stored URL decides whether the captured bodies may have
+	// come from a non-public destination. A webhook deleted since the
+	// delivery fails safe: its bodies are redacted.
+	url := ""
+	if wh, err := h.webhookRepo.FindByID(delivery.WebhookID); err == nil {
+		url = wh.URL
+	}
+
 	attempts, err := h.attemptRepo.ListByDeliveryID(delivery.ID)
 	if err != nil {
 		return c.AbortInternalServerError("failed to list delivery attempts")
@@ -677,6 +693,7 @@ func (h *LogsHandler) GetOutgoingAttempts(c *okapi.Context, req *LogsWebhookDeli
 	if attempts == nil {
 		attempts = []models.WebhookDeliveryAttempt{}
 	}
+	sanitizeAttempts(attempts, func(uint) string { return url })
 	return ok(c, attempts)
 }
 
