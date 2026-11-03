@@ -143,6 +143,8 @@ Dependency updates (all merged as squash commits with passing CI):
 
 The 18-file list above was verified against the actual Git diff on 2026-11-02 and was complete as of that date; it will stop being complete the moment new work is committed.
 
+**Addendum (2026-11-04):** the list above stopped being complete as predicted. Subsequent ReForwarder-authored backend commits include, most recently, `5c2678a` — *Block SSRF through webhook URLs* (upstream issue goposta/posta#282): a security hardening of `internal/services/webhook/` (new `ssrf.go` guard: destination validation, DNS-rebinding-proof pinned dialing, redirect blocking, error sanitization) plus webhook handlers and tests (9 files). This is a deliberate, user-directed divergence from upstream; the upstream webhook dispatcher has no such protection.
+
 ### 4.2 Changes already present in the initial ReForwarder commit
 
 The initial commit `73ee10f` contained **130 files** differing from upstream tag `v0.18.0-rc.1` (+2,957 / −1,474 lines, verified via full-tree diff on 2026-11-02), primarily:
