@@ -353,7 +353,7 @@ func matchCustomField(rule models.FilterRule, sub *models.Subscriber) bool {
 	case "exists":
 		return present && raw != nil
 	case "not_exists":
-		return !(present && raw != nil)
+		return !present || raw == nil
 	case "equals":
 		return present && coerceString(raw) == coerceString(rule.Value)
 	case "not_equals":

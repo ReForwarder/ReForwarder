@@ -125,7 +125,7 @@ func TestEnrollConditionsWithInListChecker(t *testing.T) {
 		`{"field":"in_list","operator":"equals","value":4}]}`
 	auto := seedAutomation(t, state, "MembersOnly", models.AutomationStatusLive, &listID, cfg,
 		marshalNodes(t, linearChain(1)))
-	seedSubscriber(t, state, "alice@example.com")
+	seedSubscriber(t, state)
 
 	// Not a member of list 4: no enrollment.
 	_ = e.Enroll(context.Background(), enrollEvent(&listID))
@@ -193,7 +193,7 @@ func TestEnrollDefaultsFrequencyToOnce(t *testing.T) {
 	listID := uint(3)
 	seedAutomation(t, state, "Welcome", models.AutomationStatusLive, &listID,
 		`{"event_kind":"list.subscribed"}`, marshalNodes(t, linearChain(1)))
-	seedSubscriber(t, state, "alice@example.com")
+	seedSubscriber(t, state)
 
 	ev := enrollEvent(&listID)
 	_ = e.Enroll(context.Background(), ev)
