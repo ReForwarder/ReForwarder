@@ -214,8 +214,10 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	dispatcher.SetDeliveryRepo(webhookDeliveryRepo)
 	dispatcher.SetAttemptRepo(repositories.NewWebhookDeliveryAttemptRepository(db))
 	dispatcher.SetConfig(webhook.Config{
-		MaxRetries: cfg.WebhookMaxRetries,
-		Timeout:    time.Duration(cfg.WebhookTimeoutSecs) * time.Second,
+		MaxRetries:     cfg.WebhookMaxRetries,
+		Timeout:        time.Duration(cfg.WebhookTimeoutSecs) * time.Second,
+		ProxyURL:       cfg.WebhookProxyURL,
+		ProxyAckPolicy: cfg.WebhookProxyAckPolicy,
 	})
 	dispatcher.OnDeliverySuccess(func() { metrics.IncrementWebhookDelivery("success") })
 	dispatcher.OnDeliveryFailed(func() { metrics.IncrementWebhookDelivery("failed") })

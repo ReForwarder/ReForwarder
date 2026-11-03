@@ -123,6 +123,11 @@ type Config struct {
 	WebhookTimeoutSecs int
 	WebhookProxyURL    string
 
+	// WebhookProxyAckPolicy gates WebhookProxyURL: proxy mode activates only
+	// with "enforced" (POSTA_WEBHOOK_PROXY_ACK_POLICY=enforced); any other
+	// value keeps webhook delivery in guarded direct mode.
+	WebhookProxyAckPolicy string
+
 	// OAuth settings
 	GoogleOAuthClientID     string
 	GoogleOAuthClientSecret string
@@ -330,9 +335,10 @@ func New() *Config {
 		WorkerHealthPort:     goutils.EnvInt("POSTA_WORKER_HEALTH_PORT", port),
 		AutoSuppressOnReject: goutils.EnvBool("POSTA_AUTO_SUPPRESS_ON_REJECT", true),
 
-		WebhookMaxRetries:  goutils.EnvInt("POSTA_WEBHOOK_MAX_RETRIES", 3),
-		WebhookTimeoutSecs: goutils.EnvInt("POSTA_WEBHOOK_TIMEOUT_SECS", 10),
-		WebhookProxyURL:    goutils.Env("POSTA_WEBHOOK_PROXY_URL", ""),
+		WebhookMaxRetries:     goutils.EnvInt("POSTA_WEBHOOK_MAX_RETRIES", 3),
+		WebhookTimeoutSecs:    goutils.EnvInt("POSTA_WEBHOOK_TIMEOUT_SECS", 10),
+		WebhookProxyURL:       goutils.Env("POSTA_WEBHOOK_PROXY_URL", ""),
+		WebhookProxyAckPolicy: goutils.Env("POSTA_WEBHOOK_PROXY_ACK_POLICY", ""),
 
 		GoogleOAuthClientID:     goutils.Env("POSTA_GOOGLE_OAUTH_CLIENT_ID", ""),
 		GoogleOAuthClientSecret: goutils.Env("POSTA_GOOGLE_OAUTH_CLIENT_SECRET", ""),
