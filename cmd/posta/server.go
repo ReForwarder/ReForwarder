@@ -308,7 +308,9 @@ func newWebhookDispatcher(db *gorm.DB, cfg *config.Config) *webhook.Dispatcher {
 // own instance so the HTTP path's metrics callbacks stay independent. Plan
 // limits are intentionally unset: attachment limits fall back to the global
 // settings and the rate limiter keys on the recipient address.
-func newAutomationEmailService(db *gorm.DB, cfg *config.Config, producer *worker.Producer, blobStore blob.Store) *email.Service {
+func newAutomationEmailService(
+	db *gorm.DB, cfg *config.Config, producer *worker.Producer, blobStore blob.Store,
+) *email.Service {
 	limiter := ratelimit.NewRedisLimiter(cfg.Redis.Client, cfg.RateLimitHourly, cfg.RateLimitDaily)
 	svc := email.NewService(
 		repositories.NewEmailRepository(db),
