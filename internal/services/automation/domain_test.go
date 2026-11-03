@@ -323,15 +323,51 @@ func TestValidateWebhookScheme(t *testing.T) {
 	doc.Nodes = append(doc.Nodes, wh)
 
 	errs := doc.Validate(uintPtr(3))
-	expectError(t, errs, "must be a valid http or https URL")
+	expectError(t, errs, "scheme must be http or https")
 
 	wh.Config["url"] = "https://example.com/hook"
 	if errs := doc.Validate(uintPtr(3)); len(errs) != 0 {
 		t.Fatalf("https webhook must validate clean, got %v", errs)
 	}
 
+	// "not a url" parses as a scheme-less relative reference, so the scheme
+	// check is what rejects it.
 	wh.Config["url"] = "not a url"
-	expectError(t, doc.Validate(uintPtr(3)), "must be a valid http or https URL")
+	expectError(t, doc.Validate(uintPtr(3)), "scheme must be http or https")
+}
+
+// TestValidateWebhookURLPolicyAtSave pins the save-time static SSRF gate: the
+// full shared-guard URL policy runs on the webhook node's url with no DNS, and
+// every rejection must name the node (the texts are address-free and go
+// straight into the validation_errors API response).
+func TestValidateWebhookURLPolicyAtSave(t *testing.T) {
+	doc := minimalWorkflow()
+	wh := testNode("wh", NodeTypeWebhook, map[string]any{"url": "https://example.com/hook"}, nil)
+	doc.Nodes[1].NextNodeID = strPtr("wh")
+	doc.Nodes = append(doc.Nodes, wh)
+
+	for _, bad := range []string{
+		"http://127.0.0.1:8080", // loopback with an explicit port
+		"http://100.64.0.1",     // CGNAT shared space
+		"http://u:p@host",       // embedded credentials
+		"http://192.0.2.1/",     // TEST-NET-1 (the old fixture "public" IP)
+	} {
+		wh.Config["url"] = bad
+		errs := doc.Validate(uintPtr(3))
+		if len(errs) == 0 {
+			t.Errorf("url %q must be rejected at save time", bad)
+			continue
+		}
+		if !containsError(errs, `webhook node "wh"`) {
+			t.Errorf("errors for url %q must mention the webhook node, got %v", bad, errs)
+		}
+	}
+
+	// A public hostname still validates clean.
+	wh.Config["url"] = "https://hooks.example.com/ingest"
+	if errs := doc.Validate(uintPtr(3)); len(errs) != 0 {
+		t.Errorf("public webhook url must validate clean, got %v", errs)
+	}
 }
 
 func TestValidateDanglingNextNodeID(t *testing.T) {

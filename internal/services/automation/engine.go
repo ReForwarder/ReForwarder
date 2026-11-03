@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/webhook"
 	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/jkaninda/logger"
 	"gorm.io/gorm"
@@ -333,13 +334,18 @@ func (e *Engine) ExecuteJourney(ctx context.Context, journeyID uint) error {
 		durationMs := int(e.now().Sub(started).Milliseconds())
 
 		if execErr != nil {
-			errMsg := execErr.Error()
+			// The run row and the journey's last_error surface through the
+			// execution inspector and the API, so they are written as the
+			// guard's canonical text: raw delivery detail (resolved addresses,
+			// ports, resolver internals) never reaches a client. The server
+			// log keeps the raw error — that is where the detail belongs.
+			errMsg := webhook.SanitizeDeliveryError(execErr.Error())
 			if run != nil {
 				if failErr := e.runRepo.Fail(run.ID, errMsg); failErr != nil {
 					logger.Error("automation: failed to record run failure", "run_id", run.ID, "error", failErr)
 				}
 			}
-			logger.Warn("automation: node execution failed", "journey_id", journey.ID, "node_id", node.ID, "error", errMsg)
+			logger.Warn("automation: node execution failed", "journey_id", journey.ID, "node_id", node.ID, "error", execErr.Error())
 			e.handleNodeError(journey, errMsg)
 			return nil
 		}

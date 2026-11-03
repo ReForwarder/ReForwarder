@@ -28,8 +28,10 @@ import (
 	"time"
 
 	"github.com/goposta/posta/internal/dto"
+	"github.com/goposta/posta/internal/middlewares"
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/automation"
+	"github.com/goposta/posta/internal/services/webhook"
 	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/jkaninda/logger"
 	"github.com/jkaninda/okapi"
@@ -247,6 +249,42 @@ func validationFailed(c *okapi.Context, errs []string) error {
 	})
 }
 
+// errWebhookScopeRequired is the sentinel returned after the webhook-node
+// scope gate has aborted the request — callers must treat any error as
+// "response already written" (same contract as the other abort sentinels).
+var errWebhookScopeRequired = errors.New("api key missing required scope: webhooks")
+
+// workflowHasWebhookNode reports whether the nodes document contains at least
+// one webhook node. A document that fails to parse has none — validation
+// rejects it separately.
+func workflowHasWebhookNode(nodesJSON string) bool {
+	doc, err := automation.ParseWorkflow("", nodesJSON)
+	if err != nil {
+		return false
+	}
+	return doc.HasWebhookNode()
+}
+
+// requireWebhookScopeForWebhookNodes enforces the webhook-node scope gate:
+// saving a workflow that contains a webhook node (create, update, activate,
+// duplicate) is an SSRF-capable action, so an API-key caller must present the
+// webhooks scope (or "*"). Session/JWT callers pass through — their access is
+// governed by workspace RBAC (requireEdit). Legacy keys with an empty scope
+// list are send-only and denied. The response is aborted with 403 when the
+// gate fails.
+func requireWebhookScopeForWebhookNodes(c *okapi.Context, nodesJSON string) error {
+	if !middlewares.IsAPIKey(c) || !workflowHasWebhookNode(nodesJSON) {
+		return nil
+	}
+	for _, s := range middlewares.APIKeyScopes(c) {
+		if s == models.ScopeAll || s == models.ScopeWebhooks {
+			return nil
+		}
+	}
+	_ = c.AbortForbidden("API key missing required scope: " + models.ScopeWebhooks)
+	return errWebhookScopeRequired
+}
+
 // resolveTriggerConfig returns the JSON string persisted on
 // Automation.TriggerConfig — the column the engine matches live automations
 // against. The builder keeps the canonical trigger on the trigger node's
@@ -348,6 +386,11 @@ func (h *AutomationHandler) Create(c *okapi.Context, req *SaveAutomationRequest)
 	if err := requireEdit(c); err != nil {
 		return c.AbortForbidden("Insufficient workspace permissions", err)
 	}
+	if err := requireWebhookScopeForWebhookNodes(c, string(req.Body.Nodes)); err != nil {
+		// The helper already wrote the 403; returning the sentinel makes the
+		// rejection visible in the server log via handleChainError.
+		return err
+	}
 	scope := getScope(c)
 
 	name := strings.TrimSpace(req.Body.Name)
@@ -403,6 +446,11 @@ func (h *AutomationHandler) Get(c *okapi.Context, req *AutomationRequest) error 
 func (h *AutomationHandler) Update(c *okapi.Context, req *SaveAutomationRequest) error {
 	if err := requireEdit(c); err != nil {
 		return c.AbortForbidden("Insufficient workspace permissions", err)
+	}
+	if err := requireWebhookScopeForWebhookNodes(c, string(req.Body.Nodes)); err != nil {
+		// The helper already wrote the 403; returning the sentinel makes the
+		// rejection visible in the server log via handleChainError.
+		return err
 	}
 	a, err := h.getAutomation(c, req.ID)
 	if err != nil {
@@ -472,6 +520,13 @@ func (h *AutomationHandler) Activate(c *okapi.Context, req *AutomationRequest) e
 	if err != nil {
 		return nil
 	}
+	// The workflow that goes live is the stored one, so the gate runs on the
+	// row's nodes, not a request body.
+	if err := requireWebhookScopeForWebhookNodes(c, a.Nodes); err != nil {
+		// The helper already wrote the 403; returning the sentinel makes the
+		// rejection visible in the server log via handleChainError.
+		return err
+	}
 
 	if errs := validateAutomationWorkflow(a.Nodes, a.RootNodeID, a.ListID); len(errs) > 0 {
 		return validationFailed(c, errs)
@@ -521,6 +576,13 @@ func (h *AutomationHandler) Duplicate(c *okapi.Context, req *AutomationRequest) 
 	if err != nil {
 		return nil
 	}
+	// The clone persists the source automation's graph verbatim, so the gate
+	// runs on the source row's nodes.
+	if err := requireWebhookScopeForWebhookNodes(c, a.Nodes); err != nil {
+		// The helper already wrote the 403; returning the sentinel makes the
+		// rejection visible in the server log via handleChainError.
+		return err
+	}
 
 	copyName := a.Name + " (copy)"
 	if runes := []rune(copyName); len(runes) > 255 {
@@ -559,6 +621,12 @@ func (h *AutomationHandler) ListExecutions(c *okapi.Context, req *ListAutomation
 	if err != nil {
 		return c.AbortInternalServerError("failed to list executions")
 	}
+	// last_error may predate the SSRF guard (legacy rows can carry internal
+	// addresses and ports); sanitize the freshly scanned response copies —
+	// the stored rows are never rewritten here.
+	for i := range journeys {
+		journeys[i].LastError = webhook.SanitizeDeliveryError(journeys[i].LastError)
+	}
 	return paginated(c, journeys, total, page, size)
 }
 
@@ -581,6 +649,15 @@ func (h *AutomationHandler) GetExecution(c *okapi.Context, req *AutomationExecut
 	}
 	if runs == nil {
 		runs = []models.AutomationNodeRun{}
+	}
+	// Same read-path hygiene as ListExecutions: the journey's last_error and
+	// the per-run error texts are sanitized in the response copies only (the
+	// stored rows stay verbatim). Output bodies are left untouched — the guard
+	// only allows capturing them from policy-allowed destinations going
+	// forward, and legacy bodies are handled by the webhook package.
+	journey.LastError = webhook.SanitizeDeliveryError(journey.LastError)
+	for i := range runs {
+		runs[i].Error = webhook.SanitizeDeliveryError(runs[i].Error)
 	}
 	return ok(c, AutomationExecutionDetail{Journey: journey, Timeline: runs})
 }
