@@ -24,11 +24,10 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/netip"
-	"net/url"
 	"time"
+
+	"github.com/goposta/posta/internal/services/webhook"
 )
 
 const (
@@ -40,25 +39,60 @@ const (
 )
 
 // WebhookClient performs the outbound HTTP call of a webhook node. It is
-// SSRF-guarded: the target host is resolved up front and every address it
-// resolves to must be a public unicast address, so an automation author cannot
-// point a webhook at localhost, the cluster's internal network or cloud
-// metadata endpoints. Only http and https are accepted; a non-default port must
-// be written explicitly in the URL (the scheme defaults are 80/443).
+// SSRF-guarded through the shared webhook guard, in layers:
+//
+//   - the static URL policy (scheme, embedded credentials, port, local names,
+//     IP literals) runs before the request is built and again inside the
+//     pre-flight resolution;
+//   - a pre-flight resolution requires every address the host resolves to be
+//     public — defense in depth that also protects the SetHTTPClient seam,
+//     where a test or embedder may have swapped in a plain transport;
+//   - the guarded transport resolves, validates and dials a *validated IP
+//     literal* on every connection, so the destination is pinned at dial time
+//     and DNS rebinding between check and connect cannot slip through.
+//
+// Redirects are never followed (a 3xx becomes the final response, so a
+// redirect cannot hop the policy to another host) and ambient proxies are
+// never honored (the transport's Proxy is nil). Only http and https are
+// accepted; a non-default port must be written explicitly in the URL (the
+// scheme defaults are 80/443).
 type WebhookClient struct {
 	client *http.Client
+	// resolver resolves webhook hostnames for the pre-flight; nil means
+	// net.DefaultResolver inside webhook.ResolvePublicURL. Tests stub it so
+	// resolution stays deterministic and off the network.
+	resolver webhook.Resolver
+	// urlPolicy is the static SSRF gate every webhook URL must pass before a
+	// request is built. Production always uses webhook.ValidateWebhookURL;
+	// tests that exercise delivery semantics over loopback httptest servers
+	// relax it, because loopback destinations are blocked by policy — the
+	// same seam the Dispatcher carries.
+	urlPolicy func(string) error
 }
 
-// NewWebhookClient returns a WebhookClient with the platform defaults
-// (10s timeout).
+// NewWebhookClient returns a WebhookClient with the platform defaults: a 10s
+// timeout over the shared guard's hardened transport — redirects blocked, no
+// ambient proxy, destination pinned at dial time.
 func NewWebhookClient() *WebhookClient {
 	return &WebhookClient{
-		client: &http.Client{Timeout: webhookTimeout},
+		client: &http.Client{
+			Timeout:   webhookTimeout,
+			Transport: webhook.NewGuardedTransport(nil),
+			// Redirects are not followed: a 3xx becomes the final response
+			// (http.ErrUseLastResponse), so a redirect can never hop the
+			// SSRF policy to another host.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		urlPolicy: webhook.ValidateWebhookURL,
 	}
 }
 
 // SetHTTPClient overrides the underlying HTTP client (tests use this to inject
-// a transport; production code keeps the default).
+// a transport; production code keeps the default). The static gate and the
+// pre-flight resolution still run in front of it, so a swapped-in client never
+// weakens the URL policy.
 func (w *WebhookClient) SetHTTPClient(c *http.Client) {
 	if c != nil {
 		w.client = c
@@ -66,38 +100,21 @@ func (w *WebhookClient) SetHTTPClient(c *http.Client) {
 }
 
 // Post sends one webhook request and reports the status code plus the (size
-// capped) response body. A transport error or a failed SSRF check returns a
-// non-nil error; a non-2xx status is NOT an error here — the caller decides how
-// to treat it.
+// capped) response body. A policy rejection, a failed pre-flight resolution or
+// a transport error returns a non-nil error; a non-2xx status is NOT an error
+// here — the caller decides how to treat it. The guard's own errors are
+// address-free by construction; whatever else comes back is sanitized at the
+// engine's write boundary before it is stored.
 func (w *WebhookClient) Post(ctx context.Context, rawURL string, headers map[string]string, body []byte, secret string) (int, string, error) {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return 0, "", fmt.Errorf("invalid webhook url: %w", err)
+	if err := w.urlPolicy(rawURL); err != nil {
+		return 0, "", err
 	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return 0, "", fmt.Errorf("webhook url scheme must be http or https")
-	}
-	if parsed.Hostname() == "" {
-		return 0, "", fmt.Errorf("webhook url has no host")
-	}
-	// Port policy: an omitted port means the scheme default (80/443). A
-	// non-default port must be written explicitly in the URL — there is no way
-	// to reach one otherwise — so nothing further to enforce here; the address
-	// checks below carry the SSRF protection.
-
-	// SSRF guard: resolve once and validate every address. A URL that is
-	// already an IP literal resolves to itself here, so it is covered too.
-	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, parsed.Hostname())
-	if err != nil {
-		return 0, "", fmt.Errorf("webhook host %q lookup failed: %w", parsed.Hostname(), err)
-	}
-	if len(addrs) == 0 {
-		return 0, "", fmt.Errorf("webhook host %q did not resolve to any address", parsed.Hostname())
-	}
-	for _, addr := range addrs {
-		if err := validateWebhookIP(addr.IP); err != nil {
-			return 0, "", err
-		}
+	// Pre-flight defense in depth: resolve and require every address public.
+	// The guarded transport re-resolves and re-validates on every connection;
+	// this pass exists so a transport swapped in through SetHTTPClient is
+	// still preceded by a full check.
+	if _, err := webhook.ResolvePublicURL(ctx, w.resolver, rawURL); err != nil {
+		return 0, "", err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, bytes.NewReader(body))
@@ -129,22 +146,4 @@ func (w *WebhookClient) Post(ctx context.Context, rawURL string, headers map[str
 		bodyStr = bodyStr[:webhookBodyLimit]
 	}
 	return resp.StatusCode, bodyStr, nil
-}
-
-// validateWebhookIP rejects every non-public address: loopback, RFC 1918 / RFC
-// 4193 private ranges, link-local unicast and multicast, multicast generally,
-// and the unspecified address. IPv4-mapped IPv6 addresses are unmapped first so
-// the v4 checks apply to them.
-func validateWebhookIP(ip net.IP) error {
-	addr, ok := netip.AddrFromSlice(ip)
-	if !ok || !addr.IsValid() {
-		return fmt.Errorf("webhook host resolved to an invalid address")
-	}
-	addr = addr.Unmap()
-	if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() ||
-		addr.IsLinkLocalMulticast() || addr.IsInterfaceLocalMulticast() ||
-		addr.IsMulticast() || addr.IsUnspecified() {
-		return fmt.Errorf("webhook url host %s is not a public address", addr)
-	}
-	return nil
 }

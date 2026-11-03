@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/webhook"
 	"github.com/goposta/posta/internal/storage/repositories"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -1487,8 +1488,11 @@ func TestNodeErrorSchedulesRetryWithBackoff(t *testing.T) {
 	if sched, ok := row["scheduled_at"].(time.Time); !ok || !sched.Equal(want) {
 		t.Errorf("scheduled_at = %v, want the backoff slot %v", row["scheduled_at"], want)
 	}
-	if lastErr, _ := row["last_error"].(string); !strings.Contains(lastErr, "mailbox unavailable") {
-		t.Errorf("last_error = %q, want the node error", lastErr)
+	// Node errors are sanitized at the write boundary before they are stored
+	// (issue #7): the raw SMTP detail stays in the server log, the stored
+	// copy is the guard's canonical text.
+	if lastErr, _ := row["last_error"].(string); lastErr != webhook.SanitizeDeliveryError(`email node "n1": smtp: mailbox unavailable`) {
+		t.Errorf("last_error = %q, want the sanitized node error", lastErr)
 	}
 	if stats := readStats(t, state, auto); stats.Failed != 0 {
 		t.Errorf("a retrying journey must not count as failed yet, stats = %+v", stats)
@@ -1516,8 +1520,10 @@ func TestNodeErrorExhaustsRetriesAndFailsJourney(t *testing.T) {
 	if got, _ := row["retry_count"].(int64); got != int64(maxRetries-1) {
 		t.Errorf("retry_count = %v, want %d (unchanged by the permanent failure)", row["retry_count"], maxRetries-1)
 	}
-	if lastErr, _ := row["last_error"].(string); !strings.Contains(lastErr, "mailbox unavailable") {
-		t.Errorf("last_error = %q, want the node error", lastErr)
+	// Same write boundary: the permanently failed journey stores the sanitized
+	// text, never the raw SMTP detail.
+	if lastErr, _ := row["last_error"].(string); lastErr != webhook.SanitizeDeliveryError(`email node "n1": smtp: mailbox unavailable`) {
+		t.Errorf("last_error = %q, want the sanitized node error", lastErr)
 	}
 	if row["scheduled_at"] != nil {
 		t.Errorf("a failed journey must not stay scheduled, got %v", row["scheduled_at"])

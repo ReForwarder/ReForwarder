@@ -33,11 +33,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"net/url"
 	"strconv"
 	"strings"
 
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/webhook"
 )
 
 // Node types (AutomationNode.Type), aliased to the canonical values in
@@ -192,6 +192,21 @@ func (w *WorkflowDoc) Trigger() *models.AutomationNode {
 		}
 	}
 	return nil
+}
+
+// HasWebhookNode reports whether the workflow contains at least one webhook
+// node. The API's scope gate uses it: saving a workflow with a webhook node is
+// an SSRF-capable action, so an API-key caller must present the webhooks scope.
+func (w *WorkflowDoc) HasWebhookNode() bool {
+	if w == nil {
+		return false
+	}
+	for _, n := range w.Nodes {
+		if n != nil && n.Type == NodeTypeWebhook {
+			return true
+		}
+	}
+	return false
 }
 
 // parseNodeConfig round-trips a node's raw config map through JSON into a
@@ -485,9 +500,12 @@ func (w *WorkflowDoc) Validate(listID *uint) []string {
 				errs = append(errs, fmt.Sprintf("webhook node %q: url is required", n.ID))
 				break
 			}
-			parsed, err := url.Parse(rawURL)
-			if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-				errs = append(errs, fmt.Sprintf("webhook node %q: url must be a valid http or https URL", n.ID))
+			// The full static SSRF policy at save time (no DNS here — runtime
+			// re-checks happen on every delivery). The error texts are
+			// address-free by construction, safe for the validation_errors
+			// API response.
+			if err := webhook.ValidateWebhookURL(rawURL); err != nil {
+				errs = append(errs, fmt.Sprintf("webhook node %q: %s", n.ID, err.Error()))
 			}
 		}
 	}
