@@ -88,7 +88,10 @@ New-user registration is toggled at runtime from **Admin → Settings** (the `re
 |----------|---------|-------------|
 | `POSTA_WEBHOOK_MAX_RETRIES` | `3` | Maximum webhook delivery retries |
 | `POSTA_WEBHOOK_TIMEOUT_SECS` | `10` | Webhook HTTP request timeout (seconds) |
-| `POSTA_WEBHOOK_PROXY_URL` | — | Optional HTTP/HTTPS/SOCKS5 proxy for outbound webhook delivery |
+| `POSTA_WEBHOOK_PROXY_URL` | — | Optional HTTP/HTTPS/SOCKS5 proxy for outbound webhook delivery. Only takes effect together with `POSTA_WEBHOOK_PROXY_ACK_POLICY=enforced` |
+| `POSTA_WEBHOOK_PROXY_ACK_POLICY` | — | Required value: `enforced`. Proxy mode is refused unless this variable is set to exactly `enforced` |
+
+In proxy mode every proxied connection is pinned to the pre-validated public IP of the webhook destination: the proxy is asked to connect to the IP, never to the hostname, so the DNS-rebinding window between validation and connection is closed (TLS stays hostname-based via SNI and certificate verification). Setting `POSTA_WEBHOOK_PROXY_ACK_POLICY=enforced` asserts that you, the operator, accept the residual proxy-side assumptions: the proxy's own egress ACL behavior, split-horizon DNS reachability (the proxy must be able to reach the pinned public IP — DNS-isolated setups fail closed), rare proxies that refuse IP-form targets, and — for plain-HTTP (non-TLS) destinations — that the endpoint receives an IP-form `Host` header (a forwarding proxy cannot carry the request-line authority and the Host header independently). Without the acknowledgement the proxy is ignored and delivery stays in guarded direct mode.
 
 ## Delivery
 

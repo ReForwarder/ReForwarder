@@ -82,11 +82,24 @@ var blockedV4 = []netip.Prefix{
 	netip.MustParsePrefix("240.0.0.0/4"),     // reserved, incl. broadcast
 }
 
-// blockedV6 covers the documentation range; loopback, unspecified, ULA,
-// link-local and multicast are caught by netip's classifications.
+// blockedV6 covers the documentation range and the IPv4-embedding translation
+// prefixes; loopback, unspecified, ULA, link-local and multicast are caught by
+// netip's classifications.
 var blockedV6 = []netip.Prefix{
 	netip.MustParsePrefix("2001:db8::/32"), // documentation
+	// 6to4: the next 32 bits embed an IPv4 destination, so on a host with a
+	// 6to4 path the address routes to that embedded IPv4 target.
+	netip.MustParsePrefix("2002::/16"),
+	// NAT64 well-known prefix: the low 32 bits embed an IPv4 destination for
+	// DNS64/NAT64 translation.
+	netip.MustParsePrefix("64:ff9b::/96"),
 }
+
+// Allowed webhook URL schemes, shared across the guard and the proxy layer.
+const (
+	schemeHTTP  = "http"
+	schemeHTTPS = "https"
+)
 
 // ValidateWebhookURL is the static, network-free half of the policy: scheme,
 // host presence, embedded credentials, port, obvious local names, and — when
@@ -102,7 +115,7 @@ func ValidateWebhookURL(raw string) error {
 	if err != nil {
 		return fmt.Errorf("webhook URL is malformed")
 	}
-	if u.Scheme != "http" && u.Scheme != "https" {
+	if u.Scheme != schemeHTTP && u.Scheme != schemeHTTPS {
 		return fmt.Errorf("webhook URL scheme must be http or https")
 	}
 	if u.User != nil {

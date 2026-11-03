@@ -29,7 +29,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/mail"
 	"net/url"
@@ -37,7 +36,6 @@ import (
 	"time"
 
 	"github.com/jkaninda/logger"
-	"golang.org/x/net/proxy"
 
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/storage/repositories"
@@ -51,6 +49,9 @@ const (
 	maxAttemptBodyBytes = 2048
 )
 
+// proxyAckEnforced is the only accepted ProxyAckPolicy value.
+const proxyAckEnforced = "enforced"
+
 // Config holds configurable settings for the webhook dispatcher.
 type Config struct {
 	MaxRetries int
@@ -59,6 +60,17 @@ type Config struct {
 	// hiding the server's IP address from webhook endpoints.
 	// Supports http://, https://, and socks5:// schemes.
 	ProxyURL string
+	// ProxyAckPolicy gates proxy mode on an explicit operator
+	// acknowledgement. The only accepted value is "enforced"
+	// (POSTA_WEBHOOK_PROXY_ACK_POLICY=enforced): it asserts the operator
+	// accepts the residual proxy-side assumptions that remain on top of the
+	// SSRF hardening — the proxy's own egress ACL behavior, split-horizon
+	// reachability of the pinned public IP from the proxy, and rare proxies
+	// that refuse IP-form targets. With destination pinning the SSRF
+	// time-of-check/time-of-use window itself is closed; the acknowledgement
+	// covers what the operator's proxy adds. Any other value keeps the
+	// dispatcher in guarded direct mode even when ProxyURL is set.
+	ProxyAckPolicy string
 }
 
 type Dispatcher struct {
@@ -67,9 +79,16 @@ type Dispatcher struct {
 	attemptRepo  *repositories.WebhookDeliveryAttemptRepository
 	client       *http.Client
 	maxRetries   int
+	// resolver is the DNS seam for the proxy-mode pre-flight (and any
+	// resolution the pinned proxy dialing performs). Production leaves it
+	// nil, which selects net.DefaultResolver; tests inject a stub so
+	// resolution is controlled without touching the network.
+	resolver Resolver
 	// proxyDial reports that deliveries are routed through a configured
-	// proxy. The guarded dialer cannot see the destination through a proxy,
-	// so post() pre-flights it with a policy-checked resolution instead.
+	// proxy. The dial target is the proxy itself, so post() pre-flights the
+	// destination with a policy-checked resolution, and the pinned proxy
+	// dialing layer (proxydial.go) re-validates and pins the destination on
+	// every proxied connection.
 	proxyDial bool
 	// urlPolicy is the static SSRF gate every delivery URL must pass before a
 	// request is built. Production always uses ValidateWebhookURL; tests that
@@ -102,6 +121,13 @@ func NewDispatcher(repo *repositories.WebhookRepository) *Dispatcher {
 }
 
 // SetConfig applies configurable settings to the dispatcher.
+//
+// Proxy mode is opt-in twice over: a ProxyURL alone does NOT enable it —
+// cfg.ProxyAckPolicy must be "enforced" (POSTA_WEBHOOK_PROXY_ACK_POLICY).
+// Without the acknowledgement the proxy is ignored and the dispatcher stays
+// in guarded direct mode. When enabled, the outbound transport is built by
+// the pinned proxy dialing layer (proxydial.go), which pins every proxied
+// connection to the pre-validated public destination IP.
 func (d *Dispatcher) SetConfig(cfg Config) {
 	if cfg.MaxRetries > 0 {
 		d.maxRetries = cfg.MaxRetries
@@ -110,7 +136,18 @@ func (d *Dispatcher) SetConfig(cfg Config) {
 		d.client.Timeout = cfg.Timeout
 	}
 	if cfg.ProxyURL != "" {
-		transport, err := proxyTransport(cfg.ProxyURL)
+		// Fail-safe first: a proxy URL that cannot be parsed must never
+		// switch the dispatcher out of guarded direct mode.
+		parsed, err := url.Parse(cfg.ProxyURL)
+		if err != nil {
+			logger.Error("invalid webhook proxy URL, requests will be sent directly", "error", err)
+			return
+		}
+		if cfg.ProxyAckPolicy != proxyAckEnforced {
+			logger.Error("webhook proxy configured but POSTA_WEBHOOK_PROXY_ACK_POLICY=enforced is not set — ignoring proxy (direct mode)")
+			return
+		}
+		transport, err := pinnedProxyTransport(parsed, d.resolver)
 		if err != nil {
 			logger.Error("invalid webhook proxy URL, requests will be sent directly", "error", err)
 			return
@@ -121,59 +158,31 @@ func (d *Dispatcher) SetConfig(cfg Config) {
 	}
 }
 
-// proxyTransport builds an *http.Transport that routes requests through the
-// given proxy URL. Supported schemes: http, https, socks5.
+// pinnedProxyTransport builds the outbound transport for proxy mode. Supported
+// schemes: http, https (pinned request-rewriting RoundTripper) and socks5
+// (transport dialing through the pinned SOCKS5 dialer).
 //
 // SSRF enforcement differs by mode. Direct deliveries dial through the guarded
-// transport, which pins every connection to a validated public IP. Through a
-// proxy that is impossible: the dial target is the proxy itself (which may
-// legitimately be internal) and the proxy resolves the destination host on its
-// side, so dial-level IP pinning cannot be enforced — a documented limitation.
-// Proxy mode therefore relies on the static URL checks plus a pre-flight
-// policy-checked resolution of the destination (ResolvePublicURL in post)
-// before every delivery. The dial target is never the guarded dialer.
-func proxyTransport(rawURL string) (*http.Transport, error) {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse proxy URL: %w", err)
-	}
-
+// transport, which pins every connection to a validated public IP. Proxy mode
+// pins the destination as well: instead of forwarding the hostname to the
+// proxy (which would let the proxy resolve DNS on its side and reopen a
+// time-of-check/time-of-use window between the pre-flight validation and the
+// connection), the proxy is asked to connect to the validated public IP
+// literal, with the original hostname preserved for the Host header and TLS
+// ServerName. The dial target is never the guarded dialer — reaching the
+// proxy itself is a plain hardened dial (see proxydial.go).
+func pinnedProxyTransport(parsed *url.URL, res Resolver) (http.RoundTripper, error) {
 	switch parsed.Scheme {
-	case "http", "https":
-		return &http.Transport{
-			Proxy: http.ProxyURL(parsed),
-			DialContext: (&net.Dialer{
-				Timeout:   10 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-			ResponseHeaderTimeout: 10 * time.Second,
-		}, nil
+	case schemeHTTP, schemeHTTPS:
+		return newPinnedProxyRoundTripper(parsed, res), nil
 
 	case "socks5":
-		auth := &proxy.Auth{}
-		if parsed.User != nil {
-			auth.User = parsed.User.Username()
-			auth.Password, _ = parsed.User.Password()
-		} else {
-			auth = nil
-		}
-		dialer, err := proxy.SOCKS5("tcp", parsed.Host, auth, proxy.Direct)
+		dialFn, err := newPinnedSOCKS5Dialer(parsed, res)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create SOCKS5 dialer: %w", err)
-		}
-		contextDialer, ok := dialer.(proxy.ContextDialer)
-		if !ok {
-			return nil, fmt.Errorf("SOCKS5 dialer does not support DialContext")
+			return nil, err
 		}
 		return &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return contextDialer.DialContext(ctx, network, addr)
-			},
+			DialContext:           dialFn,
 			ForceAttemptHTTP2:     true,
 			MaxIdleConns:          100,
 			IdleConnTimeout:       90 * time.Second,
@@ -419,8 +428,9 @@ func signPayload(secret string, body []byte) string {
 // returns the status code plus the (truncated) response body so the attempt
 // history can keep what the endpoint answered. The SSRF policy is enforced
 // before the request is built: the static URL checks always run, and in proxy
-// mode — where the guarded dialer cannot see the destination — a pre-flight
-// policy-checked resolution doubles as the destination gate. In direct mode
+// mode a pre-flight policy-checked resolution doubles as the first
+// destination gate — the pinned proxy transport then re-validates and pins
+// the destination on every proxied connection (proxydial.go). In direct mode
 // the guarded transport re-checks the destination at dial time on every
 // connection.
 func (d *Dispatcher) post(rawURL string, secret string, body []byte) (int, string, error) {
@@ -430,7 +440,7 @@ func (d *Dispatcher) post(rawURL string, secret string, body []byte) (int, strin
 	if d.proxyDial {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if _, err := ResolvePublicURL(ctx, nil, rawURL); err != nil {
+		if _, err := ResolvePublicURL(ctx, d.resolver, rawURL); err != nil {
 			return 0, "", err
 		}
 	}

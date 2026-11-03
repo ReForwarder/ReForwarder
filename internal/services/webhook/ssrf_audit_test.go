@@ -23,6 +23,12 @@ package webhook
 // ("Block SSRF through webhook URLs"). Written by the auditor; production
 // code and existing test files are untouched.
 //
+// Amended by the proxy-mode hardening (issue #6): the translation-prefix pin
+// test flipped to hard assertions (prefixes now blocked), and the
+// client-construction / proxy-mode tests were adapted to the pinned proxy
+// transports and the ProxyAckPolicy gate. Assertions were strengthened, never
+// weakened.
+//
 // Network discipline: every test uses httptest servers bound to loopback or
 // stub resolvers. The tests that exercise a "public" address (8.8.8.8) do so
 // ONLY through a net.Dialer Control hook that records the final socket
@@ -47,6 +53,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -352,8 +359,10 @@ func TestAuditDispatcherClientCheckRedirectIsProduction(t *testing.T) {
 // ---------- 4. client/transport construction: guarded, TLS intact ----------
 
 // TestAuditDispatcherClientIsGuardedByConstruction pins the production client
-// wiring: the guarded transport is the ONLY transport, no ambient proxy is
-// honored, and certificate verification is nowhere disabled.
+// wiring: direct mode uses only the guarded transport, no ambient proxy is
+// honored, and certificate verification is nowhere disabled — in direct mode
+// AND in proxy mode, where the pinned proxy transports keep hostname-based
+// TLS (ServerName from the original hostname, verification on).
 func TestAuditDispatcherClientIsGuardedByConstruction(t *testing.T) {
 	d := NewDispatcher(nil)
 	tr, ok := d.client.Transport.(*http.Transport)
@@ -374,20 +383,35 @@ func TestAuditDispatcherClientIsGuardedByConstruction(t *testing.T) {
 	}
 	auditAssertTLSVerificationOn(t, "NewGuardedTransport", gt.TLSClientConfig)
 
-	pHTTP, err := proxyTransport("http://127.0.0.1:3128")
+	pHTTP, err := pinnedProxyTransport(&url.URL{Scheme: "http", Host: "127.0.0.1:3128"}, nil)
 	if err != nil {
-		t.Fatalf("proxyTransport(http): %v", err)
+		t.Fatalf("pinnedProxyTransport(http): %v", err)
 	}
-	auditAssertTLSVerificationOn(t, "http proxy transport", pHTTP.TLSClientConfig)
-	if pHTTP.Proxy == nil {
-		t.Fatal("http proxy transport must set Proxy")
+	pinned, ok := pHTTP.(*pinnedProxyRoundTripper)
+	if !ok {
+		t.Fatalf("http proxy transport is %T, want *pinnedProxyRoundTripper", pHTTP)
+	}
+	inner := pinned.transportFor("hooks.example")
+	auditAssertTLSVerificationOn(t, "http proxy pinned transport", inner.TLSClientConfig)
+	if inner.Proxy == nil {
+		t.Fatal("http proxy transport must set Proxy on the inner transport")
+	}
+	if inner.TLSClientConfig.ServerName != "hooks.example" {
+		t.Fatalf("inner transport ServerName = %q, want the original hostname", inner.TLSClientConfig.ServerName)
 	}
 
-	pSocks, err := proxyTransport("socks5://127.0.0.1:1080")
+	pSocks, err := pinnedProxyTransport(&url.URL{Scheme: "socks5", Host: "127.0.0.1:1080"}, nil)
 	if err != nil {
-		t.Fatalf("proxyTransport(socks5): %v", err)
+		t.Fatalf("pinnedProxyTransport(socks5): %v", err)
 	}
-	auditAssertTLSVerificationOn(t, "socks5 proxy transport", pSocks.TLSClientConfig)
+	sTr, ok := pSocks.(*http.Transport)
+	if !ok {
+		t.Fatalf("socks5 proxy transport is %T, want *http.Transport", pSocks)
+	}
+	if sTr.DialContext == nil {
+		t.Fatal("socks5 proxy transport must carry a DialContext (the pinned SOCKS5 dialer)")
+	}
+	auditAssertTLSVerificationOn(t, "socks5 proxy transport", sTr.TLSClientConfig)
 
 	// An invalid proxy URL must fail safe: stay in guarded direct mode.
 	d2 := NewDispatcher(nil)
@@ -699,7 +723,7 @@ func TestAuditValidationErrorsNeverContainAddresses(t *testing.T) {
 // touches real DNS.
 func TestAuditProxyModeBlocksUnsafeDestinationsBeforeConnecting(t *testing.T) {
 	d := NewDispatcher(nil)
-	d.SetConfig(Config{ProxyURL: "http://127.0.0.1:3128"})
+	d.SetConfig(Config{ProxyURL: "http://127.0.0.1:3128", ProxyAckPolicy: proxyAckEnforced})
 	if !d.proxyDial {
 		t.Fatal("test setup: proxy mode not enabled")
 	}
@@ -737,17 +761,16 @@ func TestAuditLegacyHostnameBodiesAssumedSafe_HardeningPin(t *testing.T) {
 	}
 }
 
-// TestAuditTranslationPrefixes_NotYetBlocked_HardeningPin documents that the
-// address policy does not block the IPv4-embedding translation prefixes
-// (6to4 2002::/16, NAT64 64:ff9b::/96): on a host with a working translation
-// path these could route to the embedded IPv4 destination. No mainstream
-// platform translates loopback via these prefixes, so this is hardening, not
-// an exploitable bypass. Current behavior is pinned; adding the prefixes to
-// blockedV6 should flip this test consciously.
-func TestAuditTranslationPrefixes_NotYetBlocked_HardeningPin(t *testing.T) {
+// TestAuditTranslationPrefixes_Blocked pins that the address policy blocks
+// the IPv4-embedding translation prefixes (6to4 2002::/16, NAT64
+// 64:ff9b::/96): on a host with a working translation path these addresses
+// route to the embedded IPv4 destination, so the policy rejects them like any
+// other non-public destination. Formerly pinned as "not yet blocked"; the
+// hardening landed in blockedV6 and this test now asserts it.
+func TestAuditTranslationPrefixes_Blocked(t *testing.T) {
 	for _, s := range []string{"2002:7f00:1::", "64:ff9b::127.0.0.1"} {
-		if err := validateIPAddr(netip.MustParseAddr(s)); err != nil {
-			t.Logf("%s is now blocked — translation-prefix hardening landed; update this pin", s)
+		if err := validateIPAddr(netip.MustParseAddr(s)); err == nil {
+			t.Errorf("%s must be blocked: translation prefix embedding an IPv4 destination", s)
 		}
 	}
 }
