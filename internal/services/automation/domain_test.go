@@ -58,19 +58,6 @@ func minimalWorkflow() *WorkflowDoc {
 	}
 }
 
-func parseNodes(t *testing.T, root string, nodes []*models.AutomationNode) *WorkflowDoc {
-	t.Helper()
-	raw, err := json.Marshal(nodes)
-	if err != nil {
-		t.Fatalf("marshal nodes: %v", err)
-	}
-	doc, err := ParseWorkflow(root, string(raw))
-	if err != nil {
-		t.Fatalf("ParseWorkflow: %v", err)
-	}
-	return doc
-}
-
 func containsError(errs []string, substr string) bool {
 	for _, e := range errs {
 		if strings.Contains(e, substr) {

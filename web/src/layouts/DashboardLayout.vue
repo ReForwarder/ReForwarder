@@ -178,6 +178,7 @@ const navSections: NavSection[] = [
       { name: 'Contacts', path: '/contacts', icon: 'users' },
       { name: 'Subscribers', path: '/subscribers', icon: 'user-check' },
       { name: 'Subscriber Lists', path: '/subscriber-lists', icon: 'list' },
+      { name: 'Automations', path: '/automations', icon: 'zap' },
       { name: 'Unsubscribe Lists', path: '/unsubscribe-lists', icon: 'mail-x' },
     ],
   },
