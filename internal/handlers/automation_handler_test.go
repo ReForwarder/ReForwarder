@@ -143,16 +143,19 @@ func (s *autoHState) colIndex(table, col string) int {
 	return -1
 }
 
-func (s *autoHState) rowCount(table string) int {
+// The table arguments are dropped from these helpers: every call targets the
+// "automations" table — the fixed names live in the bodies below.
+func (s *autoHState) rowCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.tables[table].rows)
+	return len(s.tables["automations"].rows)
 }
 
 // rowMap returns the row with the given id as a column map (nil when absent).
-func (s *autoHState) rowMap(table string, id int64) map[string]driver.Value {
+func (s *autoHState) rowMap(id int64) map[string]driver.Value {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	const table = "automations"
 	idx := s.colIndex(table, "id")
 	for _, row := range s.tables[table].rows {
 		if row[idx] == id {
@@ -738,8 +741,8 @@ func TestCreateAutomationWithValidationErrorsReturns400(t *testing.T) {
 	if !found {
 		t.Errorf("validation errors %v must mention the missing trigger", resp.ValidationErrors)
 	}
-	if state.rowCount("automations") != 0 {
-		t.Errorf("a rejected automation must not be stored, got %d rows", state.rowCount("automations"))
+	if state.rowCount() != 0 {
+		t.Errorf("a rejected automation must not be stored, got %d rows", state.rowCount())
 	}
 }
 
@@ -771,8 +774,8 @@ func TestCreateAutomationValid(t *testing.T) {
 	if tc == nil || tc["event_kind"] != "list.subscribed" {
 		t.Errorf("trigger_config = %v, want the derived trigger document", data["trigger_config"])
 	}
-	if state.rowCount("automations") != 1 {
-		t.Fatalf("automations stored = %d, want 1", state.rowCount("automations"))
+	if state.rowCount() != 1 {
+		t.Fatalf("automations stored = %d, want 1", state.rowCount())
 	}
 }
 
@@ -810,7 +813,7 @@ func TestActivateDraftAutomation(t *testing.T) {
 	if data["status"] != models.AutomationStatusLive {
 		t.Errorf("response status = %v, want live", data["status"])
 	}
-	row := state.rowMap("automations", 5)
+	row := state.rowMap(5)
 	if row["status"].(string) != models.AutomationStatusLive {
 		t.Errorf("stored status = %v, want live", row["status"])
 	}
@@ -841,7 +844,7 @@ func TestActivateWithoutListForEmailNodeRejected(t *testing.T) {
 	if !found {
 		t.Fatalf("validation errors %v must mention the missing list", resp.ValidationErrors)
 	}
-	if row := state.rowMap("automations", 6); row["status"].(string) != models.AutomationStatusDraft {
+	if row := state.rowMap(6); row["status"].(string) != models.AutomationStatusDraft {
 		t.Errorf("stored status = %v, want draft (rejected activations change nothing)", row["status"])
 	}
 }
@@ -856,7 +859,7 @@ func TestPauseLiveAutomation(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("pause live: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
-	if row := state.rowMap("automations", 7); row["status"].(string) != models.AutomationStatusPaused {
+	if row := state.rowMap(7); row["status"].(string) != models.AutomationStatusPaused {
 		t.Errorf("stored status = %v, want paused", row["status"])
 	}
 
@@ -876,7 +879,7 @@ func TestDeleteLiveAutomationConflicted(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (body %s)", rec.Code, rec.Body.String())
 	}
-	if state.rowMap("automations", 9) == nil {
+	if state.rowMap(9) == nil {
 		t.Error("the live automation must not be deleted")
 	}
 }
@@ -1026,7 +1029,7 @@ func TestAutomationScopeIsolation(t *testing.T) {
 	}
 
 	// And the row is untouched by all the refused calls.
-	if row := state.rowMap("automations", 5); row["status"].(string) != models.AutomationStatusDraft {
+	if row := state.rowMap(5); row["status"].(string) != models.AutomationStatusDraft {
 		t.Errorf("status = %v, want draft (refused calls must not mutate)", row["status"])
 	}
 }
