@@ -34,6 +34,7 @@ const (
 	TypeInboundProcess = "inbound:process"
 	TypeMessageProcess = "message:process"
 	TypeMessageReply   = "message:reply"
+	TypeAutomationRun  = "automation:run"
 
 	QueueTransactional = queues.Transactional
 	QueueBulk          = queues.Bulk
@@ -125,4 +126,22 @@ func NewMessageReplyTask(id uint, opts ...asynq.Option) (*asynq.Task, error) {
 		return nil, err
 	}
 	return asynq.NewTask(TypeMessageReply, payload, opts...), nil
+}
+
+// AutomationRunPayload names one automation journey to advance.
+type AutomationRunPayload struct {
+	JourneyID uint `json:"journey_id"`
+}
+
+// NewAutomationRunTask creates an Asynq task that executes one automation
+// journey (advancing it by up to ten nodes, parking it on delays, retrying
+// failures). No TaskID dedup: every nudge must run, because a dedup id would
+// swallow legitimate re-runs after a crash between claim and execution —
+// idempotence is enforced by the journey status CAS inside the engine.
+func NewAutomationRunTask(journeyID uint, opts ...asynq.Option) (*asynq.Task, error) {
+	payload, err := json.Marshal(AutomationRunPayload{JourneyID: journeyID})
+	if err != nil {
+		return nil, err
+	}
+	return asynq.NewTask(TypeAutomationRun, payload, opts...), nil
 }

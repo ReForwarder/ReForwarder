@@ -20,6 +20,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"io"
@@ -28,16 +29,25 @@ import (
 	"time"
 
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/automation"
 	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/jkaninda/okapi"
 )
 
 type SubscriberHandler struct {
-	repo *repositories.SubscriberRepository
+	repo              *repositories.SubscriberRepository
+	automationTrigger automation.AutomationTrigger
 }
 
 func NewSubscriberHandler(repo *repositories.SubscriberRepository) *SubscriberHandler {
 	return &SubscriberHandler{repo: repo}
+}
+
+// SetAutomationTrigger wires the automation engine behind the creation hooks:
+// every created contact enrolls into live contact.created automations. Nil
+// (the default) leaves the hooks inert.
+func (h *SubscriberHandler) SetAutomationTrigger(at automation.AutomationTrigger) {
+	h.automationTrigger = at
 }
 
 type CreateSubscriberRequest struct {
@@ -149,6 +159,10 @@ func (h *SubscriberHandler) Create(c *okapi.Context, req *CreateSubscriberReques
 	if err := h.repo.Create(s); err != nil {
 		return c.AbortConflict("subscriber already exists")
 	}
+	notifyAutomation(c.Request().Context(), h.automationTrigger, automation.TriggerEvent{
+		Kind:       models.AutomationEventContactCreated,
+		Subscriber: s,
+	})
 	return created(c, s)
 }
 
@@ -181,9 +195,11 @@ func (h *SubscriberHandler) Update(c *okapi.Context, req *UpdateSubscriberReques
 	if req.Body.Name != "" {
 		s.Name = req.Body.Name
 	}
+	newlyUnsubscribed := false
 	if req.Body.Status != "" {
 		newStatus := models.SubscriberStatus(req.Body.Status)
-		if newStatus == models.SubscriberStatusUnsubscribed && s.Status != models.SubscriberStatusUnsubscribed {
+		newlyUnsubscribed = newStatus == models.SubscriberStatusUnsubscribed && s.Status != models.SubscriberStatusUnsubscribed
+		if newlyUnsubscribed {
 			now := time.Now()
 			s.UnsubscribedAt = &now
 		}
@@ -203,6 +219,12 @@ func (h *SubscriberHandler) Update(c *okapi.Context, req *UpdateSubscriberReques
 
 	if err := h.repo.Update(s); err != nil {
 		return c.AbortInternalServerError("failed to update subscriber")
+	}
+	if newlyUnsubscribed {
+		notifyAutomation(c.Request().Context(), h.automationTrigger, automation.TriggerEvent{
+			Kind:       models.AutomationEventUnsubscribed,
+			Subscriber: s,
+		})
 	}
 	return ok(c, s)
 }
@@ -256,6 +278,9 @@ func (h *SubscriberHandler) BulkImportJSON(c *okapi.Context, req *BulkImportSubs
 	if err != nil {
 		return c.AbortInternalServerError("import failed: " + err.Error())
 	}
+	// BulkCreate fills the IDs of the inserted rows in place; the skipped
+	// duplicates keep a zero ID. Only genuinely new contacts enroll.
+	h.notifyCreated(subscribers)
 
 	return ok(c, BulkImportResult{
 		Created:          created,
@@ -360,6 +385,9 @@ func (h *SubscriberHandler) BulkImportCSV(c *okapi.Context) error {
 	if err != nil {
 		return c.AbortInternalServerError("import failed: " + err.Error())
 	}
+	// Same enrollment as the JSON import: only rows BulkCreate inserted (the
+	// ones that came back with an ID) fire contact.created.
+	h.notifyCreated(subscribers)
 
 	return ok(c, BulkImportResult{
 		Created:          createdCount,
@@ -367,4 +395,26 @@ func (h *SubscriberHandler) BulkImportCSV(c *okapi.Context) error {
 		Total:            len(subscribers),
 		InvalidTimezones: invalidTZ,
 	})
+}
+
+// notifyCreated enrolls every freshly inserted subscriber of a bulk import
+// into live contact.created automations. Rows BulkCreate skipped as
+// duplicates keep a zero ID and are left alone. The loop runs on one
+// background goroutine — an import can insert thousands of rows and the
+// response must not wait on enrollment.
+func (h *SubscriberHandler) notifyCreated(subscribers []models.Subscriber) {
+	if h.automationTrigger == nil {
+		return
+	}
+	go func() {
+		for i := range subscribers {
+			if subscribers[i].ID == 0 {
+				continue
+			}
+			notifyAutomation(context.Background(), h.automationTrigger, automation.TriggerEvent{
+				Kind:       models.AutomationEventContactCreated,
+				Subscriber: &subscribers[i],
+			})
+		}
+	}()
 }

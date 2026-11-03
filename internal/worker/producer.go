@@ -196,6 +196,28 @@ func (p *Producer) EnqueueMessageReply(replyID uint) error {
 	return nil
 }
 
+// EnqueueAutomationRun schedules one automation journey execution after the
+// given delay (the enrollment nudge uses ~1s; the overdue sweep and the tick
+// budget re-park use 0 = immediate). Automation ticks are background work, so
+// they ride the low queue; the engine's 10s in-process scheduler is the
+// backstop if an enqueue is lost. Deliberately NO TaskID dedup — a dedup id
+// would swallow legitimate re-runs (crash between claim and execute, sweep
+// after a lost nudge) — journey-level CAS makes duplicate deliveries safe.
+func (p *Producer) EnqueueAutomationRun(journeyID uint, delay time.Duration) error {
+	opts := []asynq.Option{asynq.Queue(QueueLow), asynq.MaxRetry(p.maxRetries)}
+	if delay > 0 {
+		opts = append(opts, asynq.ProcessIn(delay))
+	}
+	task, err := NewAutomationRunTask(journeyID, opts...)
+	if err != nil {
+		return fmt.Errorf("failed to create automation run task: %w", err)
+	}
+	if _, err := p.client.Enqueue(task); err != nil {
+		return fmt.Errorf("failed to enqueue automation run: %w", err)
+	}
+	return nil
+}
+
 // Close closes the underlying Asynq client.
 func (p *Producer) Close() error {
 	return p.client.Close()

@@ -25,6 +25,7 @@ package routes
 // used from more than one route file.
 const (
 	tagAdmin                 = "Admin"
+	tagAutomations           = "Automations"
 	tagCampaigns             = "Campaigns"
 	tagForms                 = "Forms"
 	tagInbound               = "Inbound"

@@ -60,6 +60,7 @@ type Email struct {
 	ListUnsubscribeMailto string      `json:"list_unsubscribe_mailto,omitempty" gorm:"type:text"`
 	ListUnsubscribePost   bool        `json:"list_unsubscribe_post,omitempty"`
 	UnsubscribeListID     *uint       `json:"unsubscribe_list_id,omitempty" gorm:"index"`
+	AutomationID          *uint       `json:"automation_id,omitempty" gorm:"index"`
 	Status                EmailStatus `json:"status" gorm:"default:pending;not null"`
 	ErrorMessage          string      `json:"error_message"`
 	RetryCount            int         `json:"retry_count" gorm:"default:0;not null"`
