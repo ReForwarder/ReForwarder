@@ -344,12 +344,12 @@ func (e *Engine) buildWebhookBody(cfg models.WebhookConfig, nc *nodeContext) []b
 		return []byte(renderPlaceholders(cfg.Body, e.buildEmailData(nc)))
 	}
 	payload := map[string]any{
-		"event":          "automation.webhook",
-		"automation_id":  nc.automation.ID,
+		"event":           "automation.webhook",
+		"automation_id":   nc.automation.ID,
 		"automation_name": nc.automation.Name,
-		"journey_id":     nc.journey.ID,
-		"contact_email":  nc.journey.Email,
-		"data":           nc.properties,
+		"journey_id":      nc.journey.ID,
+		"contact_email":   nc.journey.Email,
+		"data":            nc.properties,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {

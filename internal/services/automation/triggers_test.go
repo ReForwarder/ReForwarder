@@ -31,17 +31,17 @@ import (
 // (including in_list through the real list membership repo), and the
 // once-frequency dedup decided by the trigger log's unique index.
 
-func enrollEvent(listID *uint, email string) TriggerEvent {
+func enrollEvent(listID *uint) TriggerEvent {
 	return TriggerEvent{
 		Kind:       EventKindListSubscribed,
 		ListID:     listID,
-		Subscriber: &models.Subscriber{ID: 9, UserID: 7, WorkspaceID: uintPtr(3), Email: email},
+		Subscriber: &models.Subscriber{ID: 9, UserID: 7, WorkspaceID: uintPtr(3), Email: "alice@example.com"},
 	}
 }
 
 func TestTriggerMatchesEventKind(t *testing.T) {
 	auto := &models.Automation{ID: 1, ListID: uintPtr(3)}
-	ev := enrollEvent(uintPtr(3), "alice@example.com")
+	ev := enrollEvent(uintPtr(3))
 
 	cfg := models.AutomationTriggerConfig{EventKind: EventKindListSubscribed, Frequency: FrequencyOnce}
 	if !triggerMatches(cfg, auto, ev) {
@@ -54,8 +54,8 @@ func TestTriggerMatchesEventKind(t *testing.T) {
 }
 
 func TestTriggerMatchesListScope(t *testing.T) {
-	evList3 := enrollEvent(uintPtr(3), "alice@example.com")
-	evList9 := enrollEvent(uintPtr(9), "alice@example.com")
+	evList3 := enrollEvent(uintPtr(3))
+	evList9 := enrollEvent(uintPtr(9))
 	evNoList := TriggerEvent{Kind: EventKindListSubscribed, Subscriber: evList3.Subscriber}
 
 	// The trigger's own list_id wins.
@@ -125,17 +125,17 @@ func TestEnrollConditionsWithInListChecker(t *testing.T) {
 		`{"field":"in_list","operator":"equals","value":4}]}`
 	auto := seedAutomation(t, state, "MembersOnly", models.AutomationStatusLive, &listID, cfg,
 		marshalNodes(t, linearChain(1)))
-	seedSubscriber(t, state, 9, "alice@example.com")
+	seedSubscriber(t, state, "alice@example.com")
 
 	// Not a member of list 4: no enrollment.
-	_ = e.Enroll(context.Background(), enrollEvent(&listID, "alice@example.com"))
+	_ = e.Enroll(context.Background(), enrollEvent(&listID))
 	if got := state.rowCount("automation_journeys"); got != 0 {
 		t.Fatalf("AND with a failing in_list must not enroll, got %d journeys", got)
 	}
 
 	// Make the contact a member of list 4: both conditions hold.
 	engSeed(t, state, "subscriber_list_members", map[string]any{"list_id": uint(4), "subscriber_id": uint(9)})
-	_ = e.Enroll(context.Background(), enrollEvent(&listID, "alice@example.com"))
+	_ = e.Enroll(context.Background(), enrollEvent(&listID))
 
 	if got := state.rowCount("automation_journeys"); got != 1 {
 		t.Fatalf("AND with both conditions true must enroll once, got %d journeys", got)
@@ -193,9 +193,9 @@ func TestEnrollDefaultsFrequencyToOnce(t *testing.T) {
 	listID := uint(3)
 	seedAutomation(t, state, "Welcome", models.AutomationStatusLive, &listID,
 		`{"event_kind":"list.subscribed"}`, marshalNodes(t, linearChain(1)))
-	seedSubscriber(t, state, 9, "alice@example.com")
+	seedSubscriber(t, state, "alice@example.com")
 
-	ev := enrollEvent(&listID, "alice@example.com")
+	ev := enrollEvent(&listID)
 	_ = e.Enroll(context.Background(), ev)
 	_ = e.Enroll(context.Background(), ev)
 
