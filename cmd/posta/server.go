@@ -812,8 +812,9 @@ func shutdownServer(res *serverResources) {
 // webhookConfig builds a webhook.Config from the application configuration.
 func webhookConfig(cfg *config.Config) webhook.Config {
 	return webhook.Config{
-		MaxRetries: cfg.WebhookMaxRetries,
-		Timeout:    time.Duration(cfg.WebhookTimeoutSecs) * time.Second,
-		ProxyURL:   cfg.WebhookProxyURL,
+		MaxRetries:     cfg.WebhookMaxRetries,
+		Timeout:        time.Duration(cfg.WebhookTimeoutSecs) * time.Second,
+		ProxyURL:       cfg.WebhookProxyURL,
+		ProxyAckPolicy: cfg.WebhookProxyAckPolicy,
 	}
 }
