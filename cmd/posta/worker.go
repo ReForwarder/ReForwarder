@@ -27,6 +27,7 @@ import (
 	"github.com/goposta/posta/internal/config"
 	"github.com/goposta/posta/internal/cron/jobs"
 	"github.com/goposta/posta/internal/metrics"
+	"github.com/goposta/posta/internal/services/automation"
 	"github.com/goposta/posta/internal/services/crypto"
 	"github.com/goposta/posta/internal/services/email"
 	"github.com/goposta/posta/internal/services/eventbus"
@@ -228,6 +229,25 @@ func runWorker() error {
 		mux.HandleFunc(worker.TypeMessageProcess, messageHandler.ProcessTask)
 		mux.HandleFunc(worker.TypeMessageReply, messageHandler.ProcessReplyTask)
 	}
+
+	// Automation engine: the scheduler polls for due journeys and executes
+	// automation:run tasks. Running alongside the server's embedded worker is
+	// safe — the claim query uses FOR UPDATE SKIP LOCKED and every cursor
+	// write is a compare-and-swap on the journey status.
+	automationProducer := worker.NewProducer(cfg.Redis.AsynqRedisOpt(), cfg.WorkerMaxRetries)
+	automationEngine := automation.NewEngine(
+		db,
+		automationProducer,
+		automation.NewEmailSenderAdapter(newAutomationEmailService(db, cfg, automationProducer, blobStore), db),
+		repositories.NewSubscriberListRepository(db),
+		repositories.NewSubscriberRepository(db),
+	)
+	mux.HandleFunc(worker.TypeAutomationRun, worker.NewAutomationRunHandler(automationEngine).ProcessTask)
+	// email.bounced automation triggers: the send handler resolves the
+	// subscriber behind a bounced address so the engine can enroll.
+	handler.SetSubscriberRepo(repositories.NewSubscriberRepository(db))
+	handler.SetAutomationTriggers(automationEngine)
+	automationEngine.Start(context.Background())
 
 	// Publish worker's build info
 	workermon.StartHeartbeat(context.Background(), cfg.Redis.Client, config.Version, config.CommitID)

@@ -31,6 +31,7 @@ import (
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/audit"
 	"github.com/goposta/posta/internal/services/auth"
+	"github.com/goposta/posta/internal/services/automation"
 	"github.com/goposta/posta/internal/services/cache"
 	"github.com/goposta/posta/internal/services/email"
 	"github.com/goposta/posta/internal/services/emailhistory"
@@ -135,6 +136,7 @@ type routerHandlers struct {
 	oauthAdmin       *handlers.OAuthAdminHandler
 	subscriber       *handlers.SubscriberHandler
 	subscriberList   *handlers.SubscriberListHandler
+	automation       *handlers.AutomationHandler
 	campaign         *handlers.CampaignHandler
 	tracking         *handlers.TrackingHandler
 	bounceWebhook    *handlers.BounceWebhookHandler
@@ -406,6 +408,18 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	r.h.subscriber = handlers.NewSubscriberHandler(subscriberRepo)
 	r.h.subscriberList = handlers.NewSubscriberListHandler(subscriberListRepo, subscriberRepo)
 
+	// Automations (workflow builder + executions + custom-event ingest). The
+	// enrollment engine is attached separately — see AttachAutomationTrigger.
+	r.h.automation = handlers.NewAutomationHandler(db)
+
+	// Automation engine (HTTP side): enrollment only — it matches trigger
+	// events against live automations and enqueues automation:run tasks. The
+	// scheduler that executes those tasks runs in the worker (embedded worker
+	// in cmd/posta/server.go and the standalone worker binary), so the HTTP
+	// side never calls Start. Without a worker producer there is nowhere to
+	// enqueue, and every hook stays nil-guarded and inert. Wired AFTER the
+	// tracking handler is constructed below — AttachAutomationTrigger fans out
+	// to r.h.tracking, which must not be nil.
 	// Campaigns
 	campaignRepo := repositories.NewCampaignRepository(db)
 	campaignMessageRepo := repositories.NewCampaignMessageRepository(db)
@@ -429,6 +443,22 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	// tracking handlers turn callbacks into email_events.
 	emailService.SetTracking(trackingService, settingsProvider.EmailTrackingEnabled)
 	r.h.tracking.SetRecorder(logsRecorder)
+
+	// Automation engine: enrolls contacts into live automations from the
+	// trigger hooks (list.subscribed, contact.created/unsubscribed,
+	// email.opened/clicked/bounced, custom-event ingest). Constructed after
+	// every handler it fans out to exists. The scheduler itself runs in the
+	// worker/embedded-worker binary; the HTTP side only enrolls.
+	if producer != nil {
+		automationEngine := automation.NewEngine(
+			db,
+			producer,
+			automation.NewEmailSenderAdapter(emailService, db),
+			subscriberListRepo,
+			subscriberRepo,
+		)
+		r.AttachAutomationTrigger(automationEngine)
+	}
 
 	// Bounce webhook
 	r.h.bounceWebhook = handlers.NewBounceWebhookHandler(subscriberRepo, emailRepo, campaignMessageRepo)
@@ -574,6 +604,17 @@ type emailPlanAdapter struct {
 	svc *planpkg.Service
 }
 
+// AttachAutomationTrigger wires one AutomationTrigger — the automation engine —
+// into the automation handler's custom-event ingest and the trigger hooks of
+// the subscriber, subscriber-list and tracking handlers. Passing nil leaves
+// every hook nil-guarded and inert; calling it again replaces the trigger.
+func (r *Router) AttachAutomationTrigger(at automation.AutomationTrigger) {
+	r.h.automation.SetAutomationTrigger(at)
+	r.h.subscriber.SetAutomationTrigger(at)
+	r.h.subscriberList.SetAutomationTrigger(at)
+	r.h.tracking.SetAutomationTrigger(at)
+}
+
 func (a *emailPlanAdapter) EffectiveLimits(workspaceID *uint) *email.PlanLimits {
 	l := a.svc.EffectiveLimits(workspaceID)
 	return &email.PlanLimits{
@@ -623,6 +664,7 @@ func (r *Router) registerRoutes() {
 	r.app.Register(r.userRoutes()...)
 	r.app.Register(r.workspaceRoutes()...)
 	r.app.Register(r.workspaceResourceRoutes()...)
+	r.app.Register(r.automationRoutes()...)
 	r.app.Register(r.logsRoutes()...)
 	r.app.Register(r.oauthRoutes()...)
 	r.app.Register(r.trackingRoutes()...)

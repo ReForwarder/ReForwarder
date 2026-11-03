@@ -87,6 +87,10 @@ func Run(db *gorm.DB) error {
 		&models.Announcement{},
 		&models.UpgradeStep{},
 		&models.UpdateStatus{},
+		&models.Automation{},
+		&models.AutomationJourney{},
+		&models.AutomationNodeRun{},
+		&models.AutomationTriggerLog{},
 	); err != nil {
 		return fmt.Errorf("failed to migrate database: %w", err)
 	}
