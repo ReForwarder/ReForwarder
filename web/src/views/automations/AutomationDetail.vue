@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { automationsApi, automationApiError } from '../../api/automations'
 import { subscriberListsApi } from '../../api/subscriberLists'
 import { useNotificationStore } from '../../stores/notification'
+import { useWorkspaceStore } from '../../stores/workspace'
 import type { AutomationRow, AutomationStatsResponse, JourneyRow } from '../../api/types'
 import Pagination from '../../components/Pagination.vue'
 import ConfirmDialog from '../../components/ConfirmDialog.vue'
@@ -15,6 +16,7 @@ import ExecutionDrawer from './components/ExecutionDrawer.vue'
 const route = useRoute()
 const router = useRouter()
 const notify = useNotificationStore()
+const wsStore = useWorkspaceStore()
 const { confirm } = useConfirm()
 
 const automationId = computed(() => {
@@ -264,7 +266,7 @@ function closeDrawer() {
             </span>
           </p>
         </div>
-        <div class="detail-actions">
+        <div v-if="wsStore.canEdit" class="detail-actions">
           <button
             v-if="automation.status !== 'live'"
             class="btn btn-primary"
