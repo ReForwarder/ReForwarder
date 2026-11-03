@@ -28,12 +28,21 @@ package webhook
 // ONLY through a net.Dialer Control hook that records the final socket
 // address and returns an error BEFORE the connect(2) syscall — no packet
 // leaves the process. The assertion is about the address the dialer was
-// about to use, which is exactly the property under test.
+// about to use, which is exactly the property under test. The TLS
+// verification test uses an in-test PKI (ECDSA P-256 CA + leaf) served from a
+// loopback listener with reserved ".example" hostnames, so it cannot touch
+// real DNS or the Internet either.
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -407,39 +416,96 @@ func auditAssertTLSVerificationOn(t *testing.T, what string, cfg *tls.Config) {
 // TestAuditTLSVerificationSurvivesLiteralDial proves the property the pinned
 // dialer depends on: dialing an IP literal while the URL carries a hostname
 // keeps hostname-based SNI and certificate verification.
-//   - URL host covered by the test certificate (example.com) + local literal
-//     dial → the request succeeds: ServerName came from the URL host.
-//   - URL host NOT covered (untrusted.example) + same literal dial → the
-//     handshake is rejected with a certificate error.
+//
+// Fully offline: the whole PKI is generated in the test (ECDSA P-256 CA +
+// leaf for trusted.example), the TLS listener is loopback, and the dial target
+// is pinned to the listener's literal. The hostnames use the reserved
+// ".example" TLD, which cannot resolve publicly, so no DNS query and no
+// packet can ever leave the machine.
+//   - URL host covered by the leaf certificate (trusted.example) + local
+//     literal dial → the request succeeds: ServerName came from the URL host.
+//   - URL host NOT covered (other.example) + same literal dial → the
+//     handshake is rejected with an x509 certificate error.
 //
 // The dial target is independent of verification, exactly as
 // guardedDialContext produces (literal dial, URL-host verification).
 func TestAuditTLSVerificationSurvivesLiteralDial(t *testing.T) {
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	// ---- in-test PKI: CA + leaf for trusted.example ----
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("CA key: %v", err)
+	}
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "webhook audit test CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("CA cert: %v", err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatalf("parse CA cert: %v", err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(caCert)
+
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("leaf key: %v", err)
+	}
+	leafTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "trusted.example"},
+		DNSNames:     []string{"trusted.example"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, caCert, &leafKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("leaf cert: %v", err)
+	}
+	leaf := tls.Certificate{Certificate: [][]byte{leafDER}, PrivateKey: leafKey}
+
+	// ---- loopback TLS listener serving ONLY the trusted.example leaf ----
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{leaf}, MinVersion: tls.VersionTLS12}
+	srv.StartTLS()
 	defer srv.Close()
+	literal := srv.Listener.Addr().String() // the local IP literal under test
 
-	// Start from the test server's own client (its RootCAs trust the test
-	// certificate, verification otherwise ON) and override ONLY the dial:
-	// every connection is made to the local listener — the "IP literal" under
-	// test — while the URL keeps its hostname.
-	base, ok := srv.Client().Transport.(*http.Transport)
-	if !ok {
-		t.Fatalf("test setup: client transport is %T", srv.Client().Transport)
-	}
-	tr := base.Clone()
+	// Client wiring keeps the guarded transport's hardened shape (no ambient
+	// proxy, handshake timeout, verification ON) with the in-test CA as root.
+	// The dial is pinned to the local literal while the URL keeps its
+	// hostname, exactly as guardedDialContext produces (literal dial,
+	// URL-host verification). The guarded dialer itself refuses loopback by
+	// design — TestAuditGuardedTransportBlocksLiveLocalTLSServer covers that
+	// refusal — so the final-mile literal dial is made directly to the local
+	// listener; SNI and certificate verification are transport-level behavior
+	// and are what this test exercises.
+	tr := NewGuardedTransport(nil)
+	tr.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
 	tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
 		var d net.Dialer
-		return d.DialContext(ctx, network, srv.Listener.Addr().String())
+		return d.DialContext(ctx, network, literal)
 	}
 	client := &http.Client{Timeout: 5 * time.Second, Transport: tr}
 
 	// Hostname covered by the certificate: verification must pass even though
 	// the connection was made to a different (literal) address.
-	resp, err := client.Get("https://example.com/hook")
+	resp, err := client.Get("https://trusted.example/hook")
 	if err != nil {
-		t.Fatalf("GET https://example.com through literal dial failed: %v", err)
+		t.Fatalf("GET https://trusted.example through literal dial failed: %v", err)
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -448,10 +514,10 @@ func TestAuditTLSVerificationSurvivesLiteralDial(t *testing.T) {
 
 	// Hostname NOT covered by the certificate: verification must fail — the
 	// failure text must be a certificate/TLS error, not a connection error.
-	resp2, err := client.Get("https://untrusted.example/hook")
+	resp2, err := client.Get("https://other.example/hook")
 	if err == nil {
 		_ = resp2.Body.Close()
-		t.Fatal("invalid certificate was accepted; hostname verification is broken")
+		t.Fatal("wrong-name certificate was accepted; hostname verification is broken")
 	}
 	low := strings.ToLower(err.Error())
 	if !strings.Contains(low, "certificate") && !strings.Contains(low, "x509") && !strings.Contains(low, "tls") {

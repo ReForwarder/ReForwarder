@@ -28,6 +28,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -323,13 +324,29 @@ func TestGuardedDialerRejectsMixedAnswers(t *testing.T) {
 }
 
 // TestGuardedDialerRebindBetweenAttempts simulates DNS rebinding during
-// retries: the first resolution is public (dial fails), the second resolves
-// to loopback. The second attempt must be blocked at connection time.
+// retries: the first resolution answers a public address, the second flips to
+// loopback. Fully offline: the dialer's Control hook records the final socket
+// address and aborts BEFORE connect(2), so attempt 1 proves the validated
+// public literal is exactly what gets dialed without a single packet leaving
+// the machine, and attempt 2 proves the rebound loopback answer is refused
+// by policy before any socket exists.
 func TestGuardedDialerRebindBetweenAttempts(t *testing.T) {
-	oldTimeout := guardDialTimeout
-	guardDialTimeout = 100 * time.Millisecond
-	t.Cleanup(func() { guardDialTimeout = oldTimeout })
+	sentinel := errors.New("aborted-by-test: connect intentionally aborted before connect(2)")
 
+	// Recording/aborting dialer: the Control hook runs after socket creation
+	// and strictly before connect, so returning an error here means no packet
+	// is ever sent.
+	var dialed atomic.Value // last pre-connect socket address, as string
+	d := &net.Dialer{
+		Timeout: 100 * time.Millisecond,
+		Control: func(_ string, address string, _ syscall.RawConn) error {
+			dialed.Store(address)
+			return sentinel
+		},
+	}
+
+	// Loopback canary: if any request ever reaches the local listener, the
+	// guard has failed AND the test has leaked traffic.
 	hits := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits++
@@ -337,23 +354,38 @@ func TestGuardedDialerRebindBetweenAttempts(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// TEST-NET-3 is rejected by policy, so use a real-world public address
-	// that will simply time out dialing within the shortened timeout.
 	res := &stubResolver{addrs: []netip.Addr{ip(t, "93.184.216.34")}}
+	tr := &http.Transport{DialContext: guardedDialContext(d, res)}
 	client := &http.Client{
 		Timeout:   5 * time.Second,
-		Transport: NewGuardedTransport(res),
-	}
-	_, firstErr := client.Post("http://rebind.example/hook", "application/json", nil)
-	if firstErr == nil {
-		t.Fatal("dial to unreachable public IP succeeded unexpectedly")
+		Transport: tr,
 	}
 
-	// Now the attacker's DNS flips to loopback; the guarded dialer must refuse.
+	// Attempt 1: the resolution is public; the dial must carry exactly the
+	// validated IP literal and fail with the pre-connect abort sentinel.
+	_, firstErr := client.Post("http://rebind.example/hook", "application/json", nil)
+	if !errors.Is(firstErr, sentinel) {
+		t.Fatalf("first attempt err = %v, want the Control-hook sentinel (the hook must fire pre-connect)", firstErr)
+	}
+	if got, ok := dialed.Load().(string); !ok || got != "93.184.216.34:80" {
+		t.Fatalf("attempt 1 dialed %v, want [93.184.216.34:80] (no hostname, the validated IP literal)", dialed.Load())
+	}
+	if got := res.calls.Load(); got != 1 {
+		t.Fatalf("resolver called %d times across one connection, want 1 (resolve→validate→dial is atomic w.r.t. DNS)", got)
+	}
+
+	// Attempt 2: the attacker's DNS flips to loopback; the guarded dialer must
+	// refuse it during validation, before any socket exists.
 	res.addrs = []netip.Addr{ip(t, "127.0.0.1")}
 	_, secondErr := client.Post("http://rebind.example/hook", "application/json", nil)
 	if !errors.Is(secondErr, ErrPolicyBlocked) {
-		t.Fatalf("second attempt err = %v, want ErrPolicyBlocked", secondErr)
+		t.Fatalf("second attempt err = %v, want ErrPolicyBlocked (resolver-validated refusal, pre-dial)", secondErr)
+	}
+	if got, ok := dialed.Load().(string); !ok || got != "93.184.216.34:80" {
+		t.Fatalf("recorded dial address is now %v; the loopback answer must never reach a socket", dialed.Load())
+	}
+	if got := res.calls.Load(); got != 2 {
+		t.Fatalf("resolver called %d times across two connections, want 2 (fresh resolution per connection)", got)
 	}
 	if hits != 0 {
 		t.Fatalf("test server received %d requests, want 0", hits)

@@ -445,22 +445,38 @@ func TestAddAndRemoveListNodes(t *testing.T) {
 
 // ---------- webhook node ----------
 
-// webhookTestEngine returns an engine whose webhook client dials the given
-// httptest server directly. The webhook URL uses a public documentation IP
-// (TEST-NET-1) so the SSRF guard passes — loopback, where httptest servers
-// actually listen, is exactly what the guard exists to reject — while the
-// transport routes the bytes to the local test server.
+// webhookTestEngine returns an engine whose webhook client delivers to the
+// given httptest server, with the guard's runtime pieces stubbed rather than
+// removed:
+//
+//   - the static gate is relaxed via the urlPolicy seam — the same seam and
+//     rationale as dispatcher_test.go's newPermissiveDispatcher: loopback
+//     destinations are blocked by policy, and that blocking behavior itself is
+//     covered by TestWebhookNodeRejectsSSRFBeforeAnyRequest and the guard
+//     tests in webhook_guard_test.go;
+//   - the resolver is a deterministic stub answering the fixture hostname with
+//     a public (never dialed) address, so the pre-flight resolution passes
+//     without touching real DNS;
+//   - only the transport is swapped on the production client — the no-follow
+//     CheckRedirect and the timeout stay exactly as shipped — and it rewrites
+//     every dial to the local test server.
+//
+// Node URLs therefore use the webhookFixtureHost hostname, never an IP
+// literal: an IP literal (loopback or TEST-NET-1 alike) is rejected inside
+// webhook.ResolvePublicURL's own static checks, which no seam relaxes.
 func webhookTestEngine(t *testing.T, srv *httptest.Server) (*Engine, *engState) {
 	t.Helper()
 	e, state, _, _, _ := newTestEngine(t)
 	port := strings.TrimPrefix(srv.URL, "http://127.0.0.1:")
 	client := NewWebhookClient()
-	client.SetHTTPClient(&http.Client{Transport: &http.Transport{
+	client.urlPolicy = func(string) error { return nil }
+	client.resolver = &fakeResolver{answer: alwaysPublicAnswer}
+	client.client.Transport = &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, network, "127.0.0.1:"+port)
 		},
-	}})
+	}
 	e.SetWebhookClient(client)
 	return e, state
 }
@@ -480,7 +496,7 @@ func TestWebhookNodeRecordsSuccess(t *testing.T) {
 	nc := testNodeContext(t)
 
 	node := testNode("wh", NodeTypeWebhook, map[string]any{
-		"url":     "http://192.0.2.1/hook",
+		"url":     "http://" + webhookFixtureHost + "/hook",
 		"headers": map[string]any{"X-Custom": "1"},
 		"secret":  "s3cr3t",
 		"body":    `{"email":"{{contact_email}}","order":"{{order_id}}"}`,
@@ -516,10 +532,15 @@ func TestWebhookNodeErrorsOnNon2xx(t *testing.T) {
 	e, _ := webhookTestEngine(t, srv)
 	nc := testNodeContext(t)
 
-	node := testNode("wh", NodeTypeWebhook, map[string]any{"url": "http://192.0.2.1/hook"}, nil)
+	node := testNode("wh", NodeTypeWebhook, map[string]any{"url": "http://" + webhookFixtureHost + "/hook"}, nil)
 	_, err := e.executeWebhookNode(context.Background(), nc, node)
-	if err == nil || !strings.Contains(err.Error(), "status 500") {
-		t.Fatalf("a 500 must fail the node with the status in the error, got %v", err)
+	// The bare "HTTP <code>" shape: it is what survives the engine's
+	// write-boundary sanitization verbatim, with no body snippet attached.
+	if err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+		t.Fatalf("a 500 must fail the node with HTTP 500, got %v", err)
+	}
+	if strings.Contains(err.Error(), "boom") {
+		t.Errorf("the response body must not be echoed into the error, got %v", err)
 	}
 }
 

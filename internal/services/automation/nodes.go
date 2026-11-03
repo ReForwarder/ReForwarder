@@ -311,8 +311,10 @@ func (e *Engine) executeRemoveFromListNode(nc *nodeContext, node *models.Automat
 
 // executeWebhookNode posts the webhook and records status code + response body
 // (capped) in the output. A transport error or a non-2xx status is a node
-// error — retryable through the standard backoff — with the status and a body
-// snippet carried in the error message for the timeline.
+// error — retryable through the standard backoff — with the status carried as
+// the bare "HTTP <code>" notation: the engine sanitizes node errors at the
+// write boundary, and that shape is passed through verbatim, so the response
+// body must never be echoed into the error (the run row identifies the node).
 func (e *Engine) executeWebhookNode(ctx context.Context, nc *nodeContext, node *models.AutomationNode) (*nodeResult, error) {
 	cfg, err := nc.workflow.WebhookConfig(node)
 	if err != nil {
@@ -332,7 +334,7 @@ func (e *Engine) executeWebhookNode(ctx context.Context, nc *nodeContext, node *
 		return nil, fmt.Errorf("webhook node %q: request failed: %w", node.ID, err)
 	}
 	if statusCode < 200 || statusCode > 299 {
-		return nil, fmt.Errorf("webhook node %q: endpoint returned status %d: %s", node.ID, statusCode, snippet)
+		return nil, fmt.Errorf("HTTP %d", statusCode)
 	}
 	return &nodeResult{Output: map[string]any{"status_code": statusCode, "body": snippet}}, nil
 }
