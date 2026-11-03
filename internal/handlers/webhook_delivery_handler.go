@@ -20,6 +20,8 @@
 package handlers
 
 import (
+	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/webhook"
 	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/jkaninda/okapi"
 )
@@ -39,6 +41,32 @@ func (h *WebhookDeliveryHandler) List(c *okapi.Context, req *ListRequest) error 
 	if err != nil {
 		return c.AbortInternalServerError("failed to list webhook deliveries")
 	}
+	sanitizeDeliveries(deliveries)
 
 	return paginated(c, deliveries, total, page, size)
+}
+
+// sanitizeDeliveries rewrites every delivery's raw error message in place to
+// the safe user-facing form. Rows written before the SSRF guard existed can
+// carry internal IPs and ports in their error text; deliveries are sanitized
+// on the way out so legacy history is cleaned without being destroyed.
+func sanitizeDeliveries(deliveries []models.WebhookDelivery) {
+	for i := range deliveries {
+		deliveries[i].ErrorMessage = webhook.SanitizeDeliveryError(deliveries[i].ErrorMessage)
+	}
+}
+
+// sanitizeAttempts rewrites every attempt's raw error in place and redacts
+// the captured response body when the owning webhook's stored URL may have
+// reached a non-public destination (rows written before the SSRF guard).
+// urlLookup maps a delivery ID to its webhook's stored URL; an unknown URL
+// fails safe and the body is redacted.
+func sanitizeAttempts(attempts []models.WebhookDeliveryAttempt, urlLookup func(uint) string) {
+	for i := range attempts {
+		a := &attempts[i]
+		a.Error = webhook.SanitizeDeliveryError(a.Error)
+		if webhook.LegacyAttemptBodyUnsafe(urlLookup(a.DeliveryID)) {
+			a.ResponseBody = ""
+		}
+	}
 }

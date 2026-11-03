@@ -125,6 +125,31 @@ func TestMatchesFilters_MultipleFilters(t *testing.T) {
 	}
 }
 
+// permissiveTestClient builds a client without the SSRF guard for tests that
+// exercise retry/persistence semantics over loopback httptest servers. The
+// guard's own behavior is covered in ssrf_test.go and the policy tests below.
+func permissiveTestClient() *http.Client {
+	return &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{},
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+// newPermissiveDispatcher builds a dispatcher wired for loopback httptest
+// deliveries: both the guarded transport and the static URL policy reject
+// 127.0.0.1 by design, so both are relaxed here. The production posture (real
+// static gate plus guarded transport) is exercised by
+// TestDeliverPolicyBlockFailsFast in dispatcher_attempts_test.go.
+func newPermissiveDispatcher() *Dispatcher {
+	d := NewDispatcher(nil)
+	d.client = permissiveTestClient()
+	d.urlPolicy = func(string) error { return nil }
+	return d
+}
+
 func TestDispatcher_SignatureHeader(t *testing.T) {
 	var receivedSig string
 	var receivedBody []byte
@@ -147,12 +172,12 @@ func TestDispatcher_SignatureHeader(t *testing.T) {
 		Secret: secret,
 	}
 
-	d := NewDispatcher(nil)
+	d := newPermissiveDispatcher()
 	body := []byte(`{"event":"email.sent","email_id":"abc","timestamp":"2026-01-01T00:00:00Z"}`)
 
-	statusCode, err := d.doRequest(wh.URL, wh.Secret, body)
+	statusCode, _, err := d.post(wh.URL, wh.Secret, body)
 	if err != nil {
-		t.Fatalf("doRequest error: %v", err)
+		t.Fatalf("post error: %v", err)
 	}
 	if statusCode != 200 {
 		t.Fatalf("expected 200, got %d", statusCode)
@@ -174,10 +199,10 @@ func TestDispatcher_NoSignatureWhenNoSecret(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d := NewDispatcher(nil)
-	_, err := d.doRequest(srv.URL, "", []byte(`{}`))
+	d := newPermissiveDispatcher()
+	_, _, err := d.post(srv.URL, "", []byte(`{}`))
 	if err != nil {
-		t.Fatalf("doRequest error: %v", err)
+		t.Fatalf("post error: %v", err)
 	}
 	if receivedSig != "" {
 		t.Errorf("expected no signature header, got %q", receivedSig)
@@ -197,7 +222,7 @@ func TestDispatcher_RetryOnFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	d := NewDispatcher(nil)
+	d := newPermissiveDispatcher()
 	d.maxRetries = 3
 
 	wh := models.Webhook{
