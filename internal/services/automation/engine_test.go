@@ -62,18 +62,18 @@ var engColumns = map[string][]string{
 		"last_error", "context_json", "entered_at", "last_advanced_at", "completed_at"},
 	"automation_node_runs": {"id", "journey_id", "automation_id", "node_id", "node_type",
 		"action", "output", "error", "duration_ms", "entered_at", "completed_at"},
-	"automation_trigger_log": {"id", "automation_id", "subscriber_id", "triggered_at"},
-	"subscribers":            {"id", "user_id", "workspace_id", "email", "name", "status", "custom_fields", "timezone", "language", "subscribed_at", "unsubscribed_at", "created_at", "updated_at"},
-	"subscriber_lists":       {"id", "user_id", "workspace_id", "name", "description", "type", "filter_rules", "created_at", "updated_at"},
-	"subscriber_list_members":     {"id", "list_id", "subscriber_id", "created_at"},
+	"automation_trigger_log":       {"id", "automation_id", "subscriber_id", "triggered_at"},
+	"subscribers":                  {"id", "user_id", "workspace_id", "email", "name", "status", "custom_fields", "timezone", "language", "subscribed_at", "unsubscribed_at", "created_at", "updated_at"},
+	"subscriber_lists":             {"id", "user_id", "workspace_id", "name", "description", "type", "filter_rules", "created_at", "updated_at"},
+	"subscriber_list_members":      {"id", "list_id", "subscriber_id", "created_at"},
 	"subscriber_list_unsubscribes": {"id", "list_id", "subscriber_id", "reason", "unsubscribed_at"},
 }
 
 // Composite unique keys consulted for ON CONFLICT DO NOTHING inserts.
 var engUniqueKeys = map[string][]string{
-	"automation_trigger_log":        {"automation_id", "subscriber_id"},
-	"subscriber_list_members":       {"list_id", "subscriber_id"},
-	"subscriber_list_unsubscribes":  {"list_id", "subscriber_id"},
+	"automation_trigger_log":       {"automation_id", "subscriber_id"},
+	"subscriber_list_members":      {"list_id", "subscriber_id"},
+	"subscriber_list_unsubscribes": {"list_id", "subscriber_id"},
 }
 
 // Column defaults applied to INSERTs that omit them (the database would fill
@@ -785,7 +785,7 @@ func (s *engState) handleUpdate(compact string, args []driver.NamedValue) (drive
 	if setStart < 0 || whereStart < 0 {
 		return nil, fmt.Errorf("engState: malformed update: %s", compact)
 	}
-	setClause := compact[setStart+len(" set "):whereStart]
+	setClause := compact[setStart+len(" set ") : whereStart]
 
 	type setter struct {
 		idx   int
@@ -1038,14 +1038,6 @@ func linearChain(count int) []*models.AutomationNode {
 	return nodes
 }
 
-type autoFixture struct {
-	id            uint
-	triggerCfg    string
-	status        string
-	listID        *uint
-	frequencyJSON string
-}
-
 // seedAutomation inserts an automation row and returns its id.
 func seedAutomation(t *testing.T, state *engState, name, status string, listID *uint, triggerCfg, nodes string) uint {
 	vals := map[string]any{
@@ -1065,9 +1057,9 @@ func seedAutomation(t *testing.T, state *engState, name, status string, listID *
 	return uint(engSeed(t, state, "automations", vals))
 }
 
-func seedSubscriber(t *testing.T, state *engState, id uint, email string) {
+func seedSubscriber(t *testing.T, state *engState, email string) {
 	engSeed(t, state, "subscribers", map[string]any{
-		"id":            id,
+		"id":            uint(9),
 		"user_id":       uint(7),
 		"workspace_id":  uint(3),
 		"email":         email,
@@ -1130,7 +1122,7 @@ func TestEnrollCreatesJourneyStatsAndNudge(t *testing.T) {
 	auto := seedAutomation(t, state, "Welcome", models.AutomationStatusLive, &listID,
 		`{"event_kind":"list.subscribed","frequency":"once"}`,
 		marshalNodes(t, linearChain(1)))
-	seedSubscriber(t, state, 9, "alice@example.com")
+	seedSubscriber(t, state, "alice@example.com")
 
 	ev := TriggerEvent{Kind: EventKindListSubscribed, ListID: &listID, Subscriber: &models.Subscriber{
 		ID: 9, UserID: 7, WorkspaceID: uintPtr(3), Email: "alice@example.com",
@@ -1187,7 +1179,7 @@ func TestEnrollOnceDedupSkipsSecondEvent(t *testing.T) {
 	auto := seedAutomation(t, state, "Welcome", models.AutomationStatusLive, &listID,
 		`{"event_kind":"list.subscribed","frequency":"once"}`,
 		marshalNodes(t, linearChain(1)))
-	seedSubscriber(t, state, 9, "alice@example.com")
+	seedSubscriber(t, state, "alice@example.com")
 	ev := TriggerEvent{Kind: EventKindListSubscribed, ListID: &listID, Subscriber: &models.Subscriber{
 		ID: 9, UserID: 7, WorkspaceID: uintPtr(3), Email: "alice@example.com",
 	}}
@@ -1219,7 +1211,7 @@ func TestEnrollEveryTimeCreatesSecondJourney(t *testing.T) {
 	seedAutomation(t, state, "Welcome", models.AutomationStatusLive, &listID,
 		`{"event_kind":"list.subscribed","frequency":"every_time"}`,
 		marshalNodes(t, linearChain(1)))
-	seedSubscriber(t, state, 9, "alice@example.com")
+	seedSubscriber(t, state, "alice@example.com")
 	ev := TriggerEvent{Kind: EventKindListSubscribed, ListID: &listID, Subscriber: &models.Subscriber{
 		ID: 9, UserID: 7, WorkspaceID: uintPtr(3), Email: "alice@example.com",
 	}}
@@ -1244,7 +1236,7 @@ func TestEnrollConditionsFalseSkips(t *testing.T) {
 	seedAutomation(t, state, "Welcome", models.AutomationStatusLive, &listID,
 		`{"event_kind":"list.subscribed","frequency":"once","conditions":[{"field":"email","operator":"equals","value":"bob@example.com"}]}`,
 		marshalNodes(t, linearChain(1)))
-	seedSubscriber(t, state, 9, "alice@example.com")
+	seedSubscriber(t, state, "alice@example.com")
 	ev := TriggerEvent{Kind: EventKindListSubscribed, ListID: &listID, Subscriber: &models.Subscriber{
 		ID: 9, UserID: 7, WorkspaceID: uintPtr(3), Email: "alice@example.com",
 	}}
@@ -1269,7 +1261,7 @@ func TestEnrollSkipsDraftPausedAndNonMatchingList(t *testing.T) {
 	seedAutomation(t, state, "Draft", models.AutomationStatusDraft, &listID, draftCfg, marshalNodes(t, linearChain(1)))
 	seedAutomation(t, state, "Paused", models.AutomationStatusPaused, &listID, draftCfg, marshalNodes(t, linearChain(1)))
 	seedAutomation(t, state, "OtherList", models.AutomationStatusLive, uintPtr(9), draftCfg, marshalNodes(t, linearChain(1)))
-	seedSubscriber(t, state, 9, "alice@example.com")
+	seedSubscriber(t, state, "alice@example.com")
 
 	ev := TriggerEvent{Kind: EventKindListSubscribed, ListID: &listID, Subscriber: &models.Subscriber{
 		ID: 9, UserID: 7, WorkspaceID: uintPtr(3), Email: "alice@example.com",
@@ -1314,7 +1306,7 @@ func TestProcessBatchExecutesTriggerEmailWorkflow(t *testing.T) {
 	auto := seedAutomation(t, state, "Welcome", models.AutomationStatusLive, &listID,
 		`{"event_kind":"list.subscribed","frequency":"once"}`,
 		marshalNodes(t, linearChain(1)))
-	seedSubscriber(t, state, 9, "alice@example.com")
+	seedSubscriber(t, state, "alice@example.com")
 	now := clock.Now()
 	journeyID := seedJourney(t, state, auto, "t", &now, map[string]any{"context_json": `{"order_id":"A-1"}`})
 
@@ -1397,7 +1389,7 @@ func TestExecuteJourneyParksOnDelayThenResumes(t *testing.T) {
 			testNode("d", NodeTypeDelay, map[string]any{"duration": 30, "unit": models.AutomationDelayMinutes}, strPtr("e1")),
 			testNode("e1", NodeTypeEmail, map[string]any{"template_id": 2}, nil),
 		}))
-	seedSubscriber(t, state, 9, "alice@example.com")
+	seedSubscriber(t, state, "alice@example.com")
 	now := clock.Now()
 	journeyID := seedJourney(t, state, auto, "t", &now, nil)
 
@@ -1439,7 +1431,7 @@ func TestExecuteJourneyTickBudgetReParks(t *testing.T) {
 	auto := seedAutomation(t, state, "Long", models.AutomationStatusLive, &listID,
 		`{"event_kind":"list.subscribed","frequency":"once"}`,
 		marshalNodes(t, linearChain(12)))
-	seedSubscriber(t, state, 9, "alice@example.com")
+	seedSubscriber(t, state, "alice@example.com")
 	now := clock.Now()
 	journeyID := seedJourney(t, state, auto, "t", &now, nil)
 
@@ -1477,7 +1469,7 @@ func TestNodeErrorSchedulesRetryWithBackoff(t *testing.T) {
 	auto := seedAutomation(t, state, "Welcome", models.AutomationStatusLive, &listID,
 		`{"event_kind":"list.subscribed","frequency":"once"}`,
 		marshalNodes(t, linearChain(1)))
-	seedSubscriber(t, state, 9, "alice@example.com")
+	seedSubscriber(t, state, "alice@example.com")
 	sender.err = errors.New("smtp: mailbox unavailable")
 	now := clock.Now()
 	journeyID := seedJourney(t, state, auto, "t", &now, nil)
@@ -1509,7 +1501,7 @@ func TestNodeErrorExhaustsRetriesAndFailsJourney(t *testing.T) {
 	auto := seedAutomation(t, state, "Welcome", models.AutomationStatusLive, &listID,
 		`{"event_kind":"list.subscribed","frequency":"once"}`,
 		marshalNodes(t, linearChain(1)))
-	seedSubscriber(t, state, 9, "alice@example.com")
+	seedSubscriber(t, state, "alice@example.com")
 	sender.err = errors.New("smtp: mailbox unavailable")
 	now := clock.Now()
 	journeyID := seedJourney(t, state, auto, "t", &now, map[string]any{"retry_count": maxRetries - 1})
@@ -1543,7 +1535,7 @@ func TestExecuteJourneyFrozenWhenAutomationNotLive(t *testing.T) {
 			auto := seedAutomation(t, state, "Welcome", status, &listID,
 				`{"event_kind":"list.subscribed","frequency":"once"}`,
 				marshalNodes(t, linearChain(1)))
-			seedSubscriber(t, state, 9, "alice@example.com")
+			seedSubscriber(t, state, "alice@example.com")
 			now := clock.Now()
 			journeyID := seedJourney(t, state, auto, "t", &now, nil)
 
@@ -1603,7 +1595,7 @@ func TestExecuteJourneyExitsOnMissingNode(t *testing.T) {
 	auto := seedAutomation(t, state, "Welcome", models.AutomationStatusLive, &listID,
 		`{"event_kind":"list.subscribed","frequency":"once"}`,
 		marshalNodes(t, linearChain(1)))
-	seedSubscriber(t, state, 9, "alice@example.com")
+	seedSubscriber(t, state, "alice@example.com")
 	now := clock.Now()
 	// The cursor points at a node the (edited) workflow no longer has.
 	journeyID := seedJourney(t, state, auto, "ghost", &now, nil)
@@ -1628,7 +1620,7 @@ func TestExecuteJourneyAbortsWhenCASLost(t *testing.T) {
 	auto := seedAutomation(t, state, "Welcome", models.AutomationStatusLive, &listID,
 		`{"event_kind":"list.subscribed","frequency":"once"}`,
 		marshalNodes(t, linearChain(1)))
-	seedSubscriber(t, state, 9, "alice@example.com")
+	seedSubscriber(t, state, "alice@example.com")
 	now := clock.Now()
 	// The journey starts at the email node so the entered run row is the
 	// race marker.
@@ -1686,7 +1678,7 @@ func TestExecuteJourneyIgnoresFinishedJourney(t *testing.T) {
 	auto := seedAutomation(t, state, "Welcome", models.AutomationStatusLive, &listID,
 		`{"event_kind":"list.subscribed","frequency":"once"}`,
 		marshalNodes(t, linearChain(1)))
-	seedSubscriber(t, state, 9, "alice@example.com")
+	seedSubscriber(t, state, "alice@example.com")
 	now := clock.Now()
 	journeyID := seedJourney(t, state, auto, "t", &now, map[string]any{
 		"status": models.AutomationJourneyStatusCompleted,

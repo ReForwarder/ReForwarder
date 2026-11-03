@@ -39,7 +39,7 @@ import (
 // the engine (so the real list membership repo and webhook client run), with
 // the email sender stubbed and the database faked.
 
-func testNodeContext(t *testing.T, state *engState, email string) *nodeContext {
+func testNodeContext(t *testing.T, email string) *nodeContext {
 	t.Helper()
 	sub := &models.Subscriber{
 		ID: 9, UserID: 7, WorkspaceID: uintPtr(3), Email: email,
@@ -66,8 +66,8 @@ func testNodeContext(t *testing.T, state *engState, email string) *nodeContext {
 // ---------- email node ----------
 
 func TestEmailNodeBuildsDataAndRecordsUUID(t *testing.T) {
-	e, state, _, sender, _ := newTestEngine(t)
-	nc := testNodeContext(t, state, "alice@example.com")
+	e, _, _, sender, _ := newTestEngine(t)
+	nc := testNodeContext(t, "alice@example.com")
 	node := testNode("e1", NodeTypeEmail, map[string]any{
 		"template_id":      uint(42),
 		"subject_override": "Your order A-1",
@@ -132,8 +132,8 @@ func TestEmailNodeBuildsDataAndRecordsUUID(t *testing.T) {
 }
 
 func TestEmailNodeErrorsWithoutTemplateOrSender(t *testing.T) {
-	e, state, _, sender, _ := newTestEngine(t)
-	nc := testNodeContext(t, state, "alice@example.com")
+	e, _, _, sender, _ := newTestEngine(t)
+	nc := testNodeContext(t, "alice@example.com")
 
 	// Missing template_id.
 	node := testNode("e1", NodeTypeEmail, map[string]any{}, nil)
@@ -159,8 +159,8 @@ func TestEmailNodeErrorsWithoutTemplateOrSender(t *testing.T) {
 // ---------- filter node ----------
 
 func TestFilterNodeBranchesOnConditions(t *testing.T) {
-	e, state, _, _, _ := newTestEngine(t)
-	nc := testNodeContext(t, state, "alice@example.com")
+	e, _, _, _, _ := newTestEngine(t)
+	nc := testNodeContext(t, "alice@example.com")
 
 	matchNode := testNode("f", NodeTypeFilter, map[string]any{
 		"conditions":       []any{map[string]any{"field": "email", "operator": "contains", "value": "ALICE"}},
@@ -194,7 +194,7 @@ func TestFilterNodeBranchesOnConditions(t *testing.T) {
 	// in_list rides the real membership repo: a member continues.
 	e2, state2, _, _, _ := newTestEngine(t)
 	engSeed(t, state2, "subscriber_list_members", map[string]any{"list_id": uint(4), "subscriber_id": uint(9)})
-	nc2 := testNodeContext(t, state2, "alice@example.com")
+	nc2 := testNodeContext(t, "alice@example.com")
 	listNode := testNode("f", NodeTypeFilter, map[string]any{
 		"conditions":       []any{map[string]any{"field": "in_list", "operator": "equals", "value": 4}},
 		"continue_node_id": "keep",
@@ -221,8 +221,8 @@ func expectedABRoll(email, nodeID string) int {
 }
 
 func TestABTestNodeDeterministicAssignment(t *testing.T) {
-	e, state, _, _, _ := newTestEngine(t)
-	nc := testNodeContext(t, state, "alice@example.com")
+	e, _, _, _, _ := newTestEngine(t)
+	nc := testNodeContext(t, "alice@example.com")
 	node := testNode("ab", NodeTypeABTest, map[string]any{"variants": []any{
 		map[string]any{"id": "a", "name": "A", "weight": 50, "next_node_id": "na"},
 		map[string]any{"id": "b", "name": "B", "weight": 50, "next_node_id": "nb"},
@@ -267,8 +267,8 @@ func TestABTestNodeDeterministicAssignment(t *testing.T) {
 }
 
 func TestABTestNodeWeightFallback(t *testing.T) {
-	e, state, _, _, _ := newTestEngine(t)
-	nc := testNodeContext(t, state, "alice@example.com")
+	e, _, _, _, _ := newTestEngine(t)
+	nc := testNodeContext(t, "alice@example.com")
 
 	// All weight on a: every roll lands in a.
 	allA := testNode("ab", NodeTypeABTest, map[string]any{"variants": []any{
@@ -299,8 +299,8 @@ func TestABTestNodeWeightFallback(t *testing.T) {
 }
 
 func TestABTestNodeWithoutVariantsErrors(t *testing.T) {
-	e, state, _, _, _ := newTestEngine(t)
-	nc := testNodeContext(t, state, "alice@example.com")
+	e, _, _, _, _ := newTestEngine(t)
+	nc := testNodeContext(t, "alice@example.com")
 	node := testNode("ab", NodeTypeABTest, map[string]any{"variants": []any{}}, nil)
 	if _, err := e.executeABTestNode(nc, node); err == nil {
 		t.Error("an ab_test without variants must fail the node")
@@ -320,7 +320,7 @@ func TestListStatusNodeBranches(t *testing.T) {
 	// Member: active.
 	e, state, _, _, _ := newTestEngine(t)
 	engSeed(t, state, "subscriber_list_members", map[string]any{"list_id": uint(4), "subscriber_id": uint(9)})
-	nc := testNodeContext(t, state, "alice@example.com")
+	nc := testNodeContext(t, "alice@example.com")
 	res, err := e.executeListStatusNode(nc, node)
 	if err != nil {
 		t.Fatalf("executeListStatusNode: %v", err)
@@ -332,7 +332,7 @@ func TestListStatusNodeBranches(t *testing.T) {
 	// List-scoped opt-out: non_active.
 	e, state, _, _, _ = newTestEngine(t)
 	engSeed(t, state, "subscriber_list_unsubscribes", map[string]any{"list_id": uint(4), "subscriber_id": uint(9)})
-	nc = testNodeContext(t, state, "alice@example.com")
+	nc = testNodeContext(t, "alice@example.com")
 	res, err = e.executeListStatusNode(nc, node)
 	if err != nil {
 		t.Fatalf("executeListStatusNode: %v", err)
@@ -342,8 +342,8 @@ func TestListStatusNodeBranches(t *testing.T) {
 	}
 
 	// Neither: not_in_list.
-	e, state, _, _, _ = newTestEngine(t)
-	nc = testNodeContext(t, state, "alice@example.com")
+	e, _, _, _, _ = newTestEngine(t)
+	nc = testNodeContext(t, "alice@example.com")
 	res, err = e.executeListStatusNode(nc, node)
 	if err != nil {
 		t.Fatalf("executeListStatusNode: %v", err)
@@ -354,8 +354,8 @@ func TestListStatusNodeBranches(t *testing.T) {
 }
 
 func TestListStatusNodeRequiresListID(t *testing.T) {
-	e, state, _, _, _ := newTestEngine(t)
-	nc := testNodeContext(t, state, "alice@example.com")
+	e, _, _, _, _ := newTestEngine(t)
+	nc := testNodeContext(t, "alice@example.com")
 	node := testNode("ls", NodeTypeListStatus, map[string]any{}, nil)
 	if _, err := e.executeListStatusNode(nc, node); err == nil || !strings.Contains(err.Error(), "list_id") {
 		t.Errorf("a missing list_id must fail the node, got %v", err)
@@ -365,8 +365,8 @@ func TestListStatusNodeRequiresListID(t *testing.T) {
 // ---------- delay node ----------
 
 func TestDelayNodeParksForConfiguredDuration(t *testing.T) {
-	e, state, _, _, clock := newTestEngine(t)
-	nc := testNodeContext(t, state, "alice@example.com")
+	e, _, _, _, clock := newTestEngine(t)
+	nc := testNodeContext(t, "alice@example.com")
 
 	node := testNode("d", NodeTypeDelay, map[string]any{
 		"duration": 2, "unit": models.AutomationDelayDays, "description": "Cool off",
@@ -400,7 +400,7 @@ func TestDelayNodeParksForConfiguredDuration(t *testing.T) {
 
 func TestAddAndRemoveListNodes(t *testing.T) {
 	e, state, _, _, _ := newTestEngine(t)
-	nc := testNodeContext(t, state, "alice@example.com")
+	nc := testNodeContext(t, "alice@example.com")
 
 	add := testNode("add", NodeTypeAddToList, map[string]any{"list_id": uint(4)}, nil)
 	res, err := e.executeAddToListNode(nc, add)
@@ -476,8 +476,8 @@ func TestWebhookNodeRecordsSuccess(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer srv.Close()
-	e, state := webhookTestEngine(t, srv)
-	nc := testNodeContext(t, state, "alice@example.com")
+	e, _ := webhookTestEngine(t, srv)
+	nc := testNodeContext(t, "alice@example.com")
 
 	node := testNode("wh", NodeTypeWebhook, map[string]any{
 		"url":     "http://192.0.2.1/hook",
@@ -513,8 +513,8 @@ func TestWebhookNodeErrorsOnNon2xx(t *testing.T) {
 		_, _ = w.Write([]byte("boom"))
 	}))
 	defer srv.Close()
-	e, state := webhookTestEngine(t, srv)
-	nc := testNodeContext(t, state, "alice@example.com")
+	e, _ := webhookTestEngine(t, srv)
+	nc := testNodeContext(t, "alice@example.com")
 
 	node := testNode("wh", NodeTypeWebhook, map[string]any{"url": "http://192.0.2.1/hook"}, nil)
 	_, err := e.executeWebhookNode(context.Background(), nc, node)
@@ -533,8 +533,8 @@ func TestWebhookNodeRejectsSSRFBeforeAnyRequest(t *testing.T) {
 		{"link-local", "http://169.254.169.254/latest/meta-data/"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			e, state, _, _, _ := newTestEngine(t)
-			nc := testNodeContext(t, state, "alice@example.com")
+			e, _, _, _, _ := newTestEngine(t)
+			nc := testNodeContext(t, "alice@example.com")
 
 			// A server the author would love to hit; if any request ever
 			// arrives the test fails, proving the guard fires pre-flight.
@@ -568,8 +568,8 @@ func TestWebhookNodeRejectsSSRFBeforeAnyRequest(t *testing.T) {
 }
 
 func TestWebhookNodeRequiresURL(t *testing.T) {
-	e, state, _, _, _ := newTestEngine(t)
-	nc := testNodeContext(t, state, "alice@example.com")
+	e, _, _, _, _ := newTestEngine(t)
+	nc := testNodeContext(t, "alice@example.com")
 	node := testNode("wh", NodeTypeWebhook, map[string]any{}, nil)
 	if _, err := e.executeWebhookNode(context.Background(), nc, node); err == nil || !strings.Contains(err.Error(), "url is missing") {
 		t.Errorf("a missing url must fail the node, got %v", err)

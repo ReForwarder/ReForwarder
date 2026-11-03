@@ -1650,3 +1650,169 @@ export interface AuditRow {
   target_id?: string
   created_at: string
 }
+
+// Automations
+// The shapes mirror internal/handlers/automation_handler.go: the JSONB columns
+// (trigger_config, nodes, stats) arrive inlined as parsed JSON, not strings.
+
+export type AutomationStatus = 'draft' | 'live' | 'paused'
+export type AutomationJourneyStatus = 'active' | 'completed' | 'exited' | 'failed'
+export type AutomationNodeRunAction = 'entered' | 'processing' | 'completed' | 'failed'
+export type AutomationNodeType =
+  | 'trigger'
+  | 'delay'
+  | 'email'
+  | 'filter'
+  | 'ab_test'
+  | 'list_status'
+  | 'add_to_list'
+  | 'remove_from_list'
+  | 'webhook'
+
+/**
+ * One condition row of the automation condition builders (trigger + filter
+ * nodes). Wider than the subscriber-list FilterRule: the automation engine
+ * spells its operators out (equals/not_equals/contains, and exists/not_exists
+ * on custom fields) and supports the in_list membership field.
+ */
+export interface AutomationFilterRule {
+  field: string
+  operator: string
+  value: any
+}
+
+/** Trigger matching document, inlined from Automation.TriggerConfig. */
+export interface AutomationTriggerConfig {
+  event_kind: string
+  list_id?: number | null
+  custom_event_name?: string
+  /** 'once' (deduped per contact) or 'every_time'. */
+  frequency: string
+  conditions?: AutomationFilterRule[]
+}
+
+/** One workflow node, inlined from Automation.Nodes. */
+export interface AutomationNodeSpec {
+  id: string
+  type: string
+  config?: Record<string, any>
+  /** Linear successor; branch nodes carry targets inside config instead. */
+  next_node_id?: string | null
+  position: { x: number; y: number }
+}
+
+/** One weighted A/B branch of an ab_test node config. */
+export interface AutomationABVariant {
+  id: string
+  name: string
+  weight: number
+  next_node_id?: string
+}
+
+/** Aggregate counters, inlined from Automation.Stats. */
+export interface WorkflowStats {
+  enrolled: number
+  completed: number
+  exited: number
+  failed: number
+}
+
+/** One automation row as returned by the list/get/create/update endpoints. */
+export interface AutomationRow {
+  id: number
+  uuid: string
+  user_id?: number
+  workspace_id?: number | null
+  name: string
+  status: AutomationStatus
+  list_id?: number | null
+  exit_on_reply: boolean
+  trigger_config: AutomationTriggerConfig
+  nodes: AutomationNodeSpec[]
+  root_node_id: string
+  stats: WorkflowStats
+  version: number
+  created_at: string
+  updated_at: string
+}
+
+/** Builder document behind POST/PUT /automations. */
+export interface SaveAutomationPayload {
+  name: string
+  list_id?: number | null
+  exit_on_reply?: boolean
+  /** Derived from the trigger node by the builder; the server re-derives it when absent. */
+  trigger_config?: AutomationTriggerConfig
+  nodes: AutomationNodeSpec[]
+  root_node_id: string
+}
+
+/** One contact's run through an automation (a journey). */
+export interface JourneyRow {
+  id: number
+  uuid: string
+  automation_id: number
+  workspace_id?: number | null
+  subscriber_id: number
+  email: string
+  current_node_id: string
+  status: AutomationJourneyStatus
+  exit_reason?: string
+  scheduled_at?: string | null
+  retry_count: number
+  last_error?: string
+  context_json?: string
+  entered_at: string
+  last_advanced_at?: string | null
+  completed_at?: string | null
+}
+
+/** One node execution on a journey's timeline. */
+export interface NodeRunRow {
+  id: number
+  journey_id: number
+  automation_id: number
+  node_id: string
+  node_type: string
+  action: AutomationNodeRunAction
+  /** JSON object string: email_uuid, status_code, chosen branch, ... */
+  output: string
+  error?: string
+  duration_ms: number
+  entered_at: string
+  completed_at?: string | null
+}
+
+/** GET /automations/{id}/executions/{journeyId}: journey + node-run timeline. */
+export interface AutomationExecutionDetail {
+  journey: JourneyRow
+  timeline: NodeRunRow[]
+}
+
+/** One node's aggregate over all journeys of an automation. */
+export interface NodeStatRow {
+  node_id: string
+  node_type: string
+  entered: number
+  completed: number
+  failed: number
+}
+
+/** GET /automations/{id}/stats response. */
+export interface AutomationStatsResponse {
+  enrolled: number
+  completed: number
+  exited: number
+  failed: number
+  node_stats: NodeStatRow[]
+}
+
+/** POST /automations/events response: accepted is always true. */
+export interface AutomationEventResponse {
+  accepted: boolean
+  enrolled: boolean
+  subscriber_id?: number
+  email?: string
+  /** Why the event did not enroll: unknown_subscriber, trigger_unavailable or enroll_failed. */
+  reason?: string
+}
