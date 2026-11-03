@@ -1026,7 +1026,7 @@ func marshalNodes(t *testing.T, nodes []*models.AutomationNode) string {
 
 // linearChain builds trigger -> n1 -> ... -> nN -> done with email nodes.
 func linearChain(count int) []*models.AutomationNode {
-	nodes := []*models.AutomationNode{triggerNode("t", strPtr("n1"))}
+	nodes := []*models.AutomationNode{triggerNode(strPtr("n1"))}
 	for i := 1; i <= count; i++ {
 		id := fmt.Sprintf("n%d", i)
 		var next *string
@@ -1385,7 +1385,7 @@ func TestExecuteJourneyParksOnDelayThenResumes(t *testing.T) {
 	auto := seedAutomation(t, state, "Welcome", models.AutomationStatusLive, &listID,
 		`{"event_kind":"list.subscribed","frequency":"once"}`,
 		marshalNodes(t, []*models.AutomationNode{
-			triggerNode("t", strPtr("d")),
+			triggerNode(strPtr("d")),
 			testNode("d", NodeTypeDelay, map[string]any{"duration": 30, "unit": models.AutomationDelayMinutes}, strPtr("e1")),
 			testNode("e1", NodeTypeEmail, map[string]any{"template_id": 2}, nil),
 		}))
