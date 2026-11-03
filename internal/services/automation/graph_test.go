@@ -71,7 +71,7 @@ func TestRequiredListIDsDedup(t *testing.T) {
 	}
 
 	doc = &WorkflowDoc{RootNodeID: "t", Nodes: []*models.AutomationNode{
-		triggerNode("t", strPtr("ls")),
+		triggerNode(strPtr("ls")),
 		testNode("ls", NodeTypeListStatus, map[string]any{"list_id": 7}, strPtr("add")),
 		testNode("add", NodeTypeAddToList, map[string]any{"list_id": 7}, strPtr("rem")),
 		testNode("rem", NodeTypeRemoveFromList, map[string]any{"list_id": 9}, nil),
