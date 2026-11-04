@@ -8,6 +8,7 @@ export const campaignsApi = {
   get(id: number) {
     return api.get<ApiResponse<Campaign>>(`/workspaces/current/campaigns/${id}`)
   },
+  // Audience is a XOR: send either list_id or segment_id, never both.
   create(data: {
     name: string
     subject: string
@@ -17,7 +18,8 @@ export const campaignsApi = {
     template_version_id?: number
     language?: string
     template_data?: Record<string, any>
-    list_id: number
+    list_id?: number
+    segment_id?: number
     send_rate?: number
     scheduled_at?: string
   }) {
@@ -33,6 +35,7 @@ export const campaignsApi = {
     language: string
     template_data: Record<string, any>
     list_id: number
+    segment_id: number
     send_rate: number
     scheduled_at: string
   }>) {

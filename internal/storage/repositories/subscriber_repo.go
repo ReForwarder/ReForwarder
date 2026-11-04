@@ -152,16 +152,16 @@ func (r *SubscriberRepository) applyFilterRules(q *gorm.DB, rules models.FilterR
 		if strings.HasPrefix(field, "engagement.") {
 			engagementField := strings.TrimPrefix(field, "engagement.")
 			switch engagementField {
-			case "opened_campaign":
+			case engOpenedCampaign:
 				// Subscribers who opened a specific campaign
 				q = q.Where("EXISTS (SELECT 1 FROM campaign_messages WHERE campaign_messages.subscriber_id = subscribers.id AND campaign_messages.campaign_id = ? AND campaign_messages.opened_at IS NOT NULL)", val)
-			case "clicked_campaign":
+			case engClickedCampaign:
 				// Subscribers who clicked in a specific campaign
 				q = q.Where("EXISTS (SELECT 1 FROM campaign_messages WHERE campaign_messages.subscriber_id = subscribers.id AND campaign_messages.campaign_id = ? AND campaign_messages.clicked_at IS NOT NULL)", val)
-			case "not_opened_campaign":
+			case engNotOpenedCampaign:
 				// Subscribers who did NOT open a specific campaign
 				q = q.Where("NOT EXISTS (SELECT 1 FROM campaign_messages WHERE campaign_messages.subscriber_id = subscribers.id AND campaign_messages.campaign_id = ? AND campaign_messages.opened_at IS NOT NULL)", val)
-			case "received_campaign":
+			case engReceivedCampaign:
 				// Subscribers who received a specific campaign (regardless of open/click)
 				q = q.Where("EXISTS (SELECT 1 FROM campaign_messages WHERE campaign_messages.subscriber_id = subscribers.id AND campaign_messages.campaign_id = ?)", val)
 			case "inactive_days":

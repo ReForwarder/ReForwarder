@@ -42,6 +42,8 @@ const (
 	pathDomainByID            = "/domains/{id:int}"
 	pathFormByID              = "/forms/{id:int}"
 	pathPlanByID              = "/plans/{id:int}"
+	pathSegmentByID           = "/segments/{id:int}"
+	pathSegmentContacts       = "/segments/{id:int}/contacts"
 	pathServerByID            = "/servers/{id:int}"
 	pathSMTPServerByID        = "/smtp-servers/{id:int}"
 	pathSubscriberByID        = "/subscribers/{id:int}"

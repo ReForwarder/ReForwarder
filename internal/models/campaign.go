@@ -78,17 +78,20 @@ type Campaign struct {
 	TemplateData      TemplateData   `json:"template_data,omitempty" gorm:"type:text"`
 	Status            CampaignStatus `json:"status" gorm:"type:varchar(20);default:'draft';not null;index"`
 	ListID            uint           `json:"list_id" gorm:"index;not null"`
-	SendRate          int            `json:"send_rate" gorm:"default:0"`
-	SendAtLocalTime   bool           `json:"send_at_local_time" gorm:"default:false"`
-	ABTestEnabled     bool           `json:"ab_test_enabled" gorm:"default:false"`
-	ABTestVariants    ABTestVariants `json:"ab_test_variants,omitempty" gorm:"type:text"`
-	ABTestWinner      string         `json:"ab_test_winner,omitempty"`
-	ScheduledAt       *time.Time     `json:"scheduled_at,omitempty"`
-	StartedAt         *time.Time     `json:"started_at,omitempty"`
-	CompletedAt       *time.Time     `json:"completed_at,omitempty"`
-	CreatedAt         time.Time      `json:"created_at"`
-	UpdatedAt         *time.Time     `json:"updated_at,omitempty"`
-	DeletedAt         gorm.DeletedAt `json:"-" gorm:"index"`
+	// SegmentID targets a saved audience filter instead of a subscriber list.
+	// Exactly one of ListID/SegmentID is set (enforced by the campaign handler).
+	SegmentID       *uint          `json:"segment_id,omitempty" gorm:"index"`
+	SendRate        int            `json:"send_rate" gorm:"default:0"`
+	SendAtLocalTime bool           `json:"send_at_local_time" gorm:"default:false"`
+	ABTestEnabled   bool           `json:"ab_test_enabled" gorm:"default:false"`
+	ABTestVariants  ABTestVariants `json:"ab_test_variants,omitempty" gorm:"type:text"`
+	ABTestWinner    string         `json:"ab_test_winner,omitempty"`
+	ScheduledAt     *time.Time     `json:"scheduled_at,omitempty"`
+	StartedAt       *time.Time     `json:"started_at,omitempty"`
+	CompletedAt     *time.Time     `json:"completed_at,omitempty"`
+	CreatedAt       time.Time      `json:"created_at"`
+	UpdatedAt       *time.Time     `json:"updated_at,omitempty"`
+	DeletedAt       gorm.DeletedAt `json:"-" gorm:"index"`
 	// Snapshot captures the aggregated stats at soft-delete time so analytics
 	// for past sends survive after CampaignMessage rows are purged.
 	Snapshot TemplateData `json:"snapshot,omitempty" gorm:"type:text"`
