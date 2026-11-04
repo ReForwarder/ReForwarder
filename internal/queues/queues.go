@@ -17,7 +17,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package queues names the Asynq queues.
+// Package queues names the Asynq queues and the shared task IDs.
 //
 // It is a leaf with no imports of its own so that both the worker, which weights
 // and consumes the queues, and the cron jobs, which enqueue onto them, can refer
@@ -25,6 +25,8 @@
 // in either without one side resorting to a string literal — and a literal that
 // drifts sends work to a queue nothing consumes, with no error anywhere.
 package queues
+
+import "strconv"
 
 const (
 	// Transactional carries work a person is waiting on: API and relayed sends,
@@ -34,4 +36,17 @@ const (
 	Bulk = "bulk"
 	// Low carries scheduled background work such as daily reports.
 	Low = "low"
+
+	// EmailSendTaskType is the asynq type of an email send task.
+	EmailSendTaskType = "email:send"
 )
+
+// EmailSendTaskID is the deterministic asynq task ID of an email:send task
+// ("email:send:<id>"). A fixed ID — instead of asynq's random UUID — makes a
+// send task findable by the queue-reconcile cron and collapses duplicate
+// enqueues of the same email into one live task. It lives here, like the queue
+// names, because the worker (which enqueues) and the cron jobs (which
+// reconcile) must agree on it.
+func EmailSendTaskID(emailID uint) string {
+	return "email:send:" + strconv.FormatUint(uint64(emailID), 10)
+}

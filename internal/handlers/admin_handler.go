@@ -28,6 +28,7 @@ import (
 
 	"github.com/goposta/posta/internal/config"
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/audit"
 	"github.com/goposta/posta/internal/services/cache"
 	"github.com/goposta/posta/internal/services/eventbus"
 	"github.com/goposta/posta/internal/services/seeder"
@@ -54,6 +55,8 @@ type AdminHandler struct {
 	workspaceRepo  *repositories.WorkspaceRepository
 	planRepo       *repositories.PlanRepository
 	inspector      *asynq.Inspector
+	queueInspector QueueInspector
+	audit          *audit.Logger
 	redis          *redis.Client
 	bus            *eventbus.EventBus
 	seeder         *seeder.Seeder
@@ -92,31 +95,34 @@ type AdminDeleteUserRequest struct {
 
 // PlatformMetrics holds aggregate platform metrics.
 type PlatformMetrics struct {
-	TotalUsers         int64                              `json:"total_users"`
-	TotalEmails        int64                              `json:"total_emails"`
-	QueuedEmails       int64                              `json:"queued_emails"`
-	ProcessingEmails   int64                              `json:"processing_emails"`
-	SentEmails         int64                              `json:"sent_emails"`
-	FailedEmails       int64                              `json:"failed_emails"`
-	SuppressedEmails   int64                              `json:"suppressed_emails"`
-	FailureRate        float64                            `json:"failure_rate"`
-	TotalAPIKeys       int64                              `json:"total_api_keys"`
-	ActiveAPIKeys      int64                              `json:"active_api_keys"`
-	TotalBounces       int64                              `json:"total_bounces"`
-	TotalSuppressions  int64                              `json:"total_suppressions"`
-	ActiveWorkers      int                                `json:"active_workers"`
-	SharedSmtpServers  int64                              `json:"shared_smtp_servers"`
-	TotalDomains       int64                              `json:"total_domains"`
-	TotalWorkspaces    int64                              `json:"total_workspaces"`
-	TotalInbound       int64                              `json:"total_inbound"`
-	ForwardedInbound   int64                              `json:"forwarded_inbound"`
-	FailedInbound      int64                              `json:"failed_inbound"`
-	ReceivedInbound    int64                              `json:"received_inbound"`
-	RejectedInbound    int64                              `json:"rejected_inbound"`
-	WebhookDeliveries  *repositories.WebhookDeliveryStats `json:"webhook_deliveries"`
-	ServerUptime       float64                            `json:"server_uptime_seconds"`
-	CurrentGoroutines  int                                `json:"current_goroutines"`
-	CurrentMemoryUsage uint64                             `json:"current_memory_usage"`
+	TotalUsers        int64                              `json:"total_users"`
+	TotalEmails       int64                              `json:"total_emails"`
+	QueuedEmails      int64                              `json:"queued_emails"`
+	ProcessingEmails  int64                              `json:"processing_emails"`
+	SentEmails        int64                              `json:"sent_emails"`
+	FailedEmails      int64                              `json:"failed_emails"`
+	SuppressedEmails  int64                              `json:"suppressed_emails"`
+	FailureRate       float64                            `json:"failure_rate"`
+	TotalAPIKeys      int64                              `json:"total_api_keys"`
+	ActiveAPIKeys     int64                              `json:"active_api_keys"`
+	TotalBounces      int64                              `json:"total_bounces"`
+	TotalSuppressions int64                              `json:"total_suppressions"`
+	ActiveWorkers     int                                `json:"active_workers"`
+	SharedSmtpServers int64                              `json:"shared_smtp_servers"`
+	TotalDomains      int64                              `json:"total_domains"`
+	TotalWorkspaces   int64                              `json:"total_workspaces"`
+	TotalInbound      int64                              `json:"total_inbound"`
+	ForwardedInbound  int64                              `json:"forwarded_inbound"`
+	FailedInbound     int64                              `json:"failed_inbound"`
+	ReceivedInbound   int64                              `json:"received_inbound"`
+	RejectedInbound   int64                              `json:"rejected_inbound"`
+	WebhookDeliveries *repositories.WebhookDeliveryStats `json:"webhook_deliveries"`
+	// Queues carries per-queue asynq stats (incl. the archived/dead-letter
+	// count) as of the last metrics refresh. Empty when no worker is attached.
+	Queues             []QueueStats `json:"queues,omitempty"`
+	ServerUptime       float64      `json:"server_uptime_seconds"`
+	CurrentGoroutines  int          `json:"current_goroutines"`
+	CurrentMemoryUsage uint64       `json:"current_memory_usage"`
 
 	// Security
 	ActiveSessions        int64   `json:"active_sessions"`
@@ -162,7 +168,25 @@ type UserDetailMetrics struct {
 }
 
 func NewAdminHandler(db *gorm.DB, c *cache.Cache, userRepo *repositories.UserRepository, keyRepo *repositories.APIKeyRepository, emailRepo *repositories.EmailRepository, whDeliveryRepo *repositories.WebhookDeliveryRepository, inspector *asynq.Inspector, redisClient *redis.Client, bus *eventbus.EventBus, seeder *seeder.Seeder, embeddedWorker bool) *AdminHandler {
-	return &AdminHandler{db: db, cache: c, userRepo: userRepo, keyRepo: keyRepo, emailRepo: emailRepo, whDeliveryRepo: whDeliveryRepo, inspector: inspector, redis: redisClient, bus: bus, seeder: seeder, embeddedWorker: embeddedWorker}
+	h := &AdminHandler{db: db, cache: c, userRepo: userRepo, keyRepo: keyRepo, emailRepo: emailRepo, whDeliveryRepo: whDeliveryRepo, inspector: inspector, redis: redisClient, bus: bus, seeder: seeder, embeddedWorker: embeddedWorker}
+	if inspector != nil {
+		h.queueInspector = NewAsynqQueueInspector(inspector)
+	}
+	return h
+}
+
+// SetQueueInspector replaces the asynq inspection backend used by the queue
+// administration endpoints. Tests wire a stub here; production keeps the
+// default adapter built in NewAdminHandler.
+func (h *AdminHandler) SetQueueInspector(qi QueueInspector) {
+	h.queueInspector = qi
+}
+
+// SetAuditLogger wires the platform audit logger so destructive queue
+// operations (cancel/run/archive) are recorded. Nil (default) disables
+// auditing; the endpoints still work.
+func (h *AdminHandler) SetAuditLogger(a *audit.Logger) {
+	h.audit = a
 }
 
 // SetWorkspaceRepo sets the workspace and plan repositories for workspace management.
@@ -388,6 +412,7 @@ func (h *AdminHandler) Metrics(c *okapi.Context) error {
 				m.ActiveWorkers = len(servers)
 			}
 		}
+		m.Queues = h.queueStatsFor()
 		fillRuntimeStats(&m)
 		return ok(c, m)
 	}
@@ -423,6 +448,7 @@ func (h *AdminHandler) Metrics(c *okapi.Context) error {
 			m.ActiveWorkers = len(servers)
 		}
 	}
+	m.Queues = h.queueStatsFor()
 
 	// Webhook delivery stats (platform-wide)
 	if whStats, err := h.whDeliveryRepo.StatsAll(); err == nil {

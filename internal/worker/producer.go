@@ -24,12 +24,14 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/goposta/posta/internal/queues"
 	"github.com/hibiken/asynq"
 )
 
 // Producer enqueues email tasks into Redis via Asynq.
 type Producer struct {
 	client     *asynq.Client
+	inspector  *asynq.Inspector
 	maxRetries int
 }
 
@@ -37,8 +39,15 @@ func NewProducer(redisOpt asynq.RedisClientOpt, maxRetries int) *Producer {
 	client := asynq.NewClient(redisOpt)
 	return &Producer{
 		client:     client,
+		inspector:  asynq.NewInspector(redisOpt),
 		maxRetries: maxRetries,
 	}
+}
+
+// EmailSendTaskID is the deterministic asynq task ID of an email:send task
+// (queues.EmailSendTaskID). See the queues package for why the ID is fixed.
+func EmailSendTaskID(emailID uint) string {
+	return queues.EmailSendTaskID(emailID)
 }
 
 // EnqueueEmailSend enqueues an email for background delivery.
@@ -49,12 +58,47 @@ func (p *Producer) EnqueueEmailSend(emailID uint, queue string) error {
 	task, err := NewEmailSendTask(emailID,
 		asynq.Queue(queue),
 		asynq.MaxRetry(p.maxRetries),
+		asynq.TaskID(queues.EmailSendTaskID(emailID)),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create task: %w", err)
 	}
-	_, err = p.client.Enqueue(task)
+	if _, err := p.client.Enqueue(task); err != nil {
+		if errors.Is(err, asynq.ErrTaskIDConflict) {
+			return p.resolveSendTaskConflict(emailID, queue)
+		}
+		return fmt.Errorf("failed to enqueue task: %w", err)
+	}
+	return nil
+}
+
+// resolveSendTaskConflict handles an enqueue refused because the email's
+// deterministic task ID is already held. A task in a live state (pending,
+// active, scheduled, retry) means the email is already queued — dedupe success.
+// A dead lettered (archived) task holds the ID forever, which would strand a
+// retry forever, so it is deleted and the enqueue retried.
+func (p *Producer) resolveSendTaskConflict(emailID uint, queue string) error {
+	if p.inspector == nil {
+		return fmt.Errorf("task %s already exists and no inspector is available", EmailSendTaskID(emailID))
+	}
+	id := queues.EmailSendTaskID(emailID)
+	info, err := p.inspector.GetTaskInfo(queue, id)
 	if err != nil {
+		// Cannot tell whether the holder is live; treat as already-queued.
+		// The queue-reconcile cron re-enqueues if it is actually lost.
+		return nil
+	}
+	if info.State != asynq.TaskStateArchived && info.State != asynq.TaskStateCompleted {
+		return nil // a live task already covers this email
+	}
+	if err := p.inspector.DeleteTask(queue, id); err != nil {
+		return fmt.Errorf("failed to clear dead-lettered task %s before re-enqueue: %w", id, err)
+	}
+	task, err := NewEmailSendTask(emailID, asynq.Queue(queue), asynq.MaxRetry(p.maxRetries))
+	if err != nil {
+		return fmt.Errorf("failed to create task: %w", err)
+	}
+	if _, err := p.client.Enqueue(task); err != nil && !errors.Is(err, asynq.ErrTaskIDConflict) {
 		return fmt.Errorf("failed to enqueue task: %w", err)
 	}
 	return nil
@@ -73,12 +117,15 @@ func (p *Producer) EnqueueEmailSendAt(emailID uint, queue string, sendAt time.Ti
 		asynq.Queue(queue),
 		asynq.MaxRetry(p.maxRetries),
 		asynq.ProcessIn(delay),
+		asynq.TaskID(queues.EmailSendTaskID(emailID)),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create task: %w", err)
 	}
-	_, err = p.client.Enqueue(task)
-	if err != nil {
+	if _, err := p.client.Enqueue(task); err != nil {
+		if errors.Is(err, asynq.ErrTaskIDConflict) {
+			return p.resolveSendTaskConflict(emailID, queue)
+		}
 		return fmt.Errorf("failed to enqueue task: %w", err)
 	}
 	return nil
@@ -218,7 +265,10 @@ func (p *Producer) EnqueueAutomationRun(journeyID uint, delay time.Duration) err
 	return nil
 }
 
-// Close closes the underlying Asynq client.
+// Close closes the underlying Asynq client and inspector.
 func (p *Producer) Close() error {
+	if p.inspector != nil {
+		_ = p.inspector.Close()
+	}
 	return p.client.Close()
 }
