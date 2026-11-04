@@ -44,6 +44,7 @@ type CampaignProcessor struct {
 	campaignRepo     *repositories.CampaignRepository
 	messageRepo      *repositories.CampaignMessageRepository
 	listRepo         *repositories.SubscriberListRepository
+	segmentRepo      *repositories.SegmentRepository
 	subscriberRepo   *repositories.SubscriberRepository
 	emailRepo        *repositories.EmailRepository
 	templateRepo     *repositories.TemplateRepository
@@ -59,6 +60,7 @@ func NewCampaignProcessor(
 	campaignRepo *repositories.CampaignRepository,
 	messageRepo *repositories.CampaignMessageRepository,
 	listRepo *repositories.SubscriberListRepository,
+	segmentRepo *repositories.SegmentRepository,
 	subscriberRepo *repositories.SubscriberRepository,
 	emailRepo *repositories.EmailRepository,
 	templateRepo *repositories.TemplateRepository,
@@ -73,6 +75,7 @@ func NewCampaignProcessor(
 		campaignRepo:     campaignRepo,
 		messageRepo:      messageRepo,
 		listRepo:         listRepo,
+		segmentRepo:      segmentRepo,
 		subscriberRepo:   subscriberRepo,
 		emailRepo:        emailRepo,
 		templateRepo:     templateRepo,
@@ -104,26 +107,47 @@ func (p *CampaignProcessor) HandleCampaignStart(_ context.Context, t *asynq.Task
 		return nil
 	}
 
-	// Resolve subscribers from the list
-	list, err := p.listRepo.FindByID(campaign.ListID)
-	if err != nil {
-		return fmt.Errorf("subscriber list not found: %w", err)
-	}
-
+	// Resolve subscribers from the audience: a segment (saved condition) or a
+	// subscriber list. Exactly one is set — the campaign handler enforces the
+	// XOR at write time.
 	var subscribers []models.Subscriber
 	scope := repositories.ResourceScope{UserID: campaign.UserID, WorkspaceID: campaign.WorkspaceID}
 
-	if list.Type == models.SubscriberListTypeDynamic {
-		// Dynamic list: resolve via filter rules
-		subscribers, _, err = p.subscriberRepo.FindByFilterRules(scope, list.FilterRules, -1, 0)
+	if campaign.SegmentID != nil {
+		// Segment audience: resolve via the saved condition. List-scoped
+		// unsubscribes are keyed by (list_id, subscriber_id), so they cannot
+		// apply to a segment audience, which has no list; global suppressions
+		// still apply later in the email send path (the email service filters
+		// recipients against the workspace suppression list).
+		segment, segErr := p.segmentRepo.FindByID(*campaign.SegmentID)
+		if segErr != nil {
+			return fmt.Errorf("segment not found: %w", segErr)
+		}
+		if !repositories.OwnsWorkspaceResource(scope, segment.WorkspaceID) {
+			return fmt.Errorf("segment %d does not belong to the campaign's workspace", segment.ID)
+		}
+		subscribers, _, err = p.segmentRepo.FindSubscribersByCondition(scope, segment.Condition, -1, 0)
 		if err != nil {
-			return fmt.Errorf("failed to resolve dynamic list: %w", err)
+			return fmt.Errorf("failed to resolve segment audience: %w", err)
 		}
 	} else {
-		// Static list: get all members
-		subscribers, _, err = p.listRepo.ListMembers(list.ID, -1, 0)
-		if err != nil {
-			return fmt.Errorf("failed to list members: %w", err)
+		list, listErr := p.listRepo.FindByID(campaign.ListID)
+		if listErr != nil {
+			return fmt.Errorf("subscriber list not found: %w", listErr)
+		}
+
+		if list.Type == models.SubscriberListTypeDynamic {
+			// Dynamic list: resolve via filter rules
+			subscribers, _, err = p.subscriberRepo.FindByFilterRules(scope, list.FilterRules, -1, 0)
+			if err != nil {
+				return fmt.Errorf("failed to resolve dynamic list: %w", err)
+			}
+		} else {
+			// Static list: get all members
+			subscribers, _, err = p.listRepo.ListMembers(list.ID, -1, 0)
+			if err != nil {
+				return fmt.Errorf("failed to list members: %w", err)
+			}
 		}
 	}
 
@@ -133,10 +157,16 @@ func (p *CampaignProcessor) HandleCampaignStart(_ context.Context, t *asynq.Task
 		return nil
 	}
 
-	suppressed, sErr := p.listRepo.SuppressedSubscriberIDs(campaign.ListID)
-	if sErr != nil {
-		logger.Warn("campaign: failed to load list suppressions, proceeding without", "list_id", campaign.ListID, "error", sErr)
-		suppressed = nil
+	// List-scoped suppressions exist only for list audiences (see the segment
+	// branch above for why they cannot apply to a segment).
+	var suppressed map[uint]struct{}
+	if campaign.SegmentID == nil {
+		suppressedList, sErr := p.listRepo.SuppressedSubscriberIDs(campaign.ListID)
+		if sErr != nil {
+			logger.Warn("campaign: failed to load list suppressions, proceeding without", "list_id", campaign.ListID, "error", sErr)
+			suppressedList = nil
+		}
+		suppressed = suppressedList
 	}
 
 	// Create campaign messages in bulk
@@ -204,7 +234,12 @@ func (p *CampaignProcessor) HandleCampaignStart(_ context.Context, t *asynq.Task
 		logger.Info("campaign with timezone-aware scheduling", "campaign_id", campaign.ID)
 	}
 
-	// Enqueue the first batch
+	// Enqueue the first batch. A nil producer means the worker was built
+	// without one (misconfigured deployment): fail the task so asynq retries
+	// instead of panicking on the nil client.
+	if p.producer == nil {
+		return fmt.Errorf("campaign %d: producer not configured; cannot enqueue batch", campaign.ID)
+	}
 	if err := p.producer.EnqueueCampaignBatch(campaign.ID, 0); err != nil {
 		return err
 	}

@@ -202,6 +202,15 @@ func runConstraints(db *gorm.DB) {
 			ON automation_node_runs (automation_id, node_id, action);
 	EXCEPTION WHEN others THEN NULL;
 	END $$`)
+
+	// Segments: every segment query is workspace-scoped (list, count, audience
+	// resolution at campaign send time), so the single-column index carries the
+	// scope filter.
+	db.Exec(`DO $$ BEGIN
+		CREATE INDEX IF NOT EXISTS idx_segments_workspace
+			ON segments (workspace_id);
+	EXCEPTION WHEN others THEN NULL;
+	END $$`)
 }
 
 // rebuildUniqueIndexes re-scopes the per-tenant uniqueness constraints to

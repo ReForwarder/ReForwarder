@@ -98,7 +98,7 @@ var emailStatusTimestampColumns = map[string]string{
 	"clicked_at":      "clicked_at",
 	"bounced_at":      "bounced_at",
 	"complained_at":   "complained_at",
-	"unsubscribed_at": "unsubscribed_at",
+	colUnsubscribedAt: colUnsubscribedAt,
 }
 
 // UpdateStatusTimestamp writes a write-once lifecycle timestamp on an email
@@ -172,7 +172,7 @@ var statusFlagColumns = map[string]string{
 	"clicked":      "clicked_at",
 	"bounced":      "bounced_at",
 	"complained":   "complained_at",
-	"unsubscribed": "unsubscribed_at",
+	"unsubscribed": colUnsubscribedAt,
 }
 
 // statusFlagValues maps the remaining message-history status flags to

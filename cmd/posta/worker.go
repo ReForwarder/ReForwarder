@@ -148,6 +148,7 @@ func runWorker() error {
 		repositories.NewCampaignRepository(db),
 		repositories.NewCampaignMessageRepository(db),
 		repositories.NewSubscriberListRepository(db),
+		repositories.NewSegmentRepository(db),
 		repositories.NewSubscriberRepository(db),
 		repositories.NewEmailRepository(db),
 		repositories.NewTemplateRepository(db),

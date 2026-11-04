@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { campaignsApi } from '../../api/campaigns'
 import { subscriberListsApi } from '../../api/subscriberLists'
-import type { Campaign, CampaignStatus, Pageable, SubscriberListItem } from '../../api/types'
+import { segmentsApi } from '../../api/segments'
+import type { Campaign, CampaignStatus, Pageable, SegmentRow, SubscriberListItem } from '../../api/types'
+import SearchableSelect from '../../components/SearchableSelect.vue'
 import { useNotificationStore } from '../../stores/notification'
 import { useConfirm } from '../../composables/useConfirm'
 import { useModalSafeClose } from '../../composables/useModalSafeClose'
@@ -41,8 +43,13 @@ const formListId = ref<number | null>(null)
 const formSendRate = ref(0)
 const saving = ref(false)
 
-// Lists for the create form
+// Audience: subscriber list XOR segment — the payload carries exactly one.
+const audienceMode = ref<'list' | 'segment'>('list')
+const formSegmentId = ref('')
+
+// Lists and segments for the create form
 const lists = ref<SubscriberListItem[]>([])
+const segments = ref<SegmentRow[]>([])
 const templates = ref<{ id: number; name: string }[]>([])
 
 
@@ -74,6 +81,12 @@ async function loadFormData() {
     // non-critical
   }
   try {
+    const segmentsRes = await segmentsApi.list(0, 100)
+    segments.value = segmentsRes.data.data ?? []
+  } catch {
+    // non-critical
+  }
+  try {
     const { default: api } = await import('../../api/client')
     const res = await api.get<any>('/workspaces/current/templates', { params: { page: 0, size: 100 } })
     templates.value = (res.data.data ?? []).map((t: any) => ({ id: t.id, name: t.name }))
@@ -81,6 +94,31 @@ async function loadFormData() {
     // non-critical
   }
 }
+
+const segmentOptions = computed(() => segments.value.map((s) => ({ value: String(s.id), label: s.name })))
+const selectedSegment = computed(() => segments.value.find((s) => String(s.id) === formSegmentId.value) ?? null)
+
+// Recipient hint for the chosen segment: one preview call, count only.
+const segmentCount = ref<number | null>(null)
+const segmentCountLoading = ref(false)
+let countSeq = 0
+
+watch(selectedSegment, async (seg) => {
+  const mySeq = ++countSeq
+  segmentCount.value = null
+  if (!seg) return
+  segmentCountLoading.value = true
+  try {
+    const res = await segmentsApi.preview({ condition: seg.condition, page: 0, size: 1 })
+    if (mySeq !== countSeq) return
+    segmentCount.value = res.data.data.count
+  } catch {
+    // The hint is cosmetic; the count is re-evaluated server-side at send time.
+    if (mySeq === countSeq) segmentCount.value = null
+  } finally {
+    if (mySeq === countSeq) segmentCountLoading.value = false
+  }
+})
 
 function openCreate() {
   formName.value = ''
@@ -90,12 +128,16 @@ function openCreate() {
   formTemplateId.value = null
   formListId.value = null
   formSendRate.value = 0
+  audienceMode.value = 'list'
+  formSegmentId.value = ''
+  segmentCount.value = null
   showModal.value = true
   loadFormData()
 }
 
 async function saveCampaign() {
-  if (!formName.value.trim() || !formSubject.value.trim() || !formFromEmail.value.trim() || !formTemplateId.value || !formListId.value) {
+  const missingAudience = audienceMode.value === 'list' ? !formListId.value : !formSegmentId.value
+  if (!formName.value.trim() || !formSubject.value.trim() || !formFromEmail.value.trim() || !formTemplateId.value || missingAudience) {
     notify.error('Please fill in all required fields')
     return
   }
@@ -107,7 +149,9 @@ async function saveCampaign() {
       from_email: formFromEmail.value.trim(),
       from_name: formFromName.value.trim(),
       template_id: formTemplateId.value,
-      list_id: formListId.value,
+      ...(audienceMode.value === 'list'
+        ? { list_id: formListId.value! }
+        : { segment_id: Number(formSegmentId.value) }),
       send_rate: formSendRate.value,
     })
     notify.success('Campaign created')
@@ -271,11 +315,42 @@ const { watchClickStart, confirmClickEnd } = useModalSafeClose(() => {
             </select>
           </div>
           <div class="form-group">
+            <label class="form-label">Audience *</label>
+            <div class="audience-toggle">
+              <label class="audience-option">
+                <input type="radio" value="list" v-model="audienceMode" />
+                <span>Subscriber list</span>
+              </label>
+              <label class="audience-option">
+                <input type="radio" value="segment" v-model="audienceMode" />
+                <span>Segment</span>
+              </label>
+            </div>
+          </div>
+          <div v-if="audienceMode === 'list'" class="form-group">
             <label class="form-label">Subscriber List *</label>
             <select v-model="formListId" class="form-select">
               <option :value="null" disabled>Select list</option>
               <option v-for="l in lists" :key="l.id" :value="l.id">{{ l.name }} ({{ l.member_count }} members)</option>
             </select>
+          </div>
+          <div v-else class="form-group">
+            <label class="form-label">Segment *</label>
+            <SearchableSelect
+              :options="segmentOptions"
+              :model-value="formSegmentId"
+              placeholder="Select segment…"
+              empty-text="No segments found"
+              @update:model-value="formSegmentId = $event"
+            />
+            <p v-if="segments.length === 0" class="form-hint">
+              No segments yet — create one under Audience → Segments.
+            </p>
+            <p v-else-if="segmentCountLoading" class="form-hint">Counting recipients…</p>
+            <p v-else-if="segmentCount !== null" class="form-hint">
+              ≈ {{ segmentCount.toLocaleString() }} recipients currently match this segment
+            </p>
+            <p v-else class="form-hint">Recipients are evaluated when the campaign is sent.</p>
           </div>
           <div class="form-group">
             <label class="form-label">Send Rate (msgs/min, 0 = unlimited)</label>
@@ -309,5 +384,25 @@ const { watchClickStart, confirmClickEnd } = useModalSafeClose(() => {
 /* Delivery counts align across rows. */
 .col-progress {
   font-variant-numeric: tabular-nums;
+}
+
+/* Audience radio: subscriber list vs segment. */
+.audience-toggle {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.audience-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.audience-option input {
+  cursor: pointer;
 }
 </style>

@@ -27,6 +27,7 @@ const (
 	tagAdmin                 = "Admin"
 	tagAutomations           = "Automations"
 	tagCampaigns             = "Campaigns"
+	tagSegments              = "Segments"
 	tagForms                 = "Forms"
 	tagInbound               = "Inbound"
 	tagLanguages             = "Languages"

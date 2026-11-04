@@ -86,6 +86,7 @@ const routes = [
       { path: 'subscribers/:id', name: 'subscriber-detail', component: () => import('../views/subscribers/SubscriberDetail.vue'), meta: { title: 'Subscriber' } },
       { path: 'subscriber-lists', name: 'subscriber-lists-page', component: () => import('../views/subscriber-lists/SubscriberLists.vue'), meta: { title: 'Subscriber Lists' } },
       { path: 'subscriber-lists/:id', name: 'subscriber-list-detail', component: () => import('../views/subscriber-lists/SubscriberListDetail.vue'), meta: { title: 'Subscriber List' } },
+      { path: 'segments', name: 'segments', component: () => import('../views/segments/Segments.vue'), meta: { title: 'Segments' } },
       { path: 'automations', name: 'automations', component: () => import('../views/automations/AutomationsDashboard.vue'), meta: { title: 'Automations' } },
       { path: 'automations/new', name: 'automation-new', component: () => import('../views/automations/AutomationBuilder.vue'), meta: { title: 'New Automation' } },
       { path: 'automations/:id/edit', name: 'automation-edit', component: () => import('../views/automations/AutomationBuilder.vue'), meta: { title: 'Edit Automation' } },
