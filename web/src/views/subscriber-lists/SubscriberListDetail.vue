@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { subscriberListsApi } from '../../api/subscriberLists'
+import type { SegmentPreviewSubscriber } from '../../api/subscriberLists'
 import { subscribersApi } from '../../api/subscribers'
 import type { SubscriberListItem, Subscriber, FilterRule, Pageable } from '../../api/types'
 import { useNotificationStore } from '../../stores/notification'
@@ -32,8 +33,9 @@ const allSubscribers = ref<Subscriber[]>([])
 const selectedSubscriberId = ref<number | null>(null)
 const addingMember = ref(false)
 
-// Dynamic preview
-const previewMembers = ref<Subscriber[]>([])
+// Dynamic preview: the count plus the first-20 sample the preview endpoint
+// returns (id, email, name, status).
+const previewMembers = ref<SegmentPreviewSubscriber[]>([])
 const previewLoading = ref(false)
 const previewCount = ref<number | null>(null)
 
@@ -142,8 +144,8 @@ async function previewSegment() {
   previewLoading.value = true
   try {
     const res = await subscriberListsApi.previewSegment(list.value.filter_rules)
-    previewMembers.value = res.data.data ?? []
-    previewCount.value = res.data.pageable.total_elements
+    previewMembers.value = res.data.data.subscribers ?? []
+    previewCount.value = res.data.data.count
   } catch {
     notify.error('Failed to preview segment')
   } finally {
@@ -242,7 +244,8 @@ onMounted(async () => {
         </table>
 
         <div v-if="previewCount !== null" style="margin-top: 16px">
-          <p class="preview-note"><strong>{{ previewCount }}</strong> subscribers match these rules.</p>
+          <p v-if="previewCount === 0" class="preview-note preview-empty">No subscribers match these filters.</p>
+          <p v-else class="preview-note"><strong>{{ previewCount }}</strong> subscribers match these rules.</p>
         </div>
       </div>
     </div>
@@ -259,7 +262,6 @@ onMounted(async () => {
               <th>Email</th>
               <th>Name</th>
               <th>Status</th>
-              <th>Created</th>
             </tr>
           </thead>
           <tbody>
@@ -267,10 +269,12 @@ onMounted(async () => {
               <td class="cell-mono">{{ sub.email }}</td>
               <td>{{ sub.name || '-' }}</td>
               <td><span :class="statusBadgeClass(sub.status)">{{ sub.status }}</span></td>
-              <td>{{ formatDate(sub.created_at) }}</td>
             </tr>
           </tbody>
         </table>
+      </div>
+      <div v-if="previewCount !== null && previewCount > previewMembers.length" class="card-body" style="padding-top: 0">
+        <p class="preview-note">Showing first {{ previewMembers.length }} of {{ previewCount }}.</p>
       </div>
     </div>
 
@@ -404,5 +408,11 @@ onMounted(async () => {
 .preview-note strong {
   font-variant-numeric: tabular-nums;
   color: var(--text-primary);
+}
+
+/* Zero matches reads as a quiet note, not an error. */
+.preview-empty {
+  color: var(--text-secondary);
+  font-style: italic;
 }
 </style>

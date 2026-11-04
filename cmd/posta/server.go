@@ -736,6 +736,13 @@ func initCronManager(
 			repositories.NewCampaignMessageRepository(db),
 			producer,
 		))
+		// Scheduled sends: claims status=scheduled campaigns whose time has come
+		// and enqueues the worker task. Every minute so a scheduled send never
+		// waits longer than one tick.
+		manager.Register(jobs.NewCampaignSchedulerJob(
+			repositories.NewCampaignRepository(db),
+			producer,
+		))
 	}
 	retentionJob.SetNotificationRepo(repositories.NewNotificationRepository(db))
 	if cfg.MessagesEnabled {

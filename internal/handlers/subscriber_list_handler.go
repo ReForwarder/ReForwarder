@@ -343,12 +343,30 @@ func (h *SubscriberListHandler) ListMembers(c *okapi.Context, req *ListSubscribe
 	return paginated(c, items, total, page, size)
 }
 
+// previewSegmentSampleSize caps the subscriber sample returned alongside the
+// match count so the UI can preview who matched without a second round-trip.
+const previewSegmentSampleSize = 20
+
+// PreviewSegment evaluates filter rules against the workspace's subscribers
+// and returns the match count plus a small sample (id, email, name, status)
+// of the first page. FindByFilterRules' total doubles as the count, so one
+// call serves both.
 func (h *SubscriberListHandler) PreviewSegment(c *okapi.Context, req *PreviewSegmentRequest) error {
-	count, err := h.subscriberRepo.CountByFilterRules(getScope(c), req.Body.FilterRules)
+	sample, count, err := h.subscriberRepo.FindByFilterRules(getScope(c), req.Body.FilterRules, previewSegmentSampleSize, 0)
 	if err != nil {
 		return c.AbortInternalServerError("failed to evaluate segment")
 	}
-	return ok(c, okapi.M{"count": count})
+	type previewSubscriber struct {
+		ID     uint   `json:"id"`
+		Email  string `json:"email"`
+		Name   string `json:"name"`
+		Status string `json:"status"`
+	}
+	subscribers := make([]previewSubscriber, len(sample))
+	for i, s := range sample {
+		subscribers[i] = previewSubscriber{ID: s.ID, Email: s.Email, Name: s.Name, Status: string(s.Status)}
+	}
+	return ok(c, okapi.M{"count": count, "subscribers": subscribers})
 }
 
 // Subscribe adds an email to a named list via API key.
