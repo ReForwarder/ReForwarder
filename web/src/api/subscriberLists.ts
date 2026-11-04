@@ -1,6 +1,20 @@
 import api from './client'
 import type { ApiResponse, PaginatedResponse, SubscriberListItem, Subscriber, FilterRule } from './types'
 
+// Segment preview response: the match count plus a small sample of the
+// matching subscribers (first page, server-capped).
+export interface SegmentPreviewSubscriber {
+  id: number
+  email: string
+  name: string
+  status: string
+}
+
+export interface SegmentPreview {
+  count: number
+  subscribers: SegmentPreviewSubscriber[]
+}
+
 export const subscriberListsApi = {
   list(page = 0, size = 20) {
     return api.get<PaginatedResponse<SubscriberListItem>>('/workspaces/current/subscriber-lists', { params: { page, size } })
@@ -27,6 +41,6 @@ export const subscriberListsApi = {
     return api.delete(`/workspaces/current/subscriber-lists/${id}/members`, { data: { subscriber_id: subscriberId } })
   },
   previewSegment(filterRules: FilterRule[]) {
-    return api.post<PaginatedResponse<Subscriber>>('/workspaces/current/subscriber-lists/preview', { filter_rules: filterRules })
+    return api.post<ApiResponse<SegmentPreview>>('/workspaces/current/subscriber-lists/preview-segment', { filter_rules: filterRules })
   },
 }
