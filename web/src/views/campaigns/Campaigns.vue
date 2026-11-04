@@ -41,6 +41,8 @@ const formFromName = ref('')
 const formTemplateId = ref<number | null>(null)
 const formListId = ref<number | null>(null)
 const formSendRate = ref(0)
+// Optional schedule: empty = send immediately (the pre-scheduler behavior).
+const formScheduledAt = ref('')
 const saving = ref(false)
 
 // Audience: subscriber list XOR segment — the payload carries exactly one.
@@ -128,6 +130,7 @@ function openCreate() {
   formTemplateId.value = null
   formListId.value = null
   formSendRate.value = 0
+  formScheduledAt.value = ''
   audienceMode.value = 'list'
   formSegmentId.value = ''
   segmentCount.value = null
@@ -153,6 +156,9 @@ async function saveCampaign() {
         ? { list_id: formListId.value! }
         : { segment_id: Number(formSegmentId.value) }),
       send_rate: formSendRate.value,
+      // datetime-local has no timezone; send RFC3339 so the backend can parse
+      // it. Empty = send immediately.
+      ...(formScheduledAt.value ? { scheduled_at: new Date(formScheduledAt.value).toISOString() } : {}),
     })
     notify.success('Campaign created')
     showModal.value = false
@@ -355,6 +361,14 @@ const { watchClickStart, confirmClickEnd } = useModalSafeClose(() => {
           <div class="form-group">
             <label class="form-label">Send Rate (msgs/min, 0 = unlimited)</label>
             <input v-model.number="formSendRate" type="number" class="form-input" min="0" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Schedule send</label>
+            <input v-model="formScheduledAt" type="datetime-local" class="form-input" />
+            <p class="form-hint">
+              Optional. Sending the campaign waits until this time — leave empty to start delivering
+              immediately. The scheduler fires due campaigns every minute.
+            </p>
           </div>
         </div>
         <div class="modal-footer">
