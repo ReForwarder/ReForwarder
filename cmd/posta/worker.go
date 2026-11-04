@@ -61,6 +61,14 @@ func runWorker() error {
 	// Initialize SMTP password encryption
 	crypto.Init(cfg.EncryptionKey)
 
+	// Bound outgoing SMTP dials (R-22): a stalled relay must fail within the
+	// dial timeout so the concurrency slot frees up and asynq retries the task.
+	email.SetDialTimeout(time.Duration(cfg.SMTPDialTimeoutSecs) * time.Second)
+
+	// Managed DKIM signing (R-02): sign messages whose sender domain has an
+	// Active+published key; unsigned otherwise (upstream CNAME signer mode).
+	email.SetDkimSigner(email.NewDkimSigningService(repositories.NewDomainSigningKeyRepository(db)))
+
 	// Initialize blob storage for attachment retrieval
 	var blobStore blob.Store
 	if cfg.BlobProvider != "" {

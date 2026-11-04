@@ -176,6 +176,17 @@ var (
 			Help: "Number of currently-connected Asynq workers (embedded + standalone)",
 		},
 	)
+
+	// queueArchivedTasks exposes the per-queue asynq archived set — the
+	// dead-letter view of exhausted send tasks. Surfaced so operators can alert
+	// on dead-letter growth (feeds the R-12 Prometheus work).
+	queueArchivedTasks = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "posta_queue_archived_tasks",
+			Help: "Number of tasks in a queue's archived (dead-letter) set",
+		},
+		[]string{"queue"},
+	)
 )
 
 func init() {
@@ -198,6 +209,7 @@ func init() {
 	prometheus.MustRegister(messagesReceivedTotal)
 	prometheus.MustRegister(messageNotificationsTotal)
 	prometheus.MustRegister(activeWorkers)
+	prometheus.MustRegister(queueArchivedTasks)
 }
 
 // IncrementEmailSent increments the emails sent counter.
@@ -291,6 +303,12 @@ func ObserveInboundIngestDuration(seconds float64) {
 // SetActiveWorkers updates the active worker gauge.
 func SetActiveWorkers(n int) {
 	activeWorkers.Set(float64(n))
+}
+
+// SetQueueArchivedTasks records the archived (dead-letter) task count of one
+// queue. Call per queue on every admin-metrics refresh.
+func SetQueueArchivedTasks(queue string, count int) {
+	queueArchivedTasks.WithLabelValues(queue).Set(float64(count))
 }
 
 // PrometheusMiddleware records HTTP request metrics.

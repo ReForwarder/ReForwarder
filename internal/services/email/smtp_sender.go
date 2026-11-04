@@ -28,11 +28,13 @@ import (
 	"fmt"
 	"mime"
 	"mime/quotedprintable"
+	"net"
 	"net/mail"
 	"net/smtp"
 	"net/textproto"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -54,6 +56,16 @@ type SendError struct {
 // Permanent reports whether the failure is a permanent (5xx) SMTP rejection.
 func (e *SendError) Permanent() bool { return e.Code >= 500 && e.Code < 600 }
 
+// TimedOut reports whether the failure was a network timeout (dial or I/O
+// deadline). Timeouts are transient by definition: the retry path re-enqueues
+// them and they can never trigger auto-suppression — a timeout carries no SMTP
+// reply code (Code stays 0), so Permanent() is false and the worker's
+// permanentRejection predicate cannot match.
+func (e *SendError) TimedOut() bool {
+	var nerr net.Error
+	return errors.As(e.Err, &nerr) && nerr.Timeout()
+}
+
 func (e *SendError) Error() string { return e.Err.Error() }
 func (e *SendError) Unwrap() error { return e.Err }
 
@@ -68,10 +80,105 @@ func smtpReply(err error) (int, string) {
 	return 0, ""
 }
 
-type SMTPSender struct{}
+// Timeout settings for outgoing SMTP connections.
+//
+// A stalled relay used to wedge a worker concurrency slot forever: the client
+// dialed with no timeout and never set a deadline, so a server that accepted
+// the connection and never replied blocked the send indefinitely. Every
+// connection now gets (a) a dial timeout and (b) an overall session deadline —
+// after the dial, the remaining commands (banner, EHLO, AUTH, MAIL/RCPT/DATA)
+// must complete within dialTimeout × commandBudgetFactor. For simplicity the
+// budget is a single flat deadline reset once, before the DATA write (the only
+// long operation for large messages) gets a fresh budget of the same size —
+// not a per-command accounting; documented in the roadmap notes.
+const (
+	// DefaultDialTimeout bounds one TCP/TLS dial to a relay.
+	DefaultDialTimeout = 15 * time.Second
+	// commandBudgetFactor scales the dial timeout into the overall session budget.
+	commandBudgetFactor = 4
+)
+
+var (
+	timeoutsMu  sync.RWMutex
+	dialTimeout = DefaultDialTimeout
+)
+
+// SetDialTimeout sets the dial timeout used for every SMTP connection opened
+// by this package (senders are constructed in many places, so the setting is
+// process-wide and applied once at startup). Values <= 0 keep the default.
+func SetDialTimeout(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	timeoutsMu.Lock()
+	dialTimeout = d
+	timeoutsMu.Unlock()
+}
+
+// DialTimeout returns the configured dial timeout.
+func DialTimeout() time.Duration {
+	timeoutsMu.RLock()
+	defer timeoutsMu.RUnlock()
+	return dialTimeout
+}
+
+// overallDeadline is the session budget applied right after dialing.
+func overallDeadline() time.Duration {
+	return DialTimeout() * commandBudgetFactor
+}
+
+// dialNet opens a plain TCP connection with the configured dial timeout.
+func dialNet(addr string) (net.Conn, error) {
+	d := net.Dialer{Timeout: DialTimeout()}
+	return d.Dial("tcp", addr)
+}
+
+// DkimSigner signs outgoing messages per sender domain (R-02). Interface so a
+// stub can be injected in tests.
+type DkimSigner interface {
+	SignForDomain(msg []byte, domain string) ([]byte, error)
+}
+
+// defaultDkimSigner is the process-wide signer wired once at startup (see
+// SetDkimSigner). Senders constructed before/without wiring read it as a
+// fallback, so every delivery path (sync fallback, relay, retry worker,
+// notifications) signs without each construction site needing the resolver.
+var (
+	dkimMu          sync.RWMutex
+	defaultDkimSign DkimSigner
+)
+
+// SetDkimSigner sets the process-wide DKIM signer used by SMTPSenders that
+// have no instance-level signer. nil disables managed signing globally
+// (unsigned / CNAME mode).
+func SetDkimSigner(s DkimSigner) {
+	dkimMu.Lock()
+	defaultDkimSign = s
+	dkimMu.Unlock()
+}
+
+// currentDkimSigner returns the package-wide signer, or nil.
+func currentDkimSigner() DkimSigner {
+	dkimMu.RLock()
+	defer dkimMu.RUnlock()
+	return defaultDkimSign
+}
+
+type SMTPSender struct {
+	// dkim, when set, signs every message this sender emits for the envelope
+	// sender's domain. When nil, the process-wide signer (SetDkimSigner)
+	// applies; when that is unset too, mail goes out unsigned (the upstream
+	// CNAME signer mode).
+	dkim DkimSigner
+}
 
 func NewSMTPSender() *SMTPSender {
 	return &SMTPSender{}
+}
+
+// SetDkimSigner pins a signer on this sender, overriding the process-wide one.
+func (s *SMTPSender) SetDkimSigner(signer DkimSigner) {
+	s.dkim = signer
 }
 
 // TestConnection verifies that a connection to the SMTP server can be
@@ -80,37 +187,11 @@ func (s *SMTPSender) TestConnection(server *models.SMTPServer) error {
 	addr := fmt.Sprintf("%s:%d", server.Host, server.Port)
 	tlsConfig := &tls.Config{ServerName: server.Host}
 
-	var client *smtp.Client
-	var err error
-
-	switch server.Encryption {
-	case models.EncryptionSSL:
-		conn, dialErr := tls.Dial("tcp", addr, tlsConfig)
-		if dialErr != nil {
-			return fmt.Errorf("SSL dial failed: %w", dialErr)
-		}
-		defer func() { _ = conn.Close() }()
-		client, err = smtp.NewClient(conn, server.Host)
-		if err != nil {
-			return fmt.Errorf("SMTP client creation failed: %w", err)
-		}
-
-	case models.EncryptionSTARTTLS:
-		client, err = smtp.Dial(addr)
-		if err != nil {
-			return fmt.Errorf("SMTP dial failed: %w", err)
-		}
-		if err = client.StartTLS(tlsConfig); err != nil {
-			_ = client.Close()
-			return fmt.Errorf("STARTTLS failed: %w", err)
-		}
-
-	default: // none
-		client, err = smtp.Dial(addr)
-		if err != nil {
-			return fmt.Errorf("SMTP dial failed: %w", err)
-		}
+	conn, client, err := dialSMTP(addr, server.Host, server.Encryption, tlsConfig)
+	if err != nil {
+		return err
 	}
+	defer func() { _ = conn.Close() }()
 	defer func() { _ = client.Close() }()
 
 	if server.Username != "" {
@@ -119,6 +200,51 @@ func (s *SMTPSender) TestConnection(server *models.SMTPServer) error {
 		}
 	}
 	return client.Quit()
+}
+
+// dialSMTP establishes the SMTP connection for one session: dial with the
+// configured timeout (implicit TLS wraps the dialer, STARTTLS/plain dial raw
+// TCP and hand the conn to net/smtp), then set the overall session deadline.
+// STARTTLS is upgraded in-band by the caller afterwards; the deadline set here
+// keeps applying — tls.Conn wraps the same socket.
+func dialSMTP(addr, host, encryption string, tlsConfig *tls.Config) (net.Conn, *smtp.Client, error) {
+	var conn net.Conn
+	var err error
+	switch encryption {
+	case models.EncryptionSSL:
+		// tls.DialWithDialer applies the dialer's Timeout to both the TCP dial
+		// and the TLS handshake.
+		d := net.Dialer{Timeout: DialTimeout()}
+		conn, err = tls.DialWithDialer(&d, "tcp", addr, tlsConfig)
+		if err != nil {
+			return nil, nil, fmt.Errorf("SSL dial failed: %w", err)
+		}
+	default: // none, and STARTTLS before the upgrade
+		conn, err = dialNet(addr)
+		if err != nil {
+			return nil, nil, fmt.Errorf("SMTP dial failed: %w", err)
+		}
+	}
+
+	// Overall session budget: everything after the dial must finish within it,
+	// so a silent relay can no longer wedge a worker slot indefinitely.
+	if err := conn.SetDeadline(time.Now().Add(overallDeadline())); err != nil {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("failed to set connection deadline: %w", err)
+	}
+
+	client, err := smtp.NewClient(conn, host)
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("SMTP client creation failed: %w", err)
+	}
+	if encryption == models.EncryptionSTARTTLS {
+		if err := client.StartTLS(tlsConfig); err != nil {
+			_ = client.Close()
+			return nil, nil, fmt.Errorf("STARTTLS failed: %w", err)
+		}
+	}
+	return conn, client, nil
 }
 
 // autoAuth uses PLAIN when the server offers it, otherwise LOGIN (Exchange Online).
@@ -179,14 +305,33 @@ func (s *SMTPSender) Send(server *models.SMTPServer, from string, to []string, s
 	// Extract bare email for SMTP envelope (MAIL FROM), keep full format for headers
 	envelopeFrom := envelopeAddress(from)
 
-	switch server.Encryption {
-	case models.EncryptionSSL:
-		return sendWithImplicitTLS(addr, auth, server.Host, envelopeFrom, to, msg)
-	case models.EncryptionSTARTTLS:
-		return sendWithSTARTTLS(addr, auth, server.Host, envelopeFrom, to, msg)
-	default:
-		return sendPlain(addr, auth, server.Host, envelopeFrom, to, msg)
+	// DKIM signing (R-02): sign the final message for the envelope sender's
+	// domain when a managed signing key exists. A signing error fails the send
+	// (asynq retries); a missing key keeps the message unsigned — the CNAME /
+	// upstream-signer mode.
+	signer := s.dkim
+	if signer == nil {
+		signer = currentDkimSigner()
 	}
+	if signer != nil {
+		if domain := senderDomainOf(envelopeFrom); domain != "" {
+			signed, err := signer.SignForDomain(msg, domain)
+			if err != nil {
+				return fmt.Errorf("DKIM signing failed: %w", err)
+			}
+			msg = signed
+		}
+	}
+
+	tlsConfig := &tls.Config{ServerName: server.Host}
+	conn, client, err := dialSMTP(addr, server.Host, server.Encryption, tlsConfig)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	defer func() { _ = client.Close() }()
+
+	return sendViaClient(client, conn, auth, envelopeFrom, to, msg)
 }
 
 // envelopeAddress extracts the bare email from an RFC 5322 address like
@@ -200,49 +345,20 @@ func envelopeAddress(from string) string {
 	return addr.Address
 }
 
-func sendWithImplicitTLS(addr string, auth smtp.Auth, host string, from string, to []string, msg []byte) error {
-	tlsConfig := &tls.Config{ServerName: host}
-
-	conn, err := tls.Dial("tcp", addr, tlsConfig)
-	if err != nil {
-		return fmt.Errorf("SSL dial failed: %w", err)
+// senderDomainOf returns the lowercased domain of a bare email address, or ""
+// when the address has no domain.
+func senderDomainOf(bare string) string {
+	if i := strings.LastIndex(bare, "@"); i >= 0 && i+1 < len(bare) {
+		return strings.ToLower(bare[i+1:])
 	}
-
-	client, err := smtp.NewClient(conn, host)
-	if err != nil {
-		return fmt.Errorf("SMTP client creation failed: %w", err)
-	}
-	defer func() { _ = client.Close() }()
-
-	return sendViaClient(client, auth, from, to, msg)
+	return ""
 }
 
-func sendWithSTARTTLS(addr string, auth smtp.Auth, host string, from string, to []string, msg []byte) error {
-	client, err := smtp.Dial(addr)
-	if err != nil {
-		return fmt.Errorf("SMTP dial failed: %w", err)
-	}
-	defer func() { _ = client.Close() }()
-
-	tlsConfig := &tls.Config{ServerName: host}
-	if err := client.StartTLS(tlsConfig); err != nil {
-		return fmt.Errorf("STARTTLS failed: %w", err)
-	}
-
-	return sendViaClient(client, auth, from, to, msg)
-}
-
-func sendPlain(addr string, auth smtp.Auth, host string, from string, to []string, msg []byte) error {
-	client, err := smtp.Dial(addr)
-	if err != nil {
-		return fmt.Errorf("SMTP dial failed, host: %s, error: %w", host, err)
-	}
-	defer func() { _ = client.Close() }()
-
-	return sendViaClient(client, auth, from, to, msg)
-}
-
-func sendViaClient(client *smtp.Client, auth smtp.Auth, from string, to []string, msg []byte) error {
+// sendViaClient runs the SMTP conversation over an already-established
+// client. conn is the underlying socket, used to give the DATA phase a fresh
+// slice of the overall budget (it is the only long operation: large messages
+// and slow links) before quitting.
+func sendViaClient(client *smtp.Client, conn net.Conn, auth smtp.Auth, from string, to []string, msg []byte) error {
 	if auth != nil {
 		if err := client.Auth(auth); err != nil {
 			return fmt.Errorf("SMTP auth failed: %w", err)
@@ -258,6 +374,11 @@ func sendViaClient(client *smtp.Client, auth smtp.Auth, from string, to []string
 			return wrapSendError("RCPT TO", rcpt, fmt.Errorf("SMTP RCPT TO failed: %w", err))
 		}
 	}
+
+	// Fresh budget for the DATA phase: the message body write is the longest
+	// single operation and would otherwise share the budget with everything
+	// before it.
+	_ = conn.SetDeadline(time.Now().Add(overallDeadline()))
 
 	w, err := client.Data()
 	if err != nil {

@@ -634,6 +634,82 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 		})
 	}
 
+	// ==================== Delivery Queues (asynq inspection) ====================
+	routes = append(routes,
+		okapi.RouteDefinition{
+			Method:      http.MethodGet,
+			Path:        "/queues",
+			Handler:     r.h.admin.ListQueues,
+			Group:       adminGroup,
+			Summary:     "List delivery queues",
+			Description: "Returns per-queue stats (pending, active, scheduled, retry, archived, latency) for the send pipeline queues plus the live worker count.",
+			Response:    &dto.Response[handlers.QueuesOverview]{},
+		},
+		okapi.RouteDefinition{
+			Method:      http.MethodGet,
+			Path:        "/queues/{queue}/tasks",
+			Handler:     okapi.H(r.h.admin.ListQueueTasks),
+			Group:       adminGroup,
+			Summary:     "List tasks in a delivery queue",
+			Description: "Returns a paged task list for one queue in the requested state (pending, active, scheduled, retry or archived — the archived set is the dead-letter view).",
+			Request:     &handlers.ListQueueTasksRequest{},
+			Response:    &dto.Response[handlers.QueueTaskPage]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("queue", "string", "Queue name (transactional, bulk or low)"),
+				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
+		okapi.RouteDefinition{
+			Method:      http.MethodPost,
+			Path:        "/queues/{queue}/tasks/{task_id}/cancel",
+			Handler:     okapi.H(r.h.admin.CancelQueueTask),
+			Group:       adminGroup,
+			Tags:        []string{tagAdmin},
+			Summary:     "Cancel a queued task",
+			Description: "Removes a pending/scheduled/retrying task from the queue so it never runs; for a dead-lettered (archived) task it deletes it. Audited.",
+			Response:    &dto.Response[okapi.M]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("queue", "string", "Queue name"),
+				okapi.DocPathParam("task_id", "string", "Asynq task ID"),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+			},
+		},
+		okapi.RouteDefinition{
+			Method:      http.MethodPost,
+			Path:        "/queues/{queue}/tasks/{task_id}/run",
+			Handler:     okapi.H(r.h.admin.RunQueueTask),
+			Group:       adminGroup,
+			Tags:        []string{tagAdmin},
+			Summary:     "Run a task now",
+			Description: "Schedules a retrying or dead-lettered (archived) task for immediate processing. Audited.",
+			Response:    &dto.Response[okapi.M]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("queue", "string", "Queue name"),
+				okapi.DocPathParam("task_id", "string", "Asynq task ID"),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+			},
+		},
+		okapi.RouteDefinition{
+			Method:      http.MethodPost,
+			Path:        "/queues/{queue}/tasks/{task_id}/archive",
+			Handler:     okapi.H(r.h.admin.ArchiveQueueTask),
+			Group:       adminGroup,
+			Tags:        []string{tagAdmin},
+			Summary:     "Archive a task",
+			Description: "Parks a pending/scheduled/retrying task in the archived set (the dead-letter view) without deleting it. Audited.",
+			Response:    &dto.Response[okapi.M]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("queue", "string", "Queue name"),
+				okapi.DocPathParam("task_id", "string", "Asynq task ID"),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+			},
+		},
+	)
+
 	return routes
 }
 

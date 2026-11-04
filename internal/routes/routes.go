@@ -113,6 +113,7 @@ type routerHandlers struct {
 	webhookDelivery  *handlers.WebhookDeliveryHandler
 	dashboard        *handlers.DashboardHandler
 	domain           *handlers.DomainHandler
+	domainSigning    *handlers.DomainSigningHandler
 	bounce           *handlers.BounceHandler
 	suppression      *handlers.SuppressionHandler
 	unsubscribeList  *handlers.UnsubscribeListHandler
@@ -313,6 +314,7 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 			webhookDelivery:  handlers.NewWebhookDeliveryHandler(webhookDeliveryRepo),
 			dashboard:        handlers.NewDashboardHandler(db, statsCache, webhookDeliveryRepo),
 			domain:           handlers.NewDomainHandler(domainRepo),
+			domainSigning:    handlers.NewDomainSigningHandler(repositories.NewDomainSigningKeyRepository(db), domainRepo, auditLogger),
 			adminDomain:      handlers.NewAdminDomainHandler(db, domainRepo, auditLogger),
 			adminWorkspace:   handlers.NewAdminWorkspaceHandler(db, workspaceRepo),
 			notification:     handlers.NewNotificationHandler(notificationRepo, inboxService),

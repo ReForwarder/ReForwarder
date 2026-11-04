@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { domainsApi } from '../../api/domains'
-import type { Domain, DnsRecord, Pageable } from '../../api/types'
+import type { Domain, DnsRecord, Pageable, SigningKey } from '../../api/types'
 import { useNotificationStore } from '../../stores/notification'
 import { useConfirm } from '../../composables/useConfirm'
 import { useModalSafeClose } from '../../composables/useModalSafeClose';
@@ -155,6 +155,8 @@ async function viewDnsRecords(domain: Domain) {
   }
   dnsLoading.value = true
   expandedDomainId.value = domain.id
+  signingFreshId.value = null
+  loadSigningKeys(domain.id)
   try {
     const res = await domainsApi.get(domain.id)
     dnsRecordsDomain.value = res.data.data
@@ -163,6 +165,107 @@ async function viewDnsRecords(domain: Domain) {
     expandedDomainId.value = null
   } finally {
     dnsLoading.value = false
+  }
+}
+
+// ---- Managed DKIM signing keys (R-02) ----
+const signingKeys = ref<SigningKey[]>([])
+const signingLoading = ref(false)
+const signingSelector = ref('')
+const signingAlgorithm = ref<'rsa-sha256' | 'ed25519-sha256'>('rsa-sha256')
+const signingBusy = ref(false)
+const signingMode = ref<'generate' | 'rotate'>('generate')
+const signingFreshId = ref<number | null>(null)
+
+const activeSigningKey = computed(() => signingKeys.value.find((k) => k.status === 'active') || null)
+
+async function loadSigningKeys(domainId: number) {
+  signingLoading.value = true
+  try {
+    const res = await domainsApi.listSigningKeys(domainId)
+    signingKeys.value = res.data.data
+    signingMode.value = activeSigningKey.value ? 'rotate' : 'generate'
+  } catch {
+    signingKeys.value = []
+  } finally {
+    signingLoading.value = false
+  }
+}
+
+const statusLabels: Record<string, string> = {
+  active: 'Active',
+  retiring: 'Retiring',
+  retired: 'Retired',
+}
+
+const dnsStateLabels: Record<string, string> = {
+  published: 'DNS published',
+  'pending-retry': 'DNS pending',
+}
+
+async function createOrRotateKey(domain: Domain) {
+  const selector = signingSelector.value.trim()
+  if (!selector) return
+  const rotating = signingMode.value === 'rotate'
+  const confirmed = rotating
+    ? await confirm({
+        title: 'Rotate DKIM key',
+        message: `Create replacement key "${selector}" for ${domain.domain}? The current key stays active for mail in transit and must be published, verified, then retired manually.`,
+        confirmText: 'Rotate',
+        variant: 'info',
+      })
+    : true
+  if (!confirmed) return
+  signingBusy.value = true
+  try {
+    const res = rotating
+      ? await domainsApi.rotateSigningKey(domain.id, selector, signingAlgorithm.value)
+      : await domainsApi.generateSigningKey(domain.id, selector, signingAlgorithm.value)
+    notify.success(rotating ? 'Signing key rotated — publish the new DNS record' : 'Signing key generated — publish the DNS record')
+    signingSelector.value = ''
+    signingFreshId.value = res.data.data.id
+    await loadSigningKeys(domain.id)
+  } catch (e: any) {
+    notify.error(e?.response?.data?.message || 'Failed to create signing key')
+  } finally {
+    signingBusy.value = false
+  }
+}
+
+async function verifyKeyDns(domain: Domain, key: SigningKey) {
+  signingBusy.value = true
+  try {
+    const res = await domainsApi.verifySigningKeyDns(domain.id, key.id)
+    if (res.data.data.published) {
+      notify.success(`TXT record for "${key.selector}" confirmed in DNS`)
+    } else {
+      notify.error(res.data.data.error || 'Record not found in DNS yet — propagation can take up to 48 hours')
+    }
+    await loadSigningKeys(domain.id)
+  } catch (e: any) {
+    notify.error(e?.response?.data?.message || 'DNS check failed')
+  } finally {
+    signingBusy.value = false
+  }
+}
+
+async function deleteKey(domain: Domain, key: SigningKey) {
+  const confirmed = await confirm({
+    title: 'Delete signing key',
+    message: `Delete the retired key "${key.selector}"? Signatures made with it can no longer be verified once receivers stop caching it.`,
+    confirmText: 'Delete',
+    variant: 'danger',
+  })
+  if (!confirmed) return
+  signingBusy.value = true
+  try {
+    await domainsApi.deleteSigningKey(domain.id, key.id)
+    notify.success('Signing key deleted')
+    await loadSigningKeys(domain.id)
+  } catch (e: any) {
+    notify.error(e?.response?.data?.message || 'Failed to delete signing key')
+  } finally {
+    signingBusy.value = false
   }
 }
 
@@ -272,6 +375,99 @@ const { watchClickStart, confirmClickEnd } = useModalSafeClose(() => {
                         </div>
                       </div>
 
+                      <!-- ==================== DKIM signing keys (R-02) ==================== -->
+                      <div class="signing-section">
+                        <div class="signing-head">
+                          <div>
+                            <h4 class="dns-panel-title">DKIM signing</h4>
+                            <p class="dns-panel-subtitle">
+                              Managed keys sign every message sent from {{ domain.domain }} once the TXT record is
+                              confirmed. Without a key, mail goes out unsigned (upstream signer mode).
+                            </p>
+                          </div>
+                        </div>
+
+                        <div v-if="signingLoading" class="loading-page" style="min-height: 60px">
+                          <div class="spinner"></div>
+                        </div>
+
+                        <template v-else>
+                          <div v-if="signingKeys.length === 0" class="signing-empty">
+                            No signing key yet — generate one, publish the DNS record, then confirm it below.
+                          </div>
+
+                          <div v-for="key in signingKeys" :key="key.id" class="signing-key"
+                            :class="{ 'signing-key-fresh': signingFreshId === key.id }">
+                            <div class="signing-key-head">
+                              <div class="signing-key-id">
+                                <code class="signing-selector">{{ key.selector }}</code>
+                                <span class="dns-type-badge">{{ key.algorithm }}</span>
+                              </div>
+                              <div class="signing-key-badges">
+                                <span class="badge" :class="{
+                                  'badge-success': key.status === 'active',
+                                  'badge-neutral': key.status === 'retiring',
+                                  'badge-error': key.status === 'retired',
+                                }">{{ statusLabels[key.status] || key.status }}</span>
+                                <span class="badge" :class="key.dns_state === 'published' ? 'badge-success' : 'badge-neutral'">
+                                  {{ dnsStateLabels[key.dns_state] || key.dns_state }}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div v-if="key.dns_record" class="dns-field">
+                              <div class="dns-field-label">DNS TXT record to publish</div>
+                              <div class="dns-field-row">
+                                <code class="dns-field-value">{{ key.dns_record.host }}</code>
+                                <button type="button" class="btn btn-ghost btn-xs"
+                                  @click="copy(key.dns_record.host, 'Host')">Copy</button>
+                              </div>
+                              <div class="dns-field-row">
+                                <code class="dns-field-value dns-field-value-block">{{ key.dns_record.value }}</code>
+                                <button type="button" class="btn btn-ghost btn-xs"
+                                  @click="copy(key.dns_record.value, 'TXT record')">Copy</button>
+                              </div>
+                            </div>
+
+                            <div class="signing-actions">
+                              <button v-if="wsStore.canEdit && key.dns_state !== 'published'" class="btn btn-primary btn-sm"
+                                :disabled="signingBusy" @click="verifyKeyDns(domain, key)">
+                                Check DNS
+                              </button>
+                              <button v-if="wsStore.canEdit && key.status === 'retired'" class="btn btn-danger btn-sm"
+                                :disabled="signingBusy" @click="deleteKey(domain, key)">
+                                Delete
+                              </button>
+                              <span v-if="key.status === 'retiring'" class="signing-note">
+                                Keep until receivers stop seeing its signatures, then retire and delete it.
+                              </span>
+                            </div>
+                          </div>
+
+                          <div v-if="wsStore.canEdit" class="signing-form">
+                            <div class="signing-form-title">
+                              {{ signingMode === 'rotate' ? 'Rotate key' : 'Generate key' }}
+                            </div>
+                            <div class="signing-form-row">
+                              <input v-model="signingSelector" type="text" class="form-input signing-input"
+                                placeholder="selector, e.g. posta or mail2026" />
+                              <select v-model="signingAlgorithm" class="form-input signing-input signing-select">
+                                <option value="rsa-sha256">rsa-sha256 (recommended)</option>
+                                <option value="ed25519-sha256">ed25519-sha256 (compact)</option>
+                              </select>
+                              <button class="btn btn-primary btn-sm" :disabled="signingBusy || !signingSelector.trim()"
+                                @click="createOrRotateKey(domain)">
+                                {{ signingBusy ? 'Working…' : signingMode === 'rotate' ? 'Rotate' : 'Generate' }}
+                              </button>
+                            </div>
+                            <p v-if="signingMode === 'rotate'" class="signing-hint">
+                              The current active key becomes retiring; the replacement is used once its DNS record is
+                              verified.
+                            </p>
+                          </div>
+                        </template>
+                      </div>
+
                       <div class="dns-record-list">
                         <div v-for="row in recordRows" :key="row.key" class="dns-record"
                           :class="{ 'dns-record-highlight': row.key === 'verification', 'dns-record-verified': row.verified }">
@@ -368,5 +564,98 @@ const { watchClickStart, confirmClickEnd } = useModalSafeClose(() => {
 .mono {
   font-family: var(--font-mono);
   font-size: 13px;
+}
+
+/* DKIM signing panel */
+.signing-section {
+  margin-bottom: 1.25rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.signing-empty {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 0.75rem;
+}
+
+.signing-key {
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md, 8px);
+  padding: 0.75rem;
+  margin-bottom: 0.75rem;
+  background: var(--bg-secondary);
+}
+
+.signing-key-fresh {
+  border-color: var(--primary, var(--text-primary));
+}
+
+.signing-key-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.signing-key-id {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.signing-selector {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.signing-key-badges {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.signing-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.signing-note {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.signing-form {
+  margin-top: 0.75rem;
+}
+
+.signing-form-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.signing-form-row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.signing-input {
+  max-width: 240px;
+}
+
+.signing-select {
+  max-width: 220px;
+}
+
+.signing-hint {
+  margin-top: 0.4rem;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 </style>

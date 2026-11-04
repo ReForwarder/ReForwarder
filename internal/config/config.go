@@ -188,6 +188,12 @@ type Config struct {
 	SMTPRelayMaxMessageSize int64
 	SMTPRelayRateLimit      int
 	SMTPRelayRateWindow     int
+
+	// SMTPDialTimeoutSecs bounds the TCP/TLS dial to an outgoing relay and
+	// scales the overall send-session deadline (see email.SetDialTimeout).
+	// A stalled relay must fail within this budget so the worker slot frees up
+	// and asynq retries the task instead of wedging forever.
+	SMTPDialTimeoutSecs int
 }
 type SystemSMTPConfig struct {
 	Host       string
@@ -400,6 +406,8 @@ func New() *Config {
 		SMTPRelayMaxMessageSize: int64(goutils.EnvInt("POSTA_SMTP_RELAY_MAX_MESSAGE_SIZE", 26214400)),
 		SMTPRelayRateLimit:      goutils.EnvInt("POSTA_SMTP_RELAY_RATE_LIMIT", 60),
 		SMTPRelayRateWindow:     goutils.EnvInt("POSTA_SMTP_RELAY_RATE_WINDOW", 60),
+
+		SMTPDialTimeoutSecs: goutils.EnvInt("POSTA_SMTP_DIAL_TIMEOUT_SECS", 15),
 	}
 }
 
