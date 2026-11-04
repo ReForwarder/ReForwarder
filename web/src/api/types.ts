@@ -1881,3 +1881,78 @@ export interface SegmentPreview {
   total_pages: number
   contacts: SegmentPreviewContact[]
 }
+
+// ---- Delivery queues (admin, asynq inspection) ----
+
+/** Per-queue stats of one send-pipeline queue. */
+export interface QueueStats {
+  queue: string
+  size: number
+  pending: number
+  active: number
+  scheduled: number
+  retry: number
+  /** Dead-letter set: exhausted tasks awaiting operator action. */
+  archived: number
+  processed: number
+  failed: number
+  latency_ms: number
+}
+
+/** GET /admin/queues payload. */
+export interface QueuesOverview {
+  queues: QueueStats[]
+  active_workers: number
+}
+
+/** One asynq task in an admin queue listing. */
+export interface QueueTask {
+  id: string
+  type: string
+  queue: string
+  state: string
+  payload_snippet: string
+  max_retry: number
+  retried: number
+  last_error?: string
+  last_failed_at?: string | null
+  next_process_at?: string | null
+}
+
+/** GET /admin/queues/{queue}/tasks payload (page-local count). */
+export interface QueueTaskPage {
+  queue: string
+  state: string
+  tasks: QueueTask[]
+  page: number
+  size: number
+  total: number
+}
+
+// ---- Managed DKIM signing keys (workspace domains) ----
+
+/** The public DNS record an operator must publish for a signing key. */
+export interface DnsRecordView {
+  host: string
+  type: string
+  value: string
+  ttl: number
+}
+
+/**
+ * One managed DKIM signing key. The private key never leaves the server —
+ * responses carry only the public DNS record.
+ */
+export interface SigningKey {
+  id: number
+  domain_id: number
+  domain?: string
+  selector: string
+  algorithm: 'rsa-sha256' | 'ed25519-sha256' | string
+  status: 'active' | 'retiring' | 'retired' | string
+  /** pending-retry = TXT record not confirmed in DNS yet; published = confirmed. */
+  dns_state: 'published' | 'pending-retry' | string
+  dns_published_at?: string | null
+  created_at: string
+  dns_record?: DnsRecordView | null
+}

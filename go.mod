@@ -7,6 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.12
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.6
 	github.com/coreos/go-oidc/v3 v3.21.0
+	github.com/emersion/go-msgauth v0.7.0
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
 	github.com/emersion/go-smtp v0.25.0
 	github.com/golang-jwt/jwt/v5 v5.3.1

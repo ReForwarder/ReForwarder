@@ -7,6 +7,7 @@ import type {
   SecurityOverview, SecurityBan, SecurityBanInput, SecurityBanSuppressed,
   SecurityEventRecord, SecurityRule, SecurityRuleInput,
   AllowlistEntry, SecurityAllowlistInput,
+  QueueStats, QueueTask, QueuesOverview, QueueTaskPage,
 } from './types'
 import type { Announcement, AnnouncementInput } from './inbox'
 
@@ -115,6 +116,24 @@ export const adminApi = {
   },
   listJobs() {
     return api.get<ApiResponse<CronJob[]>>('/admin/jobs')
+  },
+  // ---- Delivery queues (asynq inspection) ----
+  listQueues() {
+    return api.get<ApiResponse<QueuesOverview>>('/admin/queues')
+  },
+  listQueueTasks(queue: string, state: string, page = 0, size = 20) {
+    return api.get<ApiResponse<QueueTaskPage>>(`/admin/queues/${queue}/tasks`, {
+      params: { state, page, size },
+    })
+  },
+  cancelQueueTask(queue: string, taskId: string) {
+    return api.post<ApiResponse<{ message: string }>>(`/admin/queues/${queue}/tasks/${encodeURIComponent(taskId)}/cancel`)
+  },
+  runQueueTask(queue: string, taskId: string) {
+    return api.post<ApiResponse<{ message: string }>>(`/admin/queues/${queue}/tasks/${encodeURIComponent(taskId)}/run`)
+  },
+  archiveQueueTask(queue: string, taskId: string) {
+    return api.post<ApiResponse<{ message: string }>>(`/admin/queues/${queue}/tasks/${encodeURIComponent(taskId)}/archive`)
   },
   getUpdate() {
     return api.get<ApiResponse<UpdateInfo>>('/admin/update')

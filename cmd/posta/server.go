@@ -107,6 +107,16 @@ func runServer(cli *okapicli.CLI) {
 			// Initialize SMTP password encryption
 			crypto.Init(cfg.EncryptionKey)
 
+			// Bound outgoing SMTP dials (R-22): every relay connection this
+			// process opens — send worker, retry worker, notifications, relay —
+			// honors the dial timeout and the session deadline derived from it.
+			email.SetDialTimeout(time.Duration(cfg.SMTPDialTimeoutSecs) * time.Second)
+
+			// Managed DKIM signing (R-02): every SMTP sender this process uses
+			// signs messages whose sender domain has an Active+published key.
+			// Unset (nil) keeps the bring-your-own-signer CNAME mode.
+			email.SetDkimSigner(email.NewDkimSigningService(repositories.NewDomainSigningKeyRepository(res.db)))
+
 			if err := storage.SeedAdmin(res.db, cfg.AdminEmail, cfg.AdminPassword, cfg.ValidateAdminSeedPassword); err != nil {
 				logger.Fatal("failed to seed admin user", "error", err)
 			}
@@ -742,6 +752,13 @@ func initCronManager(
 		manager.Register(jobs.NewCampaignSchedulerJob(
 			repositories.NewCampaignRepository(db),
 			producer,
+		))
+		// Lost-task reconcile (R-03): emails stuck in queued whose asynq task
+		// no longer exists are re-enqueued; the retry worker only covers failed.
+		manager.Register(jobs.NewQueueReconcileJob(
+			db,
+			producer,
+			asynq.NewInspector(cfg.Redis.AsynqRedisOpt()),
 		))
 	}
 	retentionJob.SetNotificationRepo(repositories.NewNotificationRepository(db))
