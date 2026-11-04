@@ -136,6 +136,7 @@ type routerHandlers struct {
 	oauthAdmin       *handlers.OAuthAdminHandler
 	subscriber       *handlers.SubscriberHandler
 	subscriberList   *handlers.SubscriberListHandler
+	segment          *handlers.SegmentHandler
 	automation       *handlers.AutomationHandler
 	campaign         *handlers.CampaignHandler
 	tracking         *handlers.TrackingHandler
@@ -407,8 +408,10 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	// Subscribers
 	subscriberRepo := repositories.NewSubscriberRepository(db)
 	subscriberListRepo := repositories.NewSubscriberListRepository(db)
+	segmentRepo := repositories.NewSegmentRepository(db)
 	r.h.subscriber = handlers.NewSubscriberHandler(subscriberRepo)
 	r.h.subscriberList = handlers.NewSubscriberListHandler(subscriberListRepo, subscriberRepo)
+	r.h.segment = handlers.NewSegmentHandler(segmentRepo, subscriberRepo)
 
 	// Automations (workflow builder + executions + custom-event ingest). The
 	// enrollment engine is attached separately — see AttachAutomationTrigger.
@@ -427,7 +430,7 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	campaignMessageRepo := repositories.NewCampaignMessageRepository(db)
 	r.h.campaign = handlers.NewCampaignHandler(
 		campaignRepo, campaignMessageRepo,
-		subscriberListRepo, subscriberRepo, templateRepo, domainRepo, producer,
+		subscriberListRepo, segmentRepo, subscriberRepo, templateRepo, domainRepo, producer,
 	)
 
 	// Tracking

@@ -75,6 +75,7 @@ func Run(db *gorm.DB) error {
 		&models.SubscriberList{},
 		&models.SubscriberListMember{},
 		&models.SubscriberListUnsubscribe{},
+		&models.Segment{},
 		&models.Campaign{},
 		&models.CampaignMessage{},
 		&models.TrackedLink{},

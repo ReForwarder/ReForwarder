@@ -178,6 +178,7 @@ const navSections: NavSection[] = [
       { name: 'Contacts', path: '/contacts', icon: 'users' },
       { name: 'Subscribers', path: '/subscribers', icon: 'user-check' },
       { name: 'Subscriber Lists', path: '/subscriber-lists', icon: 'list' },
+      { name: 'Segments', path: '/segments', icon: 'users-round' },
       { name: 'Automations', path: '/automations', icon: 'zap' },
       { name: 'Unsubscribe Lists', path: '/unsubscribe-lists', icon: 'mail-x' },
     ],
@@ -459,6 +460,11 @@ function getIcon(name: string): string {
     'zap': '<svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M9.75 1.5L3 10.5h5.25L8.25 16.5 15 7.5H9.75l0-6z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     'code': '<svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M12 4.5L16.5 9 12 13.5M6 4.5L1.5 9 6 13.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     'message-square': '<svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M15.75 11.25a1.5 1.5 0 01-1.5 1.5H5.25L2.25 15.75V3.75a1.5 1.5 0 011.5-1.5h10.5a1.5 1.5 0 011.5 1.5v7.5z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    // Lucide "workflow" (v1.67.0) path data scaled 18/24 into this file's 18-viewBox convention. Added by the
+    // ui commit; kept out of the feature commit so the icon swap lands on its own.
+    // 'workflow': '<svg width="18" height="18" viewBox="0 0 18 18" fill="none"><rect x="2.25" y="2.25" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/><path d="M5.25 8.25v3a1.5 1.5 0 001.5 1.5h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><rect x="9.75" y="9.75" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/></svg>',
+    // Lucide "users-round" (v1.67.0), scaled the same way.
+    'users-round': '<svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M13.5 15.75a6 6 0 00-12 0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="7.5" cy="6" r="3.75" stroke="currentColor" stroke-width="1.5"/><path d="M16.5 15c0-2.53-1.5-4.88-3-6a3.75 3.75 0 00-.34-6.23" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   }
   return icons[name] || ''
 }

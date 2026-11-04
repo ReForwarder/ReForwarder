@@ -35,6 +35,7 @@ type CampaignHandler struct {
 	campaignRepo   *repositories.CampaignRepository
 	messageRepo    *repositories.CampaignMessageRepository
 	listRepo       *repositories.SubscriberListRepository
+	segmentRepo    *repositories.SegmentRepository
 	subscriberRepo *repositories.SubscriberRepository
 	templateRepo   *repositories.TemplateRepository
 	domainRepo     *repositories.DomainRepository
@@ -45,6 +46,7 @@ func NewCampaignHandler(
 	campaignRepo *repositories.CampaignRepository,
 	messageRepo *repositories.CampaignMessageRepository,
 	listRepo *repositories.SubscriberListRepository,
+	segmentRepo *repositories.SegmentRepository,
 	subscriberRepo *repositories.SubscriberRepository,
 	templateRepo *repositories.TemplateRepository,
 	domainRepo *repositories.DomainRepository,
@@ -54,6 +56,7 @@ func NewCampaignHandler(
 		campaignRepo:   campaignRepo,
 		messageRepo:    messageRepo,
 		listRepo:       listRepo,
+		segmentRepo:    segmentRepo,
 		subscriberRepo: subscriberRepo,
 		templateRepo:   templateRepo,
 		domainRepo:     domainRepo,
@@ -71,12 +74,14 @@ type CreateCampaignRequest struct {
 		TemplateVersionID *uint                  `json:"template_version_id"`
 		Language          string                 `json:"language"`
 		TemplateData      map[string]interface{} `json:"template_data"`
-		ListID            uint                   `json:"list_id" required:"true"`
-		SendRate          int                    `json:"send_rate"`
-		SendAtLocalTime   bool                   `json:"send_at_local_time"`
-		ABTestEnabled     bool                   `json:"ab_test_enabled"`
-		ABTestVariants    []models.ABTestVariant `json:"ab_test_variants"`
-		ScheduledAt       *time.Time             `json:"scheduled_at"`
+		// Audience: exactly one of list_id / segment_id (XOR).
+		ListID          *uint                  `json:"list_id"`
+		SegmentID       *uint                  `json:"segment_id"`
+		SendRate        int                    `json:"send_rate"`
+		SendAtLocalTime bool                   `json:"send_at_local_time"`
+		ABTestEnabled   bool                   `json:"ab_test_enabled"`
+		ABTestVariants  []models.ABTestVariant `json:"ab_test_variants"`
+		ScheduledAt     *time.Time             `json:"scheduled_at"`
 	} `json:"body"`
 }
 
@@ -91,12 +96,15 @@ type UpdateCampaignRequest struct {
 		TemplateVersionID *uint                  `json:"template_version_id"`
 		Language          string                 `json:"language"`
 		TemplateData      map[string]interface{} `json:"template_data"`
-		ListID            *uint                  `json:"list_id"`
-		SendRate          *int                   `json:"send_rate"`
-		SendAtLocalTime   *bool                  `json:"send_at_local_time"`
-		ABTestEnabled     *bool                  `json:"ab_test_enabled"`
-		ABTestVariants    []models.ABTestVariant `json:"ab_test_variants"`
-		ScheduledAt       *time.Time             `json:"scheduled_at"`
+		// Audience: providing either switches the audience to it; providing
+		// both is rejected. Omitting both leaves the audience unchanged.
+		ListID          *uint                  `json:"list_id"`
+		SegmentID       *uint                  `json:"segment_id"`
+		SendRate        *int                   `json:"send_rate"`
+		SendAtLocalTime *bool                  `json:"send_at_local_time"`
+		ABTestEnabled   *bool                  `json:"ab_test_enabled"`
+		ABTestVariants  []models.ABTestVariant `json:"ab_test_variants"`
+		ScheduledAt     *time.Time             `json:"scheduled_at"`
 	} `json:"body"`
 }
 
@@ -162,6 +170,11 @@ func (h *CampaignHandler) Create(c *okapi.Context, req *CreateCampaignRequest) e
 		lang = "en"
 	}
 
+	listID, segmentID, err := h.resolveAudience(c, req.Body.ListID, req.Body.SegmentID)
+	if err != nil {
+		return err
+	}
+
 	campaign := &models.Campaign{
 		UserID:            scope.UserID,
 		WorkspaceID:       scope.WorkspaceID,
@@ -174,7 +187,8 @@ func (h *CampaignHandler) Create(c *okapi.Context, req *CreateCampaignRequest) e
 		Language:          lang,
 		TemplateData:      req.Body.TemplateData,
 		Status:            models.CampaignStatusDraft,
-		ListID:            req.Body.ListID,
+		ListID:            derefCampaignUint(listID),
+		SegmentID:         segmentID,
 		SendRate:          req.Body.SendRate,
 		SendAtLocalTime:   req.Body.SendAtLocalTime,
 		ABTestEnabled:     req.Body.ABTestEnabled,
@@ -258,8 +272,18 @@ func (h *CampaignHandler) Update(c *okapi.Context, req *UpdateCampaignRequest) e
 	if req.Body.TemplateData != nil {
 		campaign.TemplateData = req.Body.TemplateData
 	}
-	if req.Body.ListID != nil {
-		campaign.ListID = *req.Body.ListID
+	if req.Body.ListID != nil || req.Body.SegmentID != nil {
+		listID, segmentID, err := h.resolveAudience(c, req.Body.ListID, req.Body.SegmentID)
+		if err != nil {
+			return err
+		}
+		if segmentID != nil {
+			campaign.SegmentID = segmentID
+			campaign.ListID = 0
+		} else {
+			campaign.ListID = *listID
+			campaign.SegmentID = nil
+		}
 	}
 	if req.Body.SendRate != nil {
 		campaign.SendRate = *req.Body.SendRate
@@ -462,6 +486,7 @@ func (h *CampaignHandler) Duplicate(c *okapi.Context, req *CampaignActionRequest
 		TemplateData:      cloneTemplateData(campaign.TemplateData),
 		Status:            models.CampaignStatusDraft,
 		ListID:            campaign.ListID,
+		SegmentID:         campaign.SegmentID,
 		SendRate:          campaign.SendRate,
 		SendAtLocalTime:   campaign.SendAtLocalTime,
 		ABTestEnabled:     campaign.ABTestEnabled,
@@ -491,6 +516,51 @@ func (h *CampaignHandler) ListMessages(c *okapi.Context, req *ListCampaignMessag
 // can't be forgotten at a callsite.
 func (h *CampaignHandler) findScoped(c *okapi.Context, id uint) (*models.Campaign, error) {
 	return h.campaignRepo.FindByIDForScope(id, getScope(c))
+}
+
+// errCampaignAudienceRejected is the sentinel returned after the audience
+// validation has aborted the request — callers must treat any error as
+// "response already written" (same contract as the other abort sentinels,
+// because okapi's Abort helpers return nil once the response is committed).
+var errCampaignAudienceRejected = errors.New("campaign audience rejected (response already written)")
+
+// resolveAudience enforces the campaign audience rule: exactly one of
+// list_id / segment_id, and the referenced resource must belong to the
+// caller's scope. The list check closes a gap — list ownership was never
+// validated before; a foreign list_id now 404s like any other cross-tenant
+// lookup. On any rejection the response is already written and the sentinel
+// is returned so Create/Update cannot continue past it.
+func (h *CampaignHandler) resolveAudience(c *okapi.Context, listID, segmentID *uint) (*uint, *uint, error) {
+	switch {
+	case listID != nil && segmentID != nil:
+		_ = c.AbortBadRequest("set either list_id or segment_id, not both")
+		return nil, nil, errCampaignAudienceRejected
+	case listID == nil && segmentID == nil:
+		_ = c.AbortBadRequest("an audience is required: set list_id or segment_id")
+		return nil, nil, errCampaignAudienceRejected
+	case segmentID != nil:
+		segment, err := h.segmentRepo.FindByID(*segmentID)
+		if err != nil || !ownsResource(c, segment.UserID, segment.WorkspaceID) {
+			_ = c.AbortNotFound("segment not found")
+			return nil, nil, errCampaignAudienceRejected
+		}
+		return nil, segmentID, nil
+	default:
+		list, err := h.listRepo.FindByID(*listID)
+		if err != nil || !ownsResource(c, list.UserID, list.WorkspaceID) {
+			_ = c.AbortNotFound("subscriber list not found")
+			return nil, nil, errCampaignAudienceRejected
+		}
+		return listID, nil, nil
+	}
+}
+
+// derefCampaignUint maps an optional list id to the column's zero-value.
+func derefCampaignUint(p *uint) uint {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 // warnSenderDeliverable logs (but does not block) when the sender domain is
@@ -528,7 +598,7 @@ func (h *CampaignHandler) snapshotFor(campaign *models.Campaign) models.Template
 	if stats == nil {
 		return nil
 	}
-	return models.TemplateData{
+	snapshot := models.TemplateData{
 		"total":       stats.Total,
 		"pending":     stats.Pending,
 		"queued":      stats.Queued,
@@ -540,6 +610,10 @@ func (h *CampaignHandler) snapshotFor(campaign *models.Campaign) models.Template
 		"list_id":     campaign.ListID,
 		"template_id": campaign.TemplateID,
 	}
+	if campaign.SegmentID != nil {
+		snapshot["segment_id"] = *campaign.SegmentID
+	}
+	return snapshot
 }
 
 // cloneTemplateData is a shallow copy at the top level; campaign template data

@@ -1816,3 +1816,68 @@ export interface AutomationEventResponse {
   /** Why the event did not enroll: unknown_subscriber, trigger_unavailable or enroll_failed. */
   reason?: string
 }
+
+// ─── Segments ───────────────────────────────────────────────────────────────
+
+/** How sibling nodes are combined: groups by condition.logic, rules by group.logic. */
+export type SegmentLogic = 'and' | 'or'
+
+/** One condition row. `value` is always a string (multi-values comma-separated). */
+export interface SegmentRule {
+  field: string
+  operator: string
+  value: string
+}
+
+export interface SegmentRuleGroup {
+  logic: SegmentLogic
+  rules: SegmentRule[]
+}
+
+export interface SegmentCondition {
+  logic: SegmentLogic
+  groups: SegmentRuleGroup[]
+}
+
+export interface Segment {
+  id: number
+  user_id: number
+  workspace_id: number
+  name: string
+  description: string
+  condition: SegmentCondition
+  created_at: string
+  updated_at: string
+}
+
+/** List rows carry the live subscriber count next to the saved segment. */
+export interface SegmentRow extends Segment {
+  matching_count: number
+}
+
+export interface SegmentInput {
+  name: string
+  description?: string
+  condition: SegmentCondition
+}
+
+/** One sampled subscriber row of a preview / saved-segment contacts response. */
+export interface SegmentPreviewContact {
+  id: number
+  email: string
+  name: string
+  status: string
+  timezone: string
+  language: string
+  created_at: string
+  subscribed_at: string
+}
+
+/** POST /segments/preview and GET /segments/{id}/contacts payload. */
+export interface SegmentPreview {
+  count: number
+  page: number
+  size: number
+  total_pages: number
+  contacts: SegmentPreviewContact[]
+}
