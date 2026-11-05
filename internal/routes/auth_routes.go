@@ -183,7 +183,7 @@ func (r *Router) apiAuthRoutes() []okapi.RouteDefinition {
 	// Webhook management routes require the `webhooks` scope.
 	apiWebhooks := r.v1.Group("", r.mw.apiKey, middlewares.RequireScope(models.ScopeWebhooks)).
 		WithTagInfo(okapi.GroupTag{
-			Name:        "Webhooks",
+			Name:        tagWebhooks,
 			Description: "Create, list, and delete webhooks. Authenticated with an API key holding the `webhooks` scope.",
 		}).
 		WithSecurity(apiKeySec)

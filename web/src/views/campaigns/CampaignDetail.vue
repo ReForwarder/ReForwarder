@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { campaignsApi } from '../../api/campaigns'
-import type { Campaign, CampaignMessage, CampaignMessageStatus, CampaignAnalyticsData, Pageable } from '../../api/types'
+import type { Campaign, CampaignABTestStats, CampaignMessage, CampaignMessageStatus, CampaignTimezones, CampaignAnalyticsData, Pageable } from '../../api/types'
 import { useNotificationStore } from '../../stores/notification'
 import { useConfirm } from '../../composables/useConfirm'
 import { useWorkspaceStore } from '../../stores/workspace'
@@ -27,6 +27,10 @@ const activeTab = ref<'messages' | 'analytics'>('messages')
 const analyticsData = ref<CampaignAnalyticsData | null>(null)
 const analyticsLoading = ref(false)
 
+// R-08: A/B winner state + per-variant stats; R-09: timezone distribution.
+const abStats = ref<CampaignABTestStats | null>(null)
+const timezoneStats = ref<CampaignTimezones | null>(null)
+
 const canSend = computed(() => campaign.value?.status === 'draft')
 const canPause = computed(() => campaign.value?.status === 'sending')
 const canResume = computed(() => campaign.value?.status === 'paused')
@@ -39,11 +43,35 @@ async function loadCampaign() {
   try {
     const res = await campaignsApi.get(campaignId)
     campaign.value = res.data.data
+    // Side loads are best-effort: A/B stats only matter for A/B campaigns, and
+    // the timezone distribution renders nothing when there are no recipients.
+    if (campaign.value?.ab_test_enabled) loadABTest()
+    loadTimezones()
   } catch {
     notify.error('Failed to load campaign')
     router.push('/campaigns')
   } finally {
     loading.value = false
+  }
+}
+
+// R-08: per-variant engagement + the winner decision.
+async function loadABTest() {
+  try {
+    const res = await campaignsApi.abTest(campaignId)
+    abStats.value = res.data.data
+  } catch {
+    abStats.value = null
+  }
+}
+
+// R-09: subscriber timezone distribution + timezone-aware sending config.
+async function loadTimezones() {
+  try {
+    const res = await campaignsApi.timezones(campaignId)
+    timezoneStats.value = res.data.data
+  } catch {
+    timezoneStats.value = null
   }
 }
 
@@ -192,6 +220,18 @@ function formatRate(value: number): string {
   return value.toFixed(1) + '%'
 }
 
+// R-09 display helpers: the local send window and a friendly timezone label
+// (empty values are the documented server-local fallback).
+function formatLocalSendHour(hour?: number | null): string {
+  if (hour === null || hour === undefined) return 'Immediate (no local-time window)'
+  return `At ${String(hour).padStart(2, '0')}:00 subscriber local time`
+}
+
+function timezoneLabel(tz: string): string {
+  if (!tz || !tz.trim()) return 'Server default'
+  return tz
+}
+
 function maxSeriesCount(series: Array<{ time: string; count: number }>): number {
   if (series.length === 0) return 1
   return Math.max(...series.map(p => p.count), 1)
@@ -268,6 +308,82 @@ onMounted(async () => {
             <div style="font-size: 0.85em; color: var(--text-secondary);">Scheduled</div>
             <div>{{ formatDate(campaign.scheduled_at) }}</div>
           </div>
+          <div v-if="campaign.send_at_local_time">
+            <div style="font-size: 0.85em; color: var(--text-secondary);">Timezone-aware</div>
+            <div>{{ formatLocalSendHour(campaign.local_send_hour) }}</div>
+          </div>
+          <div v-if="campaign.ab_test_enabled">
+            <div style="font-size: 0.85em; color: var(--text-secondary);">A/B Test</div>
+            <div v-if="campaign.ab_test_winner_sent" style="margin-top: 4px;">
+              <span class="badge badge-success">Winner: {{ campaign.ab_test_winner }}</span>
+            </div>
+            <div v-else style="margin-top: 4px;">
+              <span class="badge badge-warning">Testing{{ campaign.ab_test_metric === 'click_rate' ? ' (click rate)' : ' (open rate)' }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- R-08: A/B per-variant stats + winner decision -->
+      <div v-if="abStats" class="card" style="margin-bottom: 24px;">
+        <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px;">
+          <h3 style="margin: 0;">A/B Test</h3>
+          <span v-if="abStats.winner_sent" class="badge badge-success">Winner: {{ abStats.winner }}</span>
+          <span v-else class="badge badge-warning">Test in progress</span>
+        </div>
+        <p class="form-hint" style="margin-bottom: 12px;">
+          Winner by {{ abStats.metric === 'click_rate' ? 'click rate' : 'open rate' }} after a
+          {{ abStats.window_hours }}h window (min. {{ abStats.min_sample }} delivered per variant).
+          <template v-if="abStats.window_ends_at && !abStats.winner_sent">
+            Window closes {{ formatDate(abStats.window_ends_at) }}.
+          </template>
+        </p>
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th>Variant</th>
+                <th style="text-align: right;">Delivered</th>
+                <th style="text-align: right;">Opens</th>
+                <th style="text-align: right;">Open Rate</th>
+                <th style="text-align: right;">Clicks</th>
+                <th style="text-align: right;">Click Rate</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="v in abStats.variants" :key="v.variant" :class="{ 'ab-winner-row': v.winner }">
+                <td style="font-weight: 600;">{{ v.variant }}</td>
+                <td style="text-align: right; font-variant-numeric: tabular-nums;">{{ v.sent }}</td>
+                <td style="text-align: right; font-variant-numeric: tabular-nums;">{{ v.opened }}</td>
+                <td style="text-align: right; font-variant-numeric: tabular-nums;">{{ formatRate(v.open_rate) }}</td>
+                <td style="text-align: right; font-variant-numeric: tabular-nums;">{{ v.clicked }}</td>
+                <td style="text-align: right; font-variant-numeric: tabular-nums;">{{ formatRate(v.click_rate) }}</td>
+                <td>
+                  <span v-if="v.winner" class="badge badge-success">Winner</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- R-09: subscriber timezone distribution -->
+      <div v-if="timezoneStats && timezoneStats.timezones.length > 0" class="card" style="margin-bottom: 24px;">
+        <h3 style="margin-bottom: 4px;">Subscriber Timezones</h3>
+        <p class="form-hint" style="margin-bottom: 12px;">
+          <template v-if="timezoneStats.send_at_local_time">
+            Timezone-aware sending is on — {{ formatLocalSendHour(timezoneStats.local_send_hour) }}. Recipients
+            outside the window wait for the next opening in their own timezone.
+          </template>
+          <template v-else>
+            Timezone-aware sending is off; delivery ignores subscriber local time.
+          </template>
+        </p>
+        <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+          <span v-for="tz in timezoneStats.timezones" :key="tz.timezone" class="badge badge-neutral">
+            {{ timezoneLabel(tz.timezone) }}: {{ tz.count }}
+          </span>
         </div>
       </div>
 
@@ -513,3 +629,16 @@ onMounted(async () => {
     </template>
   </div>
 </template>
+
+<style scoped>
+/* The winning variant row gets a subtle success tint. */
+.ab-winner-row {
+  background: color-mix(in srgb, var(--success-600, #16a34a) 8%, transparent);
+}
+
+/* Timezone counts are machine codes — mono badges. */
+.badge-neutral {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+</style>

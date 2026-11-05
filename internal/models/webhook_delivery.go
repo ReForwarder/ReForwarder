@@ -40,7 +40,12 @@ type WebhookDelivery struct {
 	HTTPStatusCode int                   `json:"http_status_code"`
 	ErrorMessage   string                `json:"error_message,omitempty"`
 	Attempt        int                   `json:"attempt" gorm:"not null;default:1"`
-	CreatedAt      time.Time             `json:"created_at"`
+	// Payload is the exact outbound JSON body the delivery was sent with (R-06
+	// replay). It is write-once at delivery time and is never exposed in API
+	// responses; deliveries recorded before payload persistence carry an empty
+	// payload and cannot be replayed.
+	Payload   string    `json:"-" gorm:"type:text"`
+	CreatedAt time.Time `json:"created_at"`
 
 	Webhook Webhook `json:"-" gorm:"foreignKey:WebhookID"`
 	User    User    `json:"-" gorm:"foreignKey:UserID"`

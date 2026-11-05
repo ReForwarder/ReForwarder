@@ -4,9 +4,17 @@ import { webhookDeliveriesApi } from '../../api/webhooks'
 import type { WebhookDelivery } from '../../api/types'
 import Pagination from '../../components/Pagination.vue'
 import { usePagination } from '../../composables/usePagination'
+import { useConfirm } from '../../composables/useConfirm'
+import { useNotificationStore } from '../../stores/notification'
+import { useWorkspaceStore } from '../../stores/workspace'
 
 const loading = ref(true)
 const deliveries = ref<WebhookDelivery[]>([])
+const replayingId = ref<number | null>(null)
+
+const notify = useNotificationStore()
+const wsStore = useWorkspaceStore()
+const { confirm } = useConfirm()
 
 const { pageable, goToPage } = usePagination(async (page) => {
   loading.value = true
@@ -27,6 +35,34 @@ function statusBadgeClass(status: string) {
 
 function formatDate(date: string) {
   return new Date(date).toLocaleString()
+}
+
+// R-06: re-deliver a failed delivery with its original payload after an
+// explicit confirmation. Only failed deliveries offer the action, and the
+// backend caps replays at 5 per delivery per hour.
+async function replayDelivery(d: WebhookDelivery) {
+  const confirmed = await confirm({
+    title: 'Replay Webhook Delivery',
+    message: `Re-deliver the "${d.event}" delivery to the webhook's endpoint with the original payload? The attempt is recorded in this delivery's history.`,
+    confirmText: 'Replay',
+    variant: 'info',
+  })
+  if (!confirmed) return
+  replayingId.value = d.id
+  try {
+    const res = await webhookDeliveriesApi.replay(d.id)
+    const outcome = res.data.data
+    if (outcome?.status === 'success') {
+      notify.success(`Replay delivered (HTTP ${outcome.http_status_code})`)
+    } else {
+      notify.error(`Replay failed (HTTP ${outcome?.http_status_code || '-'}): ${outcome?.error_message || 'the endpoint rejected the delivery'}`)
+    }
+    await goToPage(pageable.value.current_page)
+  } catch (e: any) {
+    notify.error(e?.response?.data?.error?.message || 'Failed to replay delivery')
+  } finally {
+    replayingId.value = null
+  }
 }
 </script>
 
@@ -56,6 +92,7 @@ function formatDate(date: string) {
                 <th>Attempt</th>
                 <th>Error</th>
                 <th>Delivered At</th>
+                <th v-if="wsStore.canEdit">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -66,6 +103,17 @@ function formatDate(date: string) {
                 <td>{{ d.attempt }}</td>
                 <td class="truncate" style="max-width: 280px;">{{ d.error_message || '-' }}</td>
                 <td>{{ formatDate(d.created_at) }}</td>
+                <td v-if="wsStore.canEdit">
+                  <button
+                    v-if="d.status === 'failed'"
+                    class="btn btn-secondary btn-sm"
+                    :disabled="replayingId === d.id"
+                    @click="replayDelivery(d)"
+                  >
+                    {{ replayingId === d.id ? 'Replaying...' : 'Replay' }}
+                  </button>
+                  <span v-else style="color: var(--text-secondary);">-</span>
+                </td>
               </tr>
             </tbody>
           </table>

@@ -346,6 +346,30 @@ func (s *cwState) evalWhere(table, compact string, args []driver.NamedValue) ([]
 		case strings.HasSuffix(cond, " is null"):
 			idx := s.colIndex(table, cwColumnOf(strings.TrimSuffix(cond, " is null")))
 			preds = append(preds, func(row []driver.Value) bool { return row[idx] == nil })
+		case strings.Contains(cond, " in "):
+			// GORM preloads render `id IN ($1,$2,...)` — the R-08/R-09 tests
+			// exercise queries that preload subscribers.
+			ci := s.colIndex(table, cwColumnOf(cond[:strings.Index(cond, " in ")]))
+			rest := strings.TrimSpace(cond[strings.Index(cond, " in ")+len(" in "):])
+			if strings.HasPrefix(rest, "(") && strings.HasSuffix(rest, ")") {
+				rest = strings.TrimSpace(rest[1 : len(rest)-1])
+			}
+			var vals []driver.Value
+			for _, tok := range strings.Split(rest, ",") {
+				n, err := cwBindToken(tok)
+				if err != nil {
+					return nil, fmt.Errorf("cwState: bad IN list in %q: %w", cond, err)
+				}
+				vals = append(vals, cwArg(args, n))
+			}
+			preds = append(preds, func(row []driver.Value) bool {
+				for _, v := range vals {
+					if cwEqual(row[ci], v) {
+						return true
+					}
+				}
+				return false
+			})
 		default:
 			eq := strings.Index(cond, " = ")
 			if eq < 0 {
@@ -519,17 +543,30 @@ func (s *cwState) handleInsert(query string, args []driver.NamedValue) (driver.R
 	}
 	valText := query[vi+len(" values "):]
 	end := strings.LastIndex(valText, ")")
-	valParts := strings.Split(valText[1:end], ",")
-	if len(valParts) != len(cols) {
-		return nil, fmt.Errorf("cwState: %d columns but %d values", len(cols), len(valParts))
+	if end < 0 {
+		return nil, fmt.Errorf("cwState: insert without a closing paren: %s", query)
 	}
-	vals := make([]driver.Value, len(valParts))
-	for i, p := range valParts {
-		n, err := strconv.Atoi(strings.TrimSpace(p)[1:])
-		if err != nil {
-			return nil, err
+	// Multi-row inserts (CreateInBatches) render one tuple per row; split the
+	// top-level tuples so batched campaign-message creation lands row by row.
+	tuples := strings.Split(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(valText[:end+1]), "("), ")"), "),(")
+	if len(tuples) == 0 {
+		return nil, fmt.Errorf("cwState: insert without values: %s", query)
+	}
+	inserted := make([][]driver.Value, 0, len(tuples))
+	for _, tuple := range tuples {
+		valParts := strings.Split(tuple, ",")
+		if len(valParts) != len(cols) {
+			return nil, fmt.Errorf("cwState: %d columns but %d values", len(cols), len(valParts))
 		}
-		vals[i] = cwArg(args, n)
+		vals := make([]driver.Value, len(valParts))
+		for i, p := range valParts {
+			n, err := strconv.Atoi(strings.TrimSpace(p)[1:])
+			if err != nil {
+				return nil, err
+			}
+			vals[i] = cwArg(args, n)
+		}
+		inserted = append(inserted, vals)
 	}
 
 	var returning []string
@@ -542,23 +579,27 @@ func (s *cwState) handleInsert(query string, args []driver.NamedValue) (driver.R
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	spec := cwColumns[table]
-	row := make([]driver.Value, len(spec))
-	for i, col := range spec {
-		row[i] = nil
-		if def, ok := cwDefaults[table][col]; ok {
-			row[i] = def()
+	var lastRow []driver.Value
+	for _, vals := range inserted {
+		row := make([]driver.Value, len(spec))
+		for i, col := range spec {
+			row[i] = nil
+			if def, ok := cwDefaults[table][col]; ok {
+				row[i] = def()
+			}
 		}
+		for j, col := range cols {
+			row[s.colIndex(table, col)] = vals[j]
+		}
+		s.seq++
+		row[s.colIndex(table, "id")] = s.seq
+		s.tables[table].rows = append(s.tables[table].rows, row)
+		lastRow = row
 	}
-	for j, col := range cols {
-		row[s.colIndex(table, col)] = vals[j]
-	}
-	s.seq++
-	row[s.colIndex(table, "id")] = s.seq
-	s.tables[table].rows = append(s.tables[table].rows, row)
 
 	out := make([]driver.Value, len(returning))
 	for i, c := range returning {
-		out[i] = row[s.colIndex(table, c)]
+		out[i] = lastRow[s.colIndex(table, c)]
 	}
 	return &cwRows{cols: returning, rows: [][]driver.Value{out}}, nil
 }
