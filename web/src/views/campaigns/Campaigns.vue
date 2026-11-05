@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { campaignsApi } from '../../api/campaigns'
 import { subscriberListsApi } from '../../api/subscriberLists'
 import { segmentsApi } from '../../api/segments'
-import type { Campaign, CampaignStatus, Pageable, SegmentRow, SubscriberListItem } from '../../api/types'
+import type { Campaign, CampaignABTestMetric, CampaignABTestVariant, CampaignStatus, Pageable, SegmentRow, SubscriberListItem } from '../../api/types'
 import SearchableSelect from '../../components/SearchableSelect.vue'
 import { useNotificationStore } from '../../stores/notification'
 import { useConfirm } from '../../composables/useConfirm'
@@ -43,7 +43,30 @@ const formListId = ref<number | null>(null)
 const formSendRate = ref(0)
 // Optional schedule: empty = send immediately (the pre-scheduler behavior).
 const formScheduledAt = ref('')
+// R-09: timezone-aware sending. Hour '' = no window (send immediately).
+const formSendAtLocalTime = ref(false)
+const formLocalSendHour = ref<string>('')
+// R-08: A/B test configuration.
+const formABTestEnabled = ref(false)
+const formABVariants = ref<CampaignABTestVariant[]>([])
+const formABMetric = ref<CampaignABTestMetric>('open_rate')
+const formABWindowHours = ref(24)
+const formABMinSample = ref(50)
 const saving = ref(false)
+
+const sendHourOptions = Array.from({ length: 24 }, (_, h) => ({ value: String(h), label: `${String(h).padStart(2, '0')}:00` }))
+
+// defaultABVariants: a 20/20 test group — the remaining 60% receives the
+// winner's content after the test window (R-08 hold-back model).
+function defaultABVariants(): CampaignABTestVariant[] {
+  return [
+    { name: 'A', subject: '', split_percentage: 20 },
+    { name: 'B', subject: '', split_percentage: 20 },
+  ]
+}
+
+// abTestSplitTotal drives the "X% test group / Y% held" hint under the splits.
+const abTestSplitTotal = computed(() => formABVariants.value.reduce((sum, v) => sum + (Number(v.split_percentage) || 0), 0))
 
 // Audience: subscriber list XOR segment — the payload carries exactly one.
 const audienceMode = ref<'list' | 'segment'>('list')
@@ -131,6 +154,13 @@ function openCreate() {
   formListId.value = null
   formSendRate.value = 0
   formScheduledAt.value = ''
+  formSendAtLocalTime.value = false
+  formLocalSendHour.value = ''
+  formABTestEnabled.value = false
+  formABVariants.value = defaultABVariants()
+  formABMetric.value = 'open_rate'
+  formABWindowHours.value = 24
+  formABMinSample.value = 50
   audienceMode.value = 'list'
   formSegmentId.value = ''
   segmentCount.value = null
@@ -144,6 +174,20 @@ async function saveCampaign() {
     notify.error('Please fill in all required fields')
     return
   }
+  // A/B validation mirrors the backend: every variant needs a name and a
+  // positive split, and the splits must not exceed 100%.
+  if (formABTestEnabled.value) {
+    for (const v of formABVariants.value) {
+      if (!v.name.trim() || v.split_percentage <= 0) {
+        notify.error('Each A/B variant needs a name and a positive split percentage')
+        return
+      }
+    }
+    if (abTestSplitTotal.value > 100) {
+      notify.error('A/B variant splits must sum to at most 100%')
+      return
+    }
+  }
   saving.value = true
   try {
     await campaignsApi.create({
@@ -156,6 +200,25 @@ async function saveCampaign() {
         ? { list_id: formListId.value! }
         : { segment_id: Number(formSegmentId.value) }),
       send_rate: formSendRate.value,
+      // R-09: timezone-aware sending. An empty hour means no window.
+      send_at_local_time: formSendAtLocalTime.value,
+      ...(formSendAtLocalTime.value && formLocalSendHour.value !== ''
+        ? { local_send_hour: Number(formLocalSendHour.value) }
+        : {}),
+      // R-08: A/B test.
+      ...(formABTestEnabled.value
+        ? {
+            ab_test_enabled: true,
+            ab_test_variants: formABVariants.value.map((v) => ({
+              name: v.name.trim(),
+              subject: v.subject.trim(),
+              split_percentage: Number(v.split_percentage),
+            })),
+            ab_test_metric: formABMetric.value,
+            ab_test_window_hours: formABWindowHours.value,
+            ab_test_min_sample: formABMinSample.value,
+          }
+        : {}),
       // datetime-local has no timezone; send RFC3339 so the backend can parse
       // it. Empty = send immediately.
       ...(formScheduledAt.value ? { scheduled_at: new Date(formScheduledAt.value).toISOString() } : {}),
@@ -370,6 +433,64 @@ const { watchClickStart, confirmClickEnd } = useModalSafeClose(() => {
               immediately. The scheduler fires due campaigns every minute.
             </p>
           </div>
+          <div class="form-group">
+            <label class="form-label">Timezone-aware sending</label>
+            <label class="audience-option">
+              <input v-model="formSendAtLocalTime" type="checkbox" />
+              <span>Send at each subscriber's local time</span>
+            </label>
+            <template v-if="formSendAtLocalTime">
+              <select v-model="formLocalSendHour" class="form-select" style="margin-top: 8px;">
+                <option value="">No local-time window — send immediately</option>
+                <option v-for="h in sendHourOptions" :key="h.value" :value="h.value">{{ h.label }}</option>
+              </select>
+              <p class="form-hint">
+                Recipients whose local clock is outside the selected hour wait for the next window
+                opening in their own timezone (DST-safe). Subscribers without a valid timezone follow
+                the server's clock.
+              </p>
+            </template>
+          </div>
+          <div class="form-group">
+            <label class="form-label">A/B test</label>
+            <label class="audience-option">
+              <input v-model="formABTestEnabled" type="checkbox" />
+              <span>Test subject variants, then send the winner to the rest</span>
+            </label>
+            <template v-if="formABTestEnabled">
+              <div v-for="(variant, idx) in formABVariants" :key="idx" class="ab-variant-row">
+                <input v-model="variant.name" class="form-input ab-variant-name" placeholder="Variant name" />
+                <input v-model="variant.subject" class="form-input" placeholder="Subject override (optional)" />
+                <input v-model.number="variant.split_percentage" type="number" class="form-input ab-variant-split" min="1" max="100" />
+              </div>
+              <p class="form-hint" :class="{ 'ab-split-over': abTestSplitTotal > 100 }">
+                Splits are shares of all recipients: {{ abTestSplitTotal }}% test group,
+                {{ Math.max(0, 100 - abTestSplitTotal) }}% receives the winner after the test.
+              </p>
+              <div class="ab-config-grid">
+                <div>
+                  <label class="form-label">Winner metric</label>
+                  <select v-model="formABMetric" class="form-select">
+                    <option value="open_rate">Open rate</option>
+                    <option value="click_rate">Click rate</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="form-label">Test window (hours)</label>
+                  <input v-model.number="formABWindowHours" type="number" class="form-input" min="1" max="8760" />
+                </div>
+                <div>
+                  <label class="form-label">Min. sample / variant</label>
+                  <input v-model.number="formABMinSample" type="number" class="form-input" min="1" />
+                </div>
+              </div>
+              <p class="form-hint">
+                After the window the variant with the highest {{ formABMetric === 'click_rate' ? 'click' : 'open' }} rate wins
+                (ties: higher open rate, then variant order) and the held recipients are mailed once.
+                Variants under {{ formABMinSample }} delivered messages postpone the decision.
+              </p>
+            </template>
+          </div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" @click="showModal = false">Cancel</button>
@@ -418,5 +539,28 @@ const { watchClickStart, confirmClickEnd } = useModalSafeClose(() => {
 
 .audience-option input {
   cursor: pointer;
+}
+
+/* A/B variant rows: name + subject override + split side by side. */
+.ab-variant-row {
+  display: grid;
+  grid-template-columns: 120px 1fr 110px;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.ab-variant-split {
+  text-align: right;
+}
+
+.ab-split-over {
+  color: var(--danger-600, #c0392b);
+}
+
+.ab-config-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-top: 12px;
 }
 </style>

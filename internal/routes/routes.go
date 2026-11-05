@@ -43,6 +43,7 @@ import (
 	"github.com/goposta/posta/internal/services/notification"
 	"github.com/goposta/posta/internal/services/passwordreset"
 	planpkg "github.com/goposta/posta/internal/services/plan"
+	"github.com/goposta/posta/internal/services/provider_events"
 	"github.com/goposta/posta/internal/services/ratelimit"
 	"github.com/goposta/posta/internal/services/realtime"
 	"github.com/goposta/posta/internal/services/security"
@@ -111,6 +112,7 @@ type routerHandlers struct {
 	smtp             *handlers.SMTPHandler
 	webhook          *handlers.WebhookHandler
 	webhookDelivery  *handlers.WebhookDeliveryHandler
+	webhookReplay    *handlers.WebhookReplayHandler
 	dashboard        *handlers.DashboardHandler
 	domain           *handlers.DomainHandler
 	domainSigning    *handlers.DomainSigningHandler
@@ -142,6 +144,7 @@ type routerHandlers struct {
 	campaign         *handlers.CampaignHandler
 	tracking         *handlers.TrackingHandler
 	bounceWebhook    *handlers.BounceWebhookHandler
+	providerEvent    *handlers.ProviderEventHandler
 	workspaceData    *handlers.WorkspaceDataHandler
 	plan             *handlers.PlanHandler
 	inbound          *handlers.InboundHandler
@@ -312,6 +315,7 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 			smtp:             handlers.NewSMTPHandler(smtpRepo, domainRepo, auditLogger),
 			webhook:          handlers.NewWebhookHandler(webhookRepo, auditLogger),
 			webhookDelivery:  handlers.NewWebhookDeliveryHandler(webhookDeliveryRepo),
+			webhookReplay:    handlers.NewWebhookReplayHandler(webhookDeliveryRepo, repositories.NewWebhookDeliveryAttemptRepository(db), webhookRepo, dispatcher, auditLogger),
 			dashboard:        handlers.NewDashboardHandler(db, statsCache, webhookDeliveryRepo),
 			domain:           handlers.NewDomainHandler(domainRepo),
 			domainSigning:    handlers.NewDomainSigningHandler(repositories.NewDomainSigningKeyRepository(db), domainRepo, auditLogger),
@@ -470,6 +474,26 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	// Bounce webhook
 	r.h.bounceWebhook = handlers.NewBounceWebhookHandler(subscriberRepo, emailRepo, campaignMessageRepo)
 	r.h.bounceWebhook.SetRecorder(logsRecorder)
+
+	// Provider event ingestion (R-04): one service + handler beside the
+	// bounce webhook. Per-provider signing secrets come from POSTA_PROVIDER_*
+	// env (documented choice over workspace_settings — see the package doc);
+	// a provider without a configured secret answers 501.
+	providerEventSvc := provider_events.NewIngestionService(emailRepo, logsRecorder)
+	providerEventSvc.SetDB(db)
+	providerEventSvc.SetSubscriberRepo(subscriberRepo)
+	providerEventSvc.SetSuppressionRepo(suppressionRepo)
+	providerEventSvc.SetBounceRepo(bounceRepo)
+	providerEventSvc.SetCampaignMessageRepo(campaignMessageRepo)
+	providerEventSvc.SetIncomingWebhookRepo(repositories.NewIncomingWebhookEventRepository(db))
+	providerEventSvc.SetAutoSuppress(cfg.AutoSuppressOnReject)
+	r.h.providerEvent = handlers.NewProviderEventHandler(providerEventSvc)
+	r.h.providerEvent.SetProviderSecrets(map[string]provider_events.ProviderConfig{
+		"ses":      {Secret: cfg.ProviderSESSecret},
+		"sendgrid": {Secret: cfg.ProviderSendGridKey},
+		"postmark": {Secret: cfg.ProviderPostmarkSecret},
+		"mailgun":  {Secret: cfg.ProviderMailgunKey},
+	})
 
 	// Logs (message history, webhook stores, audit)
 	r.h.logs = handlers.NewLogsHandler(db, logsRecorder, settingsProvider)
@@ -677,6 +701,7 @@ func (r *Router) registerRoutes() {
 	r.app.Register(r.trackingRoutes()...)
 	r.app.Register(r.trackingAnalyticsRoutes()...)
 	r.app.Register(r.bounceWebhookRoutes()...)
+	r.app.Register(r.providerWebhookRoutes()...)
 	if r.cfg.InboundEnabled && r.h.inbound != nil {
 		r.app.Register(r.inboundWebhookRoutes()...)
 		r.app.Register(r.inboundWorkspaceRoutes()...)

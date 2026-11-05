@@ -38,6 +38,24 @@ const (
 	CampaignStatusCancelled CampaignStatus = "cancelled"
 )
 
+// A/B winner-selection metrics (R-08).
+const (
+	ABTestMetricOpenRate  = "open_rate"
+	ABTestMetricClickRate = "click_rate"
+)
+
+// ABVariantStat is the per-variant engagement snapshot the A/B winner
+// selection (and the campaign detail's per-variant table) is built from.
+// Counts come from campaign_messages: a variant's sample is its delivered
+// (status=sent) message count, and opens/clicks are the denormalized
+// first-open/first-click timestamps maintained by the tracking handlers.
+type ABVariantStat struct {
+	Variant string `json:"variant" gorm:"column:variant"`
+	Sent    int64  `json:"sent" gorm:"column:sent"`
+	Opened  int64  `json:"opened" gorm:"column:opened"`
+	Clicked int64  `json:"clicked" gorm:"column:clicked"`
+}
+
 // TemplateData is a JSON map for template variable substitution.
 type TemplateData map[string]interface{}
 
@@ -80,18 +98,30 @@ type Campaign struct {
 	ListID            uint           `json:"list_id" gorm:"index;not null"`
 	// SegmentID targets a saved audience filter instead of a subscriber list.
 	// Exactly one of ListID/SegmentID is set (enforced by the campaign handler).
-	SegmentID       *uint          `json:"segment_id,omitempty" gorm:"index"`
-	SendRate        int            `json:"send_rate" gorm:"default:0"`
-	SendAtLocalTime bool           `json:"send_at_local_time" gorm:"default:false"`
-	ABTestEnabled   bool           `json:"ab_test_enabled" gorm:"default:false"`
-	ABTestVariants  ABTestVariants `json:"ab_test_variants,omitempty" gorm:"type:text"`
-	ABTestWinner    string         `json:"ab_test_winner,omitempty"`
-	ScheduledAt     *time.Time     `json:"scheduled_at,omitempty"`
-	StartedAt       *time.Time     `json:"started_at,omitempty"`
-	CompletedAt     *time.Time     `json:"completed_at,omitempty"`
-	CreatedAt       time.Time      `json:"created_at"`
-	UpdatedAt       *time.Time     `json:"updated_at,omitempty"`
-	DeletedAt       gorm.DeletedAt `json:"-" gorm:"index"`
+	SegmentID       *uint `json:"segment_id,omitempty" gorm:"index"`
+	SendRate        int   `json:"send_rate" gorm:"default:0"`
+	SendAtLocalTime bool  `json:"send_at_local_time" gorm:"default:false"`
+	// LocalSendHour is the R-09 send window: when SendAtLocalTime is set and
+	// LocalSendHour points at an hour 0-23, a recipient's batch is deferred
+	// until that wall-clock hour in the recipient's own timezone. nil (or
+	// SendAtLocalTime off) means send immediately regardless of local time.
+	LocalSendHour *int `json:"local_send_hour,omitempty"`
+	// ABTestWinnerStats records the per-variant stats as they stood when the
+	// winner was picked — the durable audit record of the decision (R-08).
+	ABTestEnabled     bool           `json:"ab_test_enabled" gorm:"default:false"`
+	ABTestVariants    ABTestVariants `json:"ab_test_variants,omitempty" gorm:"type:text"`
+	ABTestMetric      string         `json:"ab_test_metric,omitempty" gorm:"size:20;default:'open_rate'"` // open_rate | click_rate
+	ABTestWindowHours int            `json:"ab_test_window_hours,omitempty" gorm:"default:24"`
+	ABTestMinSample   int            `json:"ab_test_min_sample,omitempty" gorm:"default:50"`
+	ABTestWinner      string         `json:"ab_test_winner,omitempty"`
+	ABTestWinnerSent  bool           `json:"ab_test_winner_sent" gorm:"default:false"`
+	ABTestWinnerStats TemplateData   `json:"ab_test_winner_stats,omitempty" gorm:"type:text"`
+	ScheduledAt       *time.Time     `json:"scheduled_at,omitempty"`
+	StartedAt         *time.Time     `json:"started_at,omitempty"`
+	CompletedAt       *time.Time     `json:"completed_at,omitempty"`
+	CreatedAt         time.Time      `json:"created_at"`
+	UpdatedAt         *time.Time     `json:"updated_at,omitempty"`
+	DeletedAt         gorm.DeletedAt `json:"-" gorm:"index"`
 	// Snapshot captures the aggregated stats at soft-delete time so analytics
 	// for past sends survive after CampaignMessage rows are purged.
 	Snapshot TemplateData `json:"snapshot,omitempty" gorm:"type:text"`

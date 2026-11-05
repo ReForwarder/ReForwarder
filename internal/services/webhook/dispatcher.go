@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/mail"
 	"net/url"
@@ -44,10 +45,30 @@ import (
 const (
 	defaultMaxRetries    = 3
 	defaultRetryBaseWait = 2 * time.Second
-	defaultTimeout       = 10 * time.Second
+	// maxRetryWait caps the exponential retry backoff: waits grow as
+	// base * 2^(attempt-1) until they hit this ceiling (R-06 backoff fix).
+	maxRetryWait   = 60 * time.Second
+	defaultTimeout = 10 * time.Second
 	// maxAttemptBodyBytes caps the response body kept per attempt row.
 	maxAttemptBodyBytes = 2048
 )
+
+// retryDelay computes the wait before the retry following attempt `attempt`
+// (1-based): min(base * 2^(attempt-1), maxRetryWait) + jitter(0, base/4).
+// True exponential backoff with a hard cap and jitter — the previous
+// implementation slept base*attempt (linear) under an "exponential" comment.
+// The shift is guarded against overflow: a nonsensically large attempt number
+// degrades to the cap instead of wrapping negative.
+func retryDelay(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	backoff := defaultRetryBaseWait << (attempt - 1)
+	if backoff <= 0 || backoff > maxRetryWait {
+		backoff = maxRetryWait
+	}
+	return backoff + time.Duration(rand.Int63n(int64(defaultRetryBaseWait/4)))
+}
 
 // proxyAckEnforced is the only accepted ProxyAckPolicy value.
 const proxyAckEnforced = "enforced"
@@ -96,7 +117,14 @@ type Dispatcher struct {
 	// because loopback destinations are blocked by policy. That blocking
 	// behavior itself is covered by ssrf_test.go and
 	// TestDeliverPolicyBlockFailsFast.
-	urlPolicy         func(string) error
+	urlPolicy func(string) error
+	// backoffDelay is the retry-wait seam: production uses retryDelay
+	// (exponential with cap and jitter); tests inject a deterministic
+	// function to pin the delay curve without waiting on real time.
+	backoffDelay func(attempt int) time.Duration
+	// sleep pauses between retries; tests replace it to observe the computed
+	// delays instead of actually waiting.
+	sleep             func(time.Duration)
 	onDeliverySuccess func()
 	onDeliveryFailed  func()
 	onDeliveryDone    func(float64) // duration in seconds
@@ -104,9 +132,11 @@ type Dispatcher struct {
 
 func NewDispatcher(repo *repositories.WebhookRepository) *Dispatcher {
 	return &Dispatcher{
-		repo:       repo,
-		maxRetries: defaultMaxRetries,
-		urlPolicy:  ValidateWebhookURL,
+		repo:         repo,
+		maxRetries:   defaultMaxRetries,
+		urlPolicy:    ValidateWebhookURL,
+		backoffDelay: retryDelay,
+		sleep:        time.Sleep,
 		client: &http.Client{
 			Timeout:   defaultTimeout,
 			Transport: NewGuardedTransport(nil),
@@ -363,7 +393,7 @@ func (d *Dispatcher) deliverWithRetry(userID uint, wh models.Webhook, body []byt
 		attempts = append(attempts, recorded)
 
 		if err == nil && statusCode < 400 {
-			delivery := d.recordDelivery(userID, wh.ID, wh.WorkspaceID, event, models.WebhookDeliverySuccess, statusCode, "", attempt)
+			delivery := d.recordDelivery(userID, wh.ID, wh.WorkspaceID, event, models.WebhookDeliverySuccess, statusCode, "", attempt, body)
 			d.recordAttempts(delivery, attempts)
 			if d.onDeliverySuccess != nil {
 				d.onDeliverySuccess()
@@ -382,7 +412,7 @@ func (d *Dispatcher) deliverWithRetry(userID uint, wh models.Webhook, body []byt
 			// The raw reason stays in server logs; what is recorded is the
 			// sanitized message.
 			logger.Warn("webhook destination blocked by security policy", "url", wh.URL, "attempt", attempt, "error", err)
-			d.failDelivery(userID, wh, event, lastStatus, SanitizeDeliveryError(err.Error()), attempt, attempts, start)
+			d.failDelivery(userID, wh, event, lastStatus, SanitizeDeliveryError(err.Error()), attempt, attempts, start, body)
 			return
 		}
 
@@ -395,19 +425,19 @@ func (d *Dispatcher) deliverWithRetry(userID uint, wh models.Webhook, body []byt
 		}
 
 		if attempt < d.maxRetries {
-			time.Sleep(defaultRetryBaseWait * time.Duration(attempt))
+			d.sleep(d.backoffDelay(attempt))
 		}
 	}
 
 	// All retries exhausted
-	d.failDelivery(userID, wh, event, lastStatus, lastErr, d.maxRetries, attempts, start)
+	d.failDelivery(userID, wh, event, lastStatus, lastErr, d.maxRetries, attempts, start, body)
 }
 
 // failDelivery records the final failed delivery together with its buffered
 // attempt rows and fires the failure callbacks. Shared by the exhausted-
 // retries path and the fail-fast policy-block path.
-func (d *Dispatcher) failDelivery(userID uint, wh models.Webhook, event string, httpStatus int, errMsg string, attempt int, attempts []models.WebhookDeliveryAttempt, start time.Time) {
-	delivery := d.recordDelivery(userID, wh.ID, wh.WorkspaceID, event, models.WebhookDeliveryFailed, httpStatus, errMsg, attempt)
+func (d *Dispatcher) failDelivery(userID uint, wh models.Webhook, event string, httpStatus int, errMsg string, attempt int, attempts []models.WebhookDeliveryAttempt, start time.Time, body []byte) {
+	delivery := d.recordDelivery(userID, wh.ID, wh.WorkspaceID, event, models.WebhookDeliveryFailed, httpStatus, errMsg, attempt, body)
 	d.recordAttempts(delivery, attempts)
 	if d.onDeliveryFailed != nil {
 		d.onDeliveryFailed()
@@ -480,8 +510,11 @@ func truncateAttemptBody(r io.Reader) string {
 
 // recordDelivery persists a webhook delivery record if the delivery repo is
 // configured. It returns the stored delivery (nil when recording is disabled
-// or failed) so per-attempt rows can reference it.
-func (d *Dispatcher) recordDelivery(userID, webhookID uint, workspaceID *uint, event string, status models.WebhookDeliveryStatus, httpStatus int, errMsg string, attempt int) *models.WebhookDelivery {
+// or failed) so per-attempt rows can reference it. The outbound payload is
+// stored with the delivery so the R-06 replay endpoint can re-send the exact
+// original body; deliveries recorded before payload persistence carry an
+// empty payload and cannot be replayed.
+func (d *Dispatcher) recordDelivery(userID, webhookID uint, workspaceID *uint, event string, status models.WebhookDeliveryStatus, httpStatus int, errMsg string, attempt int, body []byte) *models.WebhookDelivery {
 	if d.deliveryRepo == nil {
 		return nil
 	}
@@ -494,6 +527,7 @@ func (d *Dispatcher) recordDelivery(userID, webhookID uint, workspaceID *uint, e
 		HTTPStatusCode: httpStatus,
 		ErrorMessage:   errMsg,
 		Attempt:        attempt,
+		Payload:        string(body),
 	}
 	if err := d.deliveryRepo.Create(delivery); err != nil {
 		logger.Error("failed to record webhook delivery", "error", err)
@@ -516,4 +550,87 @@ func (d *Dispatcher) recordAttempts(delivery *models.WebhookDelivery, attempts [
 			logger.Error("failed to record webhook delivery attempt", "error", err, "delivery_id", delivery.ID, "attempt", attempts[i].Attempt)
 		}
 	}
+}
+
+// ReplayResult reports the outcome of one operator-initiated replay attempt.
+type ReplayResult struct {
+	// Attempt is the attempt row's number: prior max + 1, so replay history
+	// continues the original delivery's numbering.
+	Attempt    int
+	StatusCode int
+	Status     models.WebhookDeliveryStatus
+	Error      string
+}
+
+// ReplayDelivery re-sends a previously recorded webhook delivery exactly once
+// through the same guarded post() path as live deliveries (static SSRF gate +
+// guarded transport + proxy pre-flight — no bypass), appends one attempt row
+// referencing the SAME delivery with attempt = prior max + 1, and updates the
+// delivery row's final outcome. The delivery's own Attempt field keeps the
+// original delivery's attempt count: replay rows are the rows numbered above
+// it, which is also how the per-delivery replay rate limit counts them.
+func (d *Dispatcher) ReplayDelivery(wh models.Webhook, delivery *models.WebhookDelivery, body []byte) (*ReplayResult, error) {
+	next := delivery.Attempt + 1
+	if d.attemptRepo != nil {
+		if max, err := d.attemptRepo.MaxAttemptNumber(delivery.ID); err != nil {
+			logger.Warn("replay: could not read prior attempt max, falling back to the delivery's attempt count", "delivery_id", delivery.ID, "error", err)
+		} else if max >= next {
+			next = max + 1
+		}
+	}
+
+	start := time.Now()
+	attemptedAt := time.Now().UTC()
+	statusCode, responseBody, err := d.post(wh.URL, wh.Secret, body)
+
+	result := &ReplayResult{
+		Attempt:    next,
+		StatusCode: statusCode,
+		Status:     models.WebhookDeliveryFailed,
+	}
+	errMsg := ""
+	if err != nil {
+		result.Error = SanitizeDeliveryError(err.Error())
+		errMsg = result.Error
+	} else if statusCode >= 400 {
+		result.Error = fmt.Sprintf("HTTP %d", statusCode)
+		errMsg = result.Error
+	} else {
+		result.Status = models.WebhookDeliverySuccess
+	}
+
+	// The attempt row is the delivery-history record of the replay; error text
+	// is sanitized exactly like live attempts.
+	recorded := models.WebhookDeliveryAttempt{
+		DeliveryID:   delivery.ID,
+		Attempt:      next,
+		StatusCode:   statusCode,
+		ResponseBody: responseBody,
+		CreatedAt:    attemptedAt,
+	}
+	if err != nil {
+		recorded.Error = SanitizeDeliveryError(err.Error())
+	}
+	if d.attemptRepo != nil {
+		if err := d.attemptRepo.Create(&recorded); err != nil {
+			logger.Error("replay: failed to record attempt", "error", err, "delivery_id", delivery.ID, "attempt", next)
+		}
+	}
+	if d.deliveryRepo != nil {
+		if err := d.deliveryRepo.UpdateReplayOutcome(delivery.ID, result.Status, statusCode, errMsg); err != nil {
+			logger.Error("replay: failed to update delivery outcome", "error", err, "delivery_id", delivery.ID)
+		}
+	}
+
+	if result.Status == models.WebhookDeliverySuccess {
+		if d.onDeliverySuccess != nil {
+			d.onDeliverySuccess()
+		}
+	} else if d.onDeliveryFailed != nil {
+		d.onDeliveryFailed()
+	}
+	if d.onDeliveryDone != nil {
+		d.onDeliveryDone(time.Since(start).Seconds())
+	}
+	return result, nil
 }

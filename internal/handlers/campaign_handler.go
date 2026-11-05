@@ -21,6 +21,7 @@ package handlers
 
 import (
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
@@ -75,13 +76,22 @@ type CreateCampaignRequest struct {
 		Language          string                 `json:"language"`
 		TemplateData      map[string]interface{} `json:"template_data"`
 		// Audience: exactly one of list_id / segment_id (XOR).
-		ListID          *uint                  `json:"list_id"`
-		SegmentID       *uint                  `json:"segment_id"`
-		SendRate        int                    `json:"send_rate"`
-		SendAtLocalTime bool                   `json:"send_at_local_time"`
-		ABTestEnabled   bool                   `json:"ab_test_enabled"`
-		ABTestVariants  []models.ABTestVariant `json:"ab_test_variants"`
-		ScheduledAt     *time.Time             `json:"scheduled_at"`
+		ListID          *uint `json:"list_id"`
+		SegmentID       *uint `json:"segment_id"`
+		SendRate        int   `json:"send_rate"`
+		SendAtLocalTime bool  `json:"send_at_local_time"`
+		// LocalSendHour is the R-09 send window: hour 0-23 in each subscriber's
+		// timezone. nil = send immediately regardless of local time.
+		LocalSendHour *int `json:"local_send_hour"`
+		// A/B test (R-08): variants + winner-selection config. Variant split
+		// percentages are shares of the FULL audience and may sum to <= 100 —
+		// the remainder is held back and receives the winner's content.
+		ABTestEnabled     bool                   `json:"ab_test_enabled"`
+		ABTestVariants    []models.ABTestVariant `json:"ab_test_variants"`
+		ABTestMetric      string                 `json:"ab_test_metric"`
+		ABTestWindowHours int                    `json:"ab_test_window_hours"`
+		ABTestMinSample   int                    `json:"ab_test_min_sample"`
+		ScheduledAt       *time.Time             `json:"scheduled_at"`
 	} `json:"body"`
 }
 
@@ -102,9 +112,15 @@ type UpdateCampaignRequest struct {
 		SegmentID       *uint                  `json:"segment_id"`
 		SendRate        *int                   `json:"send_rate"`
 		SendAtLocalTime *bool                  `json:"send_at_local_time"`
+		LocalSendHour   *int                   `json:"local_send_hour"`
 		ABTestEnabled   *bool                  `json:"ab_test_enabled"`
 		ABTestVariants  []models.ABTestVariant `json:"ab_test_variants"`
-		ScheduledAt     *time.Time             `json:"scheduled_at"`
+		ABTestMetric    *string                `json:"ab_test_metric"`
+		// ABTestWindowHours / ABTestMinSample: nil leaves them unchanged; 0
+		// resets to the documented default.
+		ABTestWindowHours *int       `json:"ab_test_window_hours"`
+		ABTestMinSample   *int       `json:"ab_test_min_sample"`
+		ScheduledAt       *time.Time `json:"scheduled_at"`
 	} `json:"body"`
 }
 
@@ -150,19 +166,12 @@ func (h *CampaignHandler) Create(c *okapi.Context, req *CreateCampaignRequest) e
 	}
 
 	if req.Body.ABTestEnabled {
-		if len(req.Body.ABTestVariants) < 2 {
-			return c.AbortBadRequest("A/B test requires at least 2 variants")
+		if err := validateABTestConfig(req.Body.ABTestVariants, req.Body.ABTestMetric, req.Body.ABTestWindowHours, req.Body.ABTestMinSample); err != nil {
+			return c.AbortBadRequest(err.Error())
 		}
-		totalSplit := 0
-		for _, v := range req.Body.ABTestVariants {
-			if v.Name == "" || v.SplitPercentage <= 0 {
-				return c.AbortBadRequest("each variant must have a name and positive split percentage")
-			}
-			totalSplit += v.SplitPercentage
-		}
-		if totalSplit != 100 {
-			return c.AbortBadRequest("variant split percentages must sum to 100")
-		}
+	}
+	if req.Body.LocalSendHour != nil && (*req.Body.LocalSendHour < 0 || *req.Body.LocalSendHour > 23) {
+		return c.AbortBadRequest("local_send_hour must be between 0 and 23")
 	}
 
 	lang := req.Body.Language
@@ -191,10 +200,15 @@ func (h *CampaignHandler) Create(c *okapi.Context, req *CreateCampaignRequest) e
 		SegmentID:         segmentID,
 		SendRate:          req.Body.SendRate,
 		SendAtLocalTime:   req.Body.SendAtLocalTime,
+		LocalSendHour:     req.Body.LocalSendHour,
 		ABTestEnabled:     req.Body.ABTestEnabled,
 		ABTestVariants:    req.Body.ABTestVariants,
+		ABTestMetric:      req.Body.ABTestMetric,
+		ABTestWindowHours: req.Body.ABTestWindowHours,
+		ABTestMinSample:   req.Body.ABTestMinSample,
 		ScheduledAt:       req.Body.ScheduledAt,
 	}
+	normalizeABTestConfig(campaign)
 
 	if err := h.campaignRepo.Create(campaign); err != nil {
 		return c.AbortInternalServerError("failed to create campaign")
@@ -291,15 +305,37 @@ func (h *CampaignHandler) Update(c *okapi.Context, req *UpdateCampaignRequest) e
 	if req.Body.SendAtLocalTime != nil {
 		campaign.SendAtLocalTime = *req.Body.SendAtLocalTime
 	}
+	if req.Body.LocalSendHour != nil {
+		if *req.Body.LocalSendHour < 0 || *req.Body.LocalSendHour > 23 {
+			return c.AbortBadRequest("local_send_hour must be between 0 and 23")
+		}
+		campaign.LocalSendHour = req.Body.LocalSendHour
+	}
 	if req.Body.ABTestEnabled != nil {
 		campaign.ABTestEnabled = *req.Body.ABTestEnabled
 	}
-	if req.Body.ABTestVariants != nil {
-		campaign.ABTestVariants = req.Body.ABTestVariants
+	if req.Body.ABTestVariants != nil || req.Body.ABTestMetric != nil ||
+		req.Body.ABTestWindowHours != nil || req.Body.ABTestMinSample != nil {
+		if req.Body.ABTestVariants != nil {
+			campaign.ABTestVariants = req.Body.ABTestVariants
+		}
+		if req.Body.ABTestMetric != nil {
+			campaign.ABTestMetric = *req.Body.ABTestMetric
+		}
+		if req.Body.ABTestWindowHours != nil {
+			campaign.ABTestWindowHours = *req.Body.ABTestWindowHours
+		}
+		if req.Body.ABTestMinSample != nil {
+			campaign.ABTestMinSample = *req.Body.ABTestMinSample
+		}
+		if err := validateABTestConfig(campaign.ABTestVariants, campaign.ABTestMetric, campaign.ABTestWindowHours, campaign.ABTestMinSample); err != nil {
+			return c.AbortBadRequest(err.Error())
+		}
 	}
 	if req.Body.ScheduledAt != nil {
 		campaign.ScheduledAt = req.Body.ScheduledAt
 	}
+	normalizeABTestConfig(campaign)
 	now := time.Now()
 	campaign.UpdatedAt = &now
 
@@ -489,8 +525,14 @@ func (h *CampaignHandler) Duplicate(c *okapi.Context, req *CampaignActionRequest
 		SegmentID:         campaign.SegmentID,
 		SendRate:          campaign.SendRate,
 		SendAtLocalTime:   campaign.SendAtLocalTime,
+		LocalSendHour:     campaign.LocalSendHour,
 		ABTestEnabled:     campaign.ABTestEnabled,
 		ABTestVariants:    append(models.ABTestVariants(nil), campaign.ABTestVariants...),
+		ABTestMetric:      campaign.ABTestMetric,
+		ABTestWindowHours: campaign.ABTestWindowHours,
+		ABTestMinSample:   campaign.ABTestMinSample,
+		// Winner state is intentionally not copied: the duplicate runs a fresh
+		// test.
 	}
 
 	if err := h.campaignRepo.Create(clone); err != nil {
@@ -516,6 +558,184 @@ func (h *CampaignHandler) ListMessages(c *okapi.Context, req *ListCampaignMessag
 // can't be forgotten at a callsite.
 func (h *CampaignHandler) findScoped(c *okapi.Context, id uint) (*models.Campaign, error) {
 	return h.campaignRepo.FindByIDForScope(id, getScope(c))
+}
+
+// ---------- R-08: A/B winner config, validation and stats ----------
+
+// validateABTestConfig checks the A/B winner-selection config (R-08). Variant
+// split percentages are shares of the FULL audience and may sum to at most
+// 100 — the remainder is held back and receives the winner's content.
+func validateABTestConfig(variants []models.ABTestVariant, metric string, windowHours, minSample int) error {
+	if len(variants) > 0 {
+		total := 0
+		for _, v := range variants {
+			if v.Name == "" || v.SplitPercentage <= 0 {
+				return errors.New("each variant must have a name and positive split percentage")
+			}
+			total += v.SplitPercentage
+		}
+		if total > 100 {
+			return errors.New("variant split percentages must sum to at most 100 — the remainder receives the winner")
+		}
+	}
+	if metric != "" && metric != models.ABTestMetricOpenRate && metric != models.ABTestMetricClickRate {
+		return errors.New("ab_test_metric must be open_rate or click_rate")
+	}
+	if windowHours < 0 || windowHours > 24*365 {
+		return errors.New("ab_test_window_hours must be between 0 and 8760")
+	}
+	if minSample < 0 || minSample > 1_000_000 {
+		return errors.New("ab_test_min_sample must be between 0 and 1000000")
+	}
+	return nil
+}
+
+// normalizeABTestConfig applies the documented defaults (R-08) so a stored A/B
+// campaign never carries zero-valued config: metric open_rate, window 24h,
+// minimum sample 50 per variant.
+func normalizeABTestConfig(campaign *models.Campaign) {
+	if !campaign.ABTestEnabled {
+		return
+	}
+	switch campaign.ABTestMetric {
+	case models.ABTestMetricOpenRate, models.ABTestMetricClickRate:
+	default:
+		campaign.ABTestMetric = models.ABTestMetricOpenRate
+	}
+	if campaign.ABTestWindowHours <= 0 {
+		campaign.ABTestWindowHours = 24
+	}
+	if campaign.ABTestMinSample <= 0 {
+		campaign.ABTestMinSample = 50
+	}
+}
+
+// ABVariantStatView is one variant row of the campaign detail's A/B table.
+type ABVariantStatView struct {
+	Variant   string  `json:"variant"`
+	Sent      int64   `json:"sent"`
+	Opened    int64   `json:"opened"`
+	Clicked   int64   `json:"clicked"`
+	OpenRate  float64 `json:"open_rate"`
+	ClickRate float64 `json:"click_rate"`
+	Winner    bool    `json:"winner"`
+}
+
+// CampaignABTestStats is the A/B winner state for the campaign detail page:
+// the config, the winner decision (with the stats it was made on, when
+// available) and the live per-variant engagement.
+type CampaignABTestStats struct {
+	Enabled      bool                `json:"enabled"`
+	Metric       string              `json:"metric"`
+	WindowHours  int                 `json:"window_hours"`
+	MinSample    int                 `json:"min_sample"`
+	Winner       string              `json:"winner,omitempty"`
+	WinnerSent   bool                `json:"winner_sent"`
+	WindowEndsAt *time.Time          `json:"window_ends_at,omitempty"`
+	Decision     models.TemplateData `json:"decision,omitempty"`
+	Variants     []ABVariantStatView `json:"variants"`
+}
+
+// ABTestStats serves GET /campaigns/{id}/ab-test (R-08).
+func (h *CampaignHandler) ABTestStats(c *okapi.Context, req *CampaignActionRequest) error {
+	campaign, err := h.findScoped(c, uint(req.ID))
+	if err != nil {
+		return c.AbortNotFound("campaign not found")
+	}
+
+	stats := CampaignABTestStats{
+		Enabled:     campaign.ABTestEnabled,
+		Metric:      campaign.ABTestMetric,
+		WindowHours: campaign.ABTestWindowHours,
+		MinSample:   campaign.ABTestMinSample,
+		Winner:      campaign.ABTestWinner,
+		WinnerSent:  campaign.ABTestWinnerSent,
+		Decision:    campaign.ABTestWinnerStats,
+	}
+	if stats.Metric == "" {
+		stats.Metric = models.ABTestMetricOpenRate
+	}
+	if stats.WindowHours <= 0 {
+		stats.WindowHours = 24
+	}
+	if stats.MinSample <= 0 {
+		stats.MinSample = 50
+	}
+
+	if campaign.ABTestEnabled && len(campaign.ABTestVariants) > 0 {
+		started := campaign.StartedAt
+		if started == nil {
+			started = &campaign.CreatedAt
+		}
+		windowEnd := started.Add(time.Duration(stats.WindowHours) * time.Hour)
+		stats.WindowEndsAt = &windowEnd
+
+		variantStats, err := h.messageRepo.ABVariantStats(campaign.ID)
+		if err != nil {
+			return c.AbortInternalServerError("failed to load A/B variant stats")
+		}
+		byName := make(map[string]models.ABVariantStat, len(variantStats))
+		for _, s := range variantStats {
+			byName[s.Variant] = s
+		}
+		stats.Variants = make([]ABVariantStatView, 0, len(campaign.ABTestVariants))
+		for _, v := range campaign.ABTestVariants {
+			s := byName[v.Name]
+			view := ABVariantStatView{Variant: v.Name, Sent: s.Sent, Opened: s.Opened, Clicked: s.Clicked}
+			if s.Sent > 0 {
+				view.OpenRate = float64(s.Opened) / float64(s.Sent) * 100
+				view.ClickRate = float64(s.Clicked) / float64(s.Sent) * 100
+			}
+			view.Winner = campaign.ABTestWinnerSent && campaign.ABTestWinner == v.Name
+			stats.Variants = append(stats.Variants, view)
+		}
+	}
+	return ok(c, stats)
+}
+
+// ---------- R-09: timezone distribution ----------
+
+// CampaignTimezoneCount is one timezone row of the distribution list.
+type CampaignTimezoneCount struct {
+	// Timezone is the raw stored value: an IANA name, empty (server-local
+	// fallback) or anything else the subscriber record carried.
+	Timezone string `json:"timezone"`
+	Count    int64  `json:"count"`
+}
+
+// CampaignTimezones is the campaign detail's timezone-aware sending view (R-09).
+type CampaignTimezones struct {
+	SendAtLocalTime bool                    `json:"send_at_local_time"`
+	LocalSendHour   *int                    `json:"local_send_hour,omitempty"`
+	Timezones       []CampaignTimezoneCount `json:"timezones"`
+}
+
+// Timezones serves GET /campaigns/{id}/timezones (R-09): a simple count list
+// of subscriber timezones plus the campaign's timezone-aware configuration.
+func (h *CampaignHandler) Timezones(c *okapi.Context, req *CampaignActionRequest) error {
+	campaign, err := h.findScoped(c, uint(req.ID))
+	if err != nil {
+		return c.AbortNotFound("campaign not found")
+	}
+	counts, err := h.messageRepo.TimezoneCounts(campaign.ID)
+	if err != nil {
+		return c.AbortInternalServerError("failed to load timezone distribution")
+	}
+	out := CampaignTimezones{
+		SendAtLocalTime: campaign.SendAtLocalTime,
+		LocalSendHour:   campaign.LocalSendHour,
+		Timezones:       make([]CampaignTimezoneCount, 0, len(counts)),
+	}
+	for tz, count := range counts {
+		out.Timezones = append(out.Timezones, CampaignTimezoneCount{Timezone: tz, Count: count})
+	}
+	sort.Slice(out.Timezones, func(i, j int) bool {
+		if out.Timezones[i].Count != out.Timezones[j].Count {
+			return out.Timezones[i].Count > out.Timezones[j].Count
+		}
+		return out.Timezones[i].Timezone < out.Timezones[j].Timezone
+	})
+	return ok(c, out)
 }
 
 // errCampaignAudienceRejected is the sentinel returned after the audience

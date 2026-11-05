@@ -27,6 +27,7 @@ package routes
 // They live together because goconst counts occurrences per package, not per
 // file, and several are shared across route files.
 const (
+	tagWebhooks       = "Webhooks"
 	pathBounces       = "/bounces"
 	pathNotifications = "/notifications"
 	pathAnnouncements = "/announcements"
@@ -35,6 +36,10 @@ const (
 	pathSuppressions  = "/suppressions"
 	pathWebhooks      = "/webhooks"
 	pathWorkspaces    = "/workspaces"
+
+	// Provider event ingestion (R-04): the bounce webhook's sibling.
+	pathWebhookBounce   = "/webhooks/bounce"
+	pathProviderWebhook = "/webhooks/provider"
 
 	pathAnnouncementByID      = "/announcements/{id:int}"
 	pathAutomationByID        = "/automations/{id:int}"

@@ -22,6 +22,7 @@ package routes
 import (
 	"net/http"
 
+	"github.com/goposta/posta/internal/dto"
 	"github.com/goposta/posta/internal/handlers"
 	"github.com/jkaninda/okapi"
 )
@@ -90,8 +91,8 @@ func (r *Router) trackingRoutes() []okapi.RouteDefinition {
 
 // bounceWebhookRoutes returns the bounce webhook route (authenticated via API key).
 func (r *Router) bounceWebhookRoutes() []okapi.RouteDefinition {
-	bounceGroup := r.v1.Group("/webhooks/bounce", r.mw.apiKey).WithTagInfo(okapi.GroupTag{
-		Name:        "Webhooks",
+	bounceGroup := r.v1.Group(pathWebhookBounce, r.mw.apiKey).WithTagInfo(okapi.GroupTag{
+		Name:        tagWebhooks,
 		Description: "Inbound webhook endpoints that receive bounce and complaint notifications from upstream mail providers. Authenticated with an API key.",
 	}).WithSecurity([]map[string][]string{{"ApiKeyAuth": {}}})
 
@@ -104,6 +105,36 @@ func (r *Router) bounceWebhookRoutes() []okapi.RouteDefinition {
 			Summary:  "Bounce notification webhook",
 			Request:  &handlers.BounceNotification{},
 			Response: &handlers.BounceResponse{},
+		},
+	}
+}
+
+// providerWebhookRoutes returns the provider event ingestion webhook (R-04):
+// POST /api/v1/webhooks/provider/{provider}, authenticated via API key like
+// the bounce webhook, with the provider's own signature verification layered
+// on top inside the handler. Registered as a raw handler (no request binding)
+// so the signature check sees the body byte-exact.
+func (r *Router) providerWebhookRoutes() []okapi.RouteDefinition {
+	providerGroup := r.v1.Group(pathProviderWebhook, r.mw.apiKey).WithTagInfo(okapi.GroupTag{
+		Name:        tagWebhooks,
+		Description: "Inbound webhook endpoints that receive bounce and complaint notifications from upstream mail providers. Authenticated with an API key.",
+	}).WithSecurity([]map[string][]string{{"ApiKeyAuth": {}}})
+
+	return []okapi.RouteDefinition{
+		{
+			Method:      http.MethodPost,
+			Path:        "/{provider}",
+			Handler:     r.h.providerEvent.Handle,
+			Group:       providerGroup,
+			Summary:     "Provider event webhook (SES, SendGrid, Postmark, Mailgun)",
+			Description: "Ingests delivery events (delivered, bounced, deferred, rejected, complained, opened, clicked) from an upstream email provider, verifies the provider signature, records them on the message-history timeline and auto-suppresses permanently bounced recipients. Answers 501 until the provider secret is configured.",
+			Response:    &handlers.ProviderEventResponse{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("provider", "string", "Provider slug: ses, sendgrid, postmark or mailgun"),
+				okapi.DocErrorResponse(401, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(501, &dto.ErrorResponseBody{}),
+			},
 		},
 	}
 }

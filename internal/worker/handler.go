@@ -33,6 +33,7 @@ import (
 	"github.com/goposta/posta/internal/services/automation"
 	"github.com/goposta/posta/internal/services/email"
 	"github.com/goposta/posta/internal/services/emailhistory"
+	"github.com/goposta/posta/internal/services/provider_events"
 	"github.com/goposta/posta/internal/services/webhook"
 	"github.com/goposta/posta/internal/storage/blob"
 	"github.com/goposta/posta/internal/storage/repositories"
@@ -337,12 +338,23 @@ func (h *EmailSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error
 			go h.serverRepo.IncrementFailedCount(sharedServerID)
 		}
 
-		// A permanent rejection at RCPT TO (5xx, e.g. 550 user unknown) is a
-		// hard bounce: suppress the recipient and stop retrying — retrying a
-		// 5xx is pointless.
-		if se, ok := permanentRejection(err); ok && h.autoSuppress {
-			h.handlePermanentRejection(em, se)
-			logger.Info("worker: recipient permanently rejected, suppressed", "id", em.ID, "recipient", se.Recipient, "code", se.Code)
+		// R-05: classify the failure instead of the binary 5xx-vs-retry split.
+		// A permanent class (hard_bounce, invalid_recipient — e.g. 550 5.1.1
+		// user unknown) keeps the existing auto-suppress; soft/deferred
+		// classes (reputation blocks, auth failures, transient policy
+		// rejections) increment RetryCount without suppression and come back
+		// through the retry path below.
+		var rejection *email.SendError
+		var cls provider_events.Classification
+		isRejection := false
+		if se, ok := permanentRejection(err); ok {
+			rejection, isRejection = se, true
+			cls = provider_events.ClassifySendError(se)
+		}
+		if isRejection && cls.Permanent() && h.autoSuppress {
+			h.handlePermanentRejection(em, rejection, cls)
+			logger.Info("worker: recipient permanently rejected, suppressed",
+				"id", em.ID, "recipient", rejection.Recipient, "code", rejection.Code, "classification", cls)
 			return nil
 		}
 
@@ -350,8 +362,18 @@ func (h *EmailSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error
 		em.Status = models.EmailStatusFailed
 		em.ErrorMessage = err.Error()
 		_ = h.emailRepo.Update(em)
-		emailhistory.RecordFailed(h.recorder, em, em.ErrorMessage, h.eventMetadata(smtpServer, campMsg, sharedServerID, em.RetryCount))
-		logger.Debug("worker: email send failed, will retry", "id", em.ID, "attempt", em.RetryCount, "error", err)
+		metadata := h.eventMetadata(smtpServer, campMsg, sharedServerID, em.RetryCount)
+		if isRejection {
+			metadata["classification"] = string(cls)
+			metadata["smtp_code"] = rejection.Code
+			metadata["smtp_stage"] = rejection.Stage
+			if rejection.Recipient != "" {
+				metadata["recipient"] = rejection.Recipient
+			}
+		}
+		emailhistory.RecordFailed(h.recorder, em, em.ErrorMessage, metadata)
+		logger.Debug("worker: email send failed, will retry",
+			"id", em.ID, "attempt", em.RetryCount, "classification", cls, "error", err)
 		// Return error so Asynq retries the task
 		return fmt.Errorf("SMTP send failed: %w", err)
 	}
@@ -424,9 +446,12 @@ func (h *EmailSendHandler) eventMetadata(smtpServer *models.SMTPServer, campMsg 
 }
 
 // permanentRejection reports whether err represents a permanent recipient
-// rejection (a 5xx reply at RCPT TO, e.g. 550 user unknown) that should trigger
-// auto-suppression. Transient errors (4xx), connection failures, and failures
-// at other SMTP stages (MAIL FROM, DATA) return false so they keep retrying.
+// rejection (a 5xx reply at RCPT TO, e.g. 550 user unknown) that the R-05
+// classifier should look at. Transient errors (4xx), connection failures, and
+// failures at other SMTP stages (MAIL FROM, DATA) return false so they keep
+// retrying. Whether the rejection actually suppresses is decided by the
+// classifier (see ProcessTask): only permanent classes (hard_bounce,
+// invalid_recipient) suppress.
 func permanentRejection(err error) (*email.SendError, bool) {
 	var se *email.SendError
 	if errors.As(err, &se) && se.Permanent() && se.Stage == "RCPT TO" && se.Recipient != "" {
@@ -437,12 +462,24 @@ func permanentRejection(err error) (*email.SendError, bool) {
 
 // handlePermanentRejection records a hard bounce, adds the recipient to the
 // suppression list (idempotently) and marks the email failed without retrying.
-// Called when the receiving server permanently rejects a recipient (5xx at
-// RCPT TO, e.g. 550 user unknown).
-func (h *EmailSendHandler) handlePermanentRejection(em *models.Email, se *email.SendError) {
+// Called when the receiving server permanently rejects a recipient and the
+// R-05 classifier judged the class permanent (hard_bounce, invalid_recipient).
+// The classification lands on the bounce record's Reason field and in both
+// timeline events' metadata.
+func (h *EmailSendHandler) handlePermanentRejection(em *models.Email, se *email.SendError, cls provider_events.Classification) {
 	reason := se.Msg
 	if reason == "" {
 		reason = se.Error()
+	}
+	// R-05: the classifier verdict travels with the record — on the bounce
+	// row (Reason) and on the timeline (metadata) — so analytics can group
+	// failures by cause without re-parsing SMTP text.
+	classifiedReason := string(cls) + ": " + reason
+	metadata := map[string]any{
+		"smtp_code":      se.Code,
+		"smtp_stage":     se.Stage,
+		"recipient":      se.Recipient,
+		"classification": string(cls),
 	}
 
 	// Record a hard bounce for audit/metrics.
@@ -453,7 +490,7 @@ func (h *EmailSendHandler) handlePermanentRejection(em *models.Email, se *email.
 			EmailID:     em.ID,
 			Recipient:   se.Recipient,
 			Type:        models.BounceTypeHard,
-			Reason:      reason,
+			Reason:      classifiedReason,
 		}
 		if err := h.bounceRepo.Create(bounce); err == nil {
 			metrics.IncrementBounce(string(models.BounceTypeHard))
@@ -476,12 +513,12 @@ func (h *EmailSendHandler) handlePermanentRejection(em *models.Email, se *email.
 	em.Status = models.EmailStatusFailed
 	em.ErrorMessage = se.Error()
 	_ = h.emailRepo.Update(em)
-	emailhistory.RecordFailed(h.recorder, em, em.ErrorMessage, nil)
-	// A 5xx at RCPT TO is a hard bounce: record it as such on the timeline.
-	// The stable provider event id dedups replays of the same task.
-	emailhistory.RecordBounced(h.recorder, em, reason,
+	emailhistory.RecordFailed(h.recorder, em, em.ErrorMessage, metadata)
+	// A permanent-class rejection is a hard bounce: record it as such on the
+	// timeline. The stable provider event id dedups replays of the same task.
+	emailhistory.RecordBounced(h.recorder, em, classifiedReason,
 		fmt.Sprintf("smtp:%d:%s", se.Code, se.Recipient),
-		map[string]any{"smtp_code": se.Code, "smtp_stage": se.Stage, "recipient": se.Recipient})
+		metadata)
 
 	// email.bounced automation trigger: resolve the subscriber so the engine
 	// can enroll matching automations (nil repo/engine skips silently).
