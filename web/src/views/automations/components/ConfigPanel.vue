@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { GraphNode } from '@vue-flow/core'
 import SearchableSelect from '../../../components/SearchableSelect.vue'
 import { NODE_META, nodeMeta, type BuilderNodeType, type SelectOption } from '../../../composables/useAutomationBuilder'
 import type { AutomationABVariant, AutomationFilterRule } from '../../../api/types'
+import { segmentsApi } from '../../../api/segments'
 
 const props = defineProps<{
   node: GraphNode
@@ -36,6 +37,39 @@ function num(value: any): string {
   return value === 0 || value === undefined || value === null ? '' : String(value)
 }
 
+// --- Segments (R-13 schedule audience + R-14 in_segment conditions) ---------
+
+const segments = ref<SelectOption[]>([])
+const segmentsLoading = ref(false)
+let segmentsLoaded = false
+
+async function loadSegments() {
+  if (segmentsLoaded || segmentsLoading.value) return
+  segmentsLoading.value = true
+  try {
+    const res = await segmentsApi.list(0, 200)
+    const rows = (res.data?.data ?? []) as Array<{ id: number; name: string }>
+    segments.value = rows.map((s) => ({ value: String(s.id), label: s.name }))
+    segmentsLoaded = true
+  } catch {
+    segments.value = []
+  } finally {
+    segmentsLoading.value = false
+  }
+}
+
+// Load the segment options when a config panel needs them (schedule trigger
+// audience or an in_segment condition). Reads the raw config — this watch
+// runs before the trigger computeds below are declared.
+watch(
+  [nodeType, () => config.value.event_kind],
+  () => {
+    if (nodeType.value === 'trigger' && String(config.value.event_kind ?? '') === 'schedule') loadSegments()
+    if (nodeType.value === 'filter' && conditionsOf().some((r) => r.field === 'in_segment')) loadSegments()
+  },
+  { immediate: true, deep: false },
+)
+
 // --- Trigger ---------------------------------------------------------------
 
 const EVENT_KIND_OPTIONS: SelectOption[] = [
@@ -46,16 +80,34 @@ const EVENT_KIND_OPTIONS: SelectOption[] = [
   { value: 'email.clicked', label: 'Email clicked' },
   { value: 'email.bounced', label: 'Email bounced' },
   { value: 'custom', label: 'Custom event' },
+  { value: 'schedule', label: 'On a schedule (cron)' },
 ]
 
 const triggerEventKind = computed({
   get: () => String(config.value.event_kind ?? ''),
-  set: (v: string) => set('event_kind', v),
+  set: (v: string) => {
+    set('event_kind', v)
+    // R-13: a schedule is inherently recurring — default its frequency to
+    // every_time (once-per-contact-forever would silence the digest after
+    // its first fire).
+    if (v === 'schedule' && !config.value.frequency) set('frequency', 'every_time')
+  },
 })
 
 const triggerListId = computed({
   get: () => (config.value.list_id ? String(config.value.list_id) : ''),
   set: (v: string) => set('list_id', v ? Number(v) : null),
+})
+
+// R-13: schedule trigger configuration.
+const triggerCron = computed({
+  get: () => String(config.value.cron_expression ?? ''),
+  set: (v: string) => set('cron_expression', v),
+})
+
+const triggerSegmentId = computed({
+  get: () => (config.value.segment_id ? String(config.value.segment_id) : ''),
+  set: (v: string) => set('segment_id', v ? Number(v) : null),
 })
 
 const triggerFrequency = computed(() => String(config.value.frequency ?? 'once'))
@@ -66,6 +118,7 @@ const DIRECT_FIELDS: SelectOption[] = [
   { value: 'email', label: 'Email' },
   { value: 'name', label: 'Name' },
   { value: 'status', label: 'Status' },
+  { value: 'in_segment', label: 'In segment…' },
   { value: '__custom', label: 'Custom field…' },
 ]
 
@@ -85,6 +138,10 @@ const CUSTOM_PREFIX = 'custom_fields.'
 
 function isCustomField(field: string): boolean {
   return typeof field === 'string' && field.startsWith(CUSTOM_PREFIX)
+}
+
+function isSegmentField(field: string): boolean {
+  return field === 'in_segment'
 }
 
 function customKey(field: string): string {
@@ -121,6 +178,13 @@ function onConditionField(index: number, field: string, key = 'conditions') {
     patchCondition(index, { field: `${CUSTOM_PREFIX}`, operator: 'equals' }, key)
     return
   }
+  if (field === 'in_segment') {
+    // R-14: the operator is irrelevant for membership; the value is a
+    // segment id picked from the loaded segments.
+    loadSegments()
+    patchCondition(index, { field, operator: 'in', value: '' }, key)
+    return
+  }
   const wasCustom = isCustomField(rule?.field ?? '')
   if (wasCustom && rule?.operator && !['exists', 'not_exists'].includes(rule.operator)) {
     patchCondition(index, { field, operator: rule.operator }, key)
@@ -135,6 +199,7 @@ function onCustomKeyInput(index: number, keyValue: string, key = 'conditions') {
 
 function conditionValueMode(rule: AutomationFilterRule): 'none' | 'text' | 'number' {
   if (rule.operator === 'exists' || rule.operator === 'not_exists') return 'none'
+  if (isSegmentField(rule.field)) return 'none'
   if (isCustomField(rule.field)) return 'text'
   return 'text'
 }
@@ -293,6 +358,39 @@ function targetFor(key: string): string {
           />
           <p class="form-hint">Matches POST /automations/events payloads with the same name.</p>
         </div>
+        <template v-if="triggerEventKind === 'schedule'">
+          <div class="cfg-field">
+            <label class="form-label">Cron expression</label>
+            <input
+              class="form-input"
+              :value="config.cron_expression ?? ''"
+              placeholder="0 9 * * 1-5"
+              @input="set('cron_expression', ($event.target as HTMLInputElement).value)"
+            />
+            <p class="form-hint">Standard 5-field cron in server time, or prefix CRON_TZ=Europe/Berlin to pin a timezone.</p>
+          </div>
+          <div class="cfg-field">
+            <label class="form-label">Audience (list)</label>
+            <SearchableSelect
+              :options="lists"
+              :model-value="triggerListId"
+              placeholder="Select a list…"
+              empty-text="No lists yet"
+              @update:model-value="triggerListId = $event"
+            />
+          </div>
+          <div class="cfg-field">
+            <label class="form-label">Audience (segment)</label>
+            <SearchableSelect
+              :options="segments"
+              :model-value="triggerSegmentId"
+              placeholder="Select a segment…"
+              empty-text="No segments yet"
+              @update:model-value="triggerSegmentId = $event"
+            />
+            <p class="form-hint">Set a list or a segment — every subscribed contact in the audience is enrolled on each fire.</p>
+          </div>
+        </template>
         <div class="cfg-field">
           <label class="form-label">Run</label>
           <div class="cfg-radio-group">
@@ -330,7 +428,12 @@ function targetFor(key: string): string {
                 @input="onCustomKeyInput(i, ($event.target as HTMLInputElement).value)"
               />
               <div class="cfg-cond__row">
-                <select class="form-select" :value="rule.operator" @change="patchCondition(i, { operator: ($event.target as HTMLSelectElement).value })">
+                <select
+                  v-if="!isSegmentField(rule.field)"
+                  class="form-select"
+                  :value="rule.operator"
+                  @change="patchCondition(i, { operator: ($event.target as HTMLSelectElement).value })"
+                >
                   <option v-for="o in (isCustomField(rule.field) ? CUSTOM_OPERATORS : DIRECT_OPERATORS)" :key="o.value" :value="o.value">{{ o.label }}</option>
                 </select>
                 <input
@@ -339,6 +442,15 @@ function targetFor(key: string): string {
                   placeholder="Value"
                   :value="rule.value ?? ''"
                   @input="patchCondition(i, { value: ($event.target as HTMLInputElement).value })"
+                />
+                <SearchableSelect
+                  v-if="isSegmentField(rule.field)"
+                  class="cfg-cond__segment"
+                  :options="segments"
+                  :model-value="rule.value ? String(rule.value) : ''"
+                  placeholder="Select a segment…"
+                  empty-text="No segments yet"
+                  @update:model-value="patchCondition(i, { value: $event ? Number($event) : '' })"
                 />
               </div>
             </div>
@@ -441,7 +553,12 @@ function targetFor(key: string): string {
                 @input="onCustomKeyInput(i, ($event.target as HTMLInputElement).value)"
               />
               <div class="cfg-cond__row">
-                <select class="form-select" :value="rule.operator" @change="patchCondition(i, { operator: ($event.target as HTMLSelectElement).value })">
+                <select
+                  v-if="!isSegmentField(rule.field)"
+                  class="form-select"
+                  :value="rule.operator"
+                  @change="patchCondition(i, { operator: ($event.target as HTMLSelectElement).value })"
+                >
                   <option v-for="o in (isCustomField(rule.field) ? CUSTOM_OPERATORS : DIRECT_OPERATORS)" :key="o.value" :value="o.value">{{ o.label }}</option>
                 </select>
                 <input
@@ -450,6 +567,15 @@ function targetFor(key: string): string {
                   placeholder="Value"
                   :value="rule.value ?? ''"
                   @input="patchCondition(i, { value: ($event.target as HTMLInputElement).value })"
+                />
+                <SearchableSelect
+                  v-if="isSegmentField(rule.field)"
+                  class="cfg-cond__segment"
+                  :options="segments"
+                  :model-value="rule.value ? String(rule.value) : ''"
+                  placeholder="Select a segment…"
+                  empty-text="No segments yet"
+                  @update:model-value="patchCondition(i, { value: $event ? Number($event) : '' })"
                 />
               </div>
             </div>
@@ -853,6 +979,11 @@ function targetFor(key: string): string {
 }
 
 .cfg-variant__target {
+  flex: 1;
+  min-width: 0;
+}
+
+.cfg-cond__segment {
   flex: 1;
   min-width: 0;
 }

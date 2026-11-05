@@ -24,15 +24,18 @@
 //
 //   - A user JWT, presented by the dashboard as an HttpOnly session cookie or by
 //     CLI/SDK clients as `Authorization: Bearer <jwt>`.
-//   - An API key (psk_…), presented as `Authorization: Bearer psk_…` or, for
-//     browser-direct streams that cannot set headers, as `?token=psk_…`.
+//   - An API key (psk_…), presented as `Authorization: Bearer psk_…` or, only on
+//     the SSE stream endpoints whose browser consumers cannot set headers, as
+//     `?token=psk_…` (R-28).
 //
 // Authenticate accepts either. APIKeyAuth accepts only the latter, and the
 // admin JWT middleware only the former.
 package middlewares
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -169,18 +172,29 @@ func firstStore(stores []*sessionpkg.Store) *sessionpkg.Store {
 
 // Authenticate accepts either a user JWT or an API key.
 //
-// API keys (psk_…) are read from the Authorization header or the `?token=` query
-// param — the latter so browser-direct streams (EventSource, download links) and
-// machine clients can authenticate without headers. Any other credential is
-// treated as a JWT and resolved by okapi from the header or the session cookie.
-func Authenticate(jwtAuth okapi.JWTAuth, keyService *auth.APIKeyService, userRepo *repositories.UserRepository, keyRepo *repositories.APIKeyRepository) okapi.Middleware {
+// API keys (psk_…) are read from the Authorization header, or — only on the
+// SSE endpoints whose consumers cannot set headers (R-28) — from the `?token=`
+// query param. Any other credential is treated as a JWT and resolved by okapi
+// from the header or the session cookie. An optional APIKeyDeps enables the
+// per-key rate limiter (R-15) and usage counter (R-18).
+func Authenticate(jwtAuth okapi.JWTAuth, keyService *auth.APIKeyService, userRepo *repositories.UserRepository, keyRepo *repositories.APIKeyRepository, deps ...*APIKeyDeps) okapi.Middleware {
+	var d *APIKeyDeps
+	if len(deps) > 0 {
+		d = deps[0]
+	}
+	return authenticate(jwtAuth, keyService, userRepo, keyRepo, d)
+}
+
+// authenticate is the shared body of Authenticate; the limiter and usage
+// repository are the R-15 / R-18 seams (nil disables the per-key checks).
+func authenticate(jwtAuth okapi.JWTAuth, keyService *auth.APIKeyService, userRepo *repositories.UserRepository, keyRepo *repositories.APIKeyRepository, deps *APIKeyDeps) okapi.Middleware {
 	return func(c *okapi.Context) error {
 		raw := bearerToken(c)
-		if raw == "" {
+		if raw == "" && queryTokenAllowed(c.Request().URL.Path) {
 			raw = strings.TrimSpace(c.Query("token"))
 		}
 		if strings.HasPrefix(raw, auth.APIKeyPrefix) {
-			return authenticateAPIKey(c, keyService, userRepo, keyRepo, raw)
+			return authenticateAPIKey(c, keyService, userRepo, keyRepo, raw, deps)
 		}
 		if raw == "" {
 			// A browser presents the JWT only as an HttpOnly cookie, which never
@@ -194,10 +208,41 @@ func Authenticate(jwtAuth okapi.JWTAuth, keyService *auth.APIKeyService, userRep
 	}
 }
 
+// APIKeyDeps carries the optional per-key services authenticateAPIKey consults
+// after a key validates: the rate limiter enforcing the key's own limits
+// (R-15) and the usage repository counting requests (R-18). Both may be nil —
+// rate limiting then falls back to the global defaults and usage is not
+// counted.
+type APIKeyDeps struct {
+	Limiter *ratelimit.RedisLimiter
+	Usage   *repositories.APIKeyUsageRepository
+}
+
+// queryTokenAllowed reports whether the path may authenticate an API key from
+// the `?token=` query param (R-28). URL-borne credentials land in proxy and
+// access logs, so the query path is restricted to the SSE endpoints whose
+// EventSource consumers genuinely cannot set an Authorization header: the
+// workspace streams (`/message-stream`, `/inbound-stream`) and the admin
+// streams (`/admin/.../stream`). Plain JSON routes must present the key in
+// the header.
+func queryTokenAllowed(path string) bool {
+	last := path
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		last = path[i+1:]
+	}
+	return last == "stream" || strings.HasSuffix(last, "-stream")
+}
+
 // APIKeyAuth accepts only an API key, and only from the Authorization header. It
 // guards the public machine-facing API (/api/v1/emails/*, /webhooks, …), where a
 // browser session is not a valid credential and no caller needs the key in a URL.
-func APIKeyAuth(keyService *auth.APIKeyService, userRepo *repositories.UserRepository, keyRepo *repositories.APIKeyRepository) okapi.Middleware {
+// deps carries the optional per-key rate limiter (R-15) and usage counter
+// (R-18); nil disables both.
+func APIKeyAuth(keyService *auth.APIKeyService, userRepo *repositories.UserRepository, keyRepo *repositories.APIKeyRepository, deps ...*APIKeyDeps) okapi.Middleware {
+	var d *APIKeyDeps
+	if len(deps) > 0 {
+		d = deps[0]
+	}
 	return func(c *okapi.Context) error {
 		raw := bearerToken(c)
 		if raw == "" {
@@ -206,7 +251,7 @@ func APIKeyAuth(keyService *auth.APIKeyService, userRepo *repositories.UserRepos
 		if !strings.HasPrefix(raw, auth.APIKeyPrefix) {
 			return c.AbortUnauthorized("invalid Authorization format, expected: Bearer <API_KEY>")
 		}
-		return authenticateAPIKey(c, keyService, userRepo, keyRepo, raw)
+		return authenticateAPIKey(c, keyService, userRepo, keyRepo, raw, d)
 	}
 }
 
@@ -216,7 +261,7 @@ func bearerToken(c *okapi.Context) string {
 	return strings.TrimSpace(strings.TrimPrefix(c.Header("Authorization"), "Bearer "))
 }
 
-func authenticateAPIKey(c *okapi.Context, keyService *auth.APIKeyService, userRepo *repositories.UserRepository, keyRepo *repositories.APIKeyRepository, rawKey string) error {
+func authenticateAPIKey(c *okapi.Context, keyService *auth.APIKeyService, userRepo *repositories.UserRepository, keyRepo *repositories.APIKeyRepository, rawKey string, deps *APIKeyDeps) error {
 	apiKey, err := keyService.ValidateKey(rawKey)
 	if err != nil {
 		return c.AbortUnauthorized("invalid API key")
@@ -231,6 +276,16 @@ func authenticateAPIKey(c *okapi.Context, keyService *auth.APIKeyService, userRe
 	}
 	if !IPAllowed(apiKey.AllowedIPs, c.RealIP()) {
 		return c.AbortForbidden("IP address not allowed for this API key")
+	}
+
+	// Per-key rate limit (R-15): a key may carry its own hourly/daily request
+	// caps, enforced by the shared Redis limiter (0 = unlimited, and a key with
+	// no limits costs no Redis traffic at all). Checked after the IP allowlist
+	// and before any handler runs.
+	if deps != nil && deps.Limiter != nil && (apiKey.RateLimitHourly > 0 || apiKey.RateLimitDaily > 0) {
+		if limited, _ := apiKeyRateLimitCheck(deps.Limiter, c.Request().Context(), apiKey.ID, apiKey.RateLimitHourly, apiKey.RateLimitDaily); limited {
+			return c.AbortTooManyRequests("API key rate limit exceeded")
+		}
 	}
 
 	scopes := []string(apiKey.Scopes)
@@ -251,11 +306,66 @@ func authenticateAPIKey(c *okapi.Context, keyService *auth.APIKeyService, userRe
 		c.Set(CtxAPIKeyWorkspaceID, int(*apiKey.WorkspaceID))
 	}
 
-	if keyRepo != nil {
-		go func() { _ = keyRepo.UpdateLastUsed(apiKey.ID) }()
+	// Last-used + usage analytics (R-18): one async write per request, the same
+	// cost class as the pre-existing UpdateLastUsed — requests always count,
+	// and the machine-facing send endpoints also count as a send.
+	if keyRepo != nil || (deps != nil && deps.Usage != nil) {
+		sends := 0
+		if isAPIKeySendPath(c.Request().Method, c.Request().URL.Path) {
+			sends = 1
+		}
+		go func() {
+			if keyRepo != nil {
+				_ = keyRepo.UpdateLastUsed(apiKey.ID)
+			}
+			if deps != nil && deps.Usage != nil {
+				_ = deps.Usage.Bump(apiKey.ID, 1, sends)
+			}
+		}()
 	}
 
 	return c.Next()
+}
+
+// apiKeyRateLimitSubject is the Redis key subject for a key's own limits.
+func apiKeyRateLimitSubject(keyID uint) string {
+	return fmt.Sprintf("apikey:%d", keyID)
+}
+
+// rateLimitChecker is the slice of the Redis limiter the per-key check needs
+// (*ratelimit.RedisLimiter implements it; tests stub it).
+type rateLimitChecker interface {
+	AllowWithLimits(ctx context.Context, subject string, hourlyLimit, dailyLimit int) error
+}
+
+// apiKeyRateLimitCheck enforces one API key's own request caps (R-15). It
+// reports limited=true when a cap is exceeded — the caller answers 429. A
+// limiter infrastructure failure fails OPEN (the same choice AllowLogin makes):
+// a Redis outage must not lock out every limited key, it only degrades the
+// enforcement.
+func apiKeyRateLimitCheck(limiter rateLimitChecker, ctx context.Context, keyID uint, hourly, daily int) (bool, error) {
+	err := limiter.AllowWithLimits(ctx, apiKeyRateLimitSubject(keyID), hourly, daily)
+	if err == nil {
+		return false, nil
+	}
+	if strings.Contains(err.Error(), "rate limit exceeded") {
+		return true, nil
+	}
+	// "rate limit check failed: …" — infrastructure, fail open.
+	return false, err
+}
+
+// isAPIKeySendPath reports whether a request counts as a send for the per-key
+// usage analytics (R-18): the machine-facing send endpoints only.
+func isAPIKeySendPath(method, path string) bool {
+	if method != http.MethodPost {
+		return false
+	}
+	switch path {
+	case "/api/v1/emails/send", "/api/v1/emails/send-template", "/api/v1/emails/batch":
+		return true
+	}
+	return false
 }
 
 // IPAllowed reports whether clientIP is permitted by an API key's allowlist. An

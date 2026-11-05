@@ -105,6 +105,7 @@ type routerHandlers struct {
 	user             *handlers.UserHandler
 	email            *handlers.EmailHandler
 	apiKey           *handlers.APIKeyHandler
+	apiKeyUsage      *handlers.APIKeyUsageHandler
 	template         *handlers.TemplateHandler
 	version          *handlers.TemplateVersionHandler
 	localization     *handlers.TemplateLocalizationHandler
@@ -216,6 +217,10 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	planService := planpkg.NewService(planRepo, settingsProvider)
 	limiter := ratelimit.NewRedisLimiter(redisClient, cfg.RateLimitHourly, cfg.RateLimitDaily)
 	limiter.SetSettings(settingsProvider)
+	// Per-API-key services (R-15 per-key rate limits, R-18 usage analytics),
+	// consulted by the auth middlewares after a key validates.
+	apiKeyUsageRepo := repositories.NewAPIKeyUsageRepository(db)
+	apiKeyDeps := &middlewares.APIKeyDeps{Limiter: limiter, Usage: apiKeyUsageRepo}
 	webhookDeliveryRepo := repositories.NewWebhookDeliveryRepository(db)
 	dispatcher := webhook.NewDispatcher(webhookRepo)
 	dispatcher.SetDeliveryRepo(webhookDeliveryRepo)
@@ -292,9 +297,9 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 		v1:  app.Group("/api/v1"),
 		mw: routerMiddleware{
 			jwtAdminAuth:      jwtAdminAuth,
-			auth:              middlewares.Authenticate(jwtAuth, apiKeyService, userRepo, apiKeyRepo),
+			auth:              middlewares.Authenticate(jwtAuth, apiKeyService, userRepo, apiKeyRepo, apiKeyDeps),
 			jwtOnly:           jwtAuth.Middleware,
-			apiKey:            middlewares.APIKeyAuth(apiKeyService, userRepo, apiKeyRepo),
+			apiKey:            middlewares.APIKeyAuth(apiKeyService, userRepo, apiKeyRepo, apiKeyDeps),
 			loginLimiter:      loginLimiterMiddleware(cfg, limiter),
 			workspace:         middlewares.RequireWorkspaceMiddleware(workspaceRepo, userRepo),
 			optionalWorkspace: middlewares.OptionalWorkspaceMiddleware(workspaceRepo, userRepo),
@@ -309,6 +314,7 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 			user:             userHandler,
 			email:            handlers.NewEmailHandler(emailService, emailRepo, bus, statsCache),
 			apiKey:           handlers.NewAPIKeyHandler(apiKeyService, apiKeyRepo, userSettingRepo, auditLogger),
+			apiKeyUsage:      handlers.NewAPIKeyUsageHandler(apiKeyUsageRepo, apiKeyRepo),
 			template:         handlers.NewTemplateHandler(templateRepo, stylesheetRepo, versionRepo, localizationRepo, languageRepo, emailService),
 			version:          handlers.NewTemplateVersionHandler(templateRepo, versionRepo, stylesheetRepo),
 			localization:     handlers.NewTemplateLocalizationHandler(templateRepo, versionRepo, localizationRepo, stylesheetRepo),

@@ -174,6 +174,19 @@ func (r *Router) workspaceResourceRoutes() []okapi.RouteDefinition {
 			},
 		},
 		{
+			Method:      http.MethodGet,
+			Path:        "/api-keys/{id:int}/usage",
+			Handler:     okapi.H(r.h.apiKeyUsage.Get),
+			Group:       opsGroup,
+			Summary:     "Get API key usage",
+			Description: "Per-day request and send counts for one API key over the trailing window (default 30 days, max 90). Days without traffic appear with zero counts.",
+			Request:     &handlers.GetAPIKeyUsageRequest{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "API key ID"),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
 			Method:   http.MethodPut,
 			Path:     "/api-keys/{id:int}/revoke",
 			Handler:  okapi.H(r.h.apiKey.Revoke),

@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { apiKeysApi } from '../../api/apikeys'
-import type { ApiKey } from '../../api/types'
+import type { ApiKey, ApiKeyUsage } from '../../api/types'
 import { useNotificationStore } from '../../stores/notification'
 import { useConfirm } from '../../composables/useConfirm'
 import { useWorkspaceStore } from '../../stores/workspace'
@@ -15,6 +15,9 @@ const { confirm } = useConfirm()
 
 const loading = ref(true)
 const key = ref<ApiKey | null>(null)
+// R-18: trailing daily usage series for this key.
+const usage = ref<ApiKeyUsage | null>(null)
+const usageLoading = ref(false)
 
 const keyId = Number(route.params.id)
 
@@ -27,7 +30,21 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
+  loadUsage()
 })
+
+async function loadUsage() {
+  usageLoading.value = true
+  try {
+    const res = await apiKeysApi.usage(keyId, 30)
+    usage.value = res.data.data
+  } catch {
+    // Usage analytics are best-effort; the key details remain usable without them.
+    usage.value = null
+  } finally {
+    usageLoading.value = false
+  }
+}
 
 const status = computed<{ label: string; class: string }>(() => {
   const k = key.value
@@ -39,6 +56,24 @@ const status = computed<{ label: string; class: string }>(() => {
 
 // An empty/missing scope set means the key predates scopes; show it as send.
 const keyScopes = computed<string[]>(() => key.value?.scopes ?? [])
+
+// R-15: per-key request caps, 0 = unlimited.
+const rateLimitLabel = computed(() => {
+  const k = key.value
+  if (!k) return ''
+  const hourly = k.rate_limit_hourly ?? 0
+  const daily = k.rate_limit_daily ?? 0
+  if (hourly <= 0 && daily <= 0) return ''
+  const parts: string[] = []
+  if (hourly > 0) parts.push(`${hourly.toLocaleString()}/hour`)
+  if (daily > 0) parts.push(`${daily.toLocaleString()}/day`)
+  return parts.join(' · ')
+})
+
+const usageMax = computed(() => {
+  const days = usage.value?.days ?? []
+  return days.reduce((max, d) => Math.max(max, d.requests), 0)
+})
 
 const isActive = computed(() => {
   const k = key.value
@@ -53,6 +88,11 @@ const canDelete = computed(() => {
 function formatDate(dateStr: string | null): string {
   if (!dateStr) return 'Never'
   return new Date(dateStr).toLocaleString()
+}
+
+function formatDay(day: string): string {
+  const d = new Date(day + 'T00:00:00Z')
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
 async function revoke() {
@@ -170,8 +210,47 @@ async function remove() {
                 <span v-else style="color: var(--text-muted)">Any IP</span>
               </td>
             </tr>
+            <tr>
+              <td style="font-weight: 600">Rate limits</td>
+              <td>
+                <span v-if="rateLimitLabel">{{ rateLimitLabel }}</span>
+                <span v-else style="color: var(--text-muted)">Unlimited</span>
+              </td>
+            </tr>
           </tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- R-18: per-key usage analytics -->
+    <div v-if="key" class="card" style="margin-top: 16px">
+      <div class="card-header">
+        <h2>Usage</h2>
+        <span v-if="usage" class="badge">last {{ usage.days_trailing }} days</span>
+      </div>
+      <div class="card-body">
+        <div v-if="usageLoading" class="loading-page" style="min-height: 80px">
+          <div class="spinner"></div>
+        </div>
+        <template v-else-if="usage">
+          <div class="usage-totals">
+            <div class="usage-total">
+              <span class="usage-total__value">{{ usage.totals.requests.toLocaleString() }}</span>
+              <span class="usage-total__label">requests</span>
+            </div>
+            <div class="usage-total">
+              <span class="usage-total__value">{{ usage.totals.sends.toLocaleString() }}</span>
+              <span class="usage-total__label">sends</span>
+            </div>
+          </div>
+          <div class="usage-chart" role="img" aria-label="Daily requests over the trailing window">
+            <div v-for="d in usage.days" :key="d.day" class="usage-chart__col" :title="`${formatDay(d.day)}: ${d.requests} requests, ${d.sends} sends`">
+              <div class="usage-chart__bar" :style="{ height: usageMax > 0 ? Math.max((d.requests / usageMax) * 100, d.requests > 0 ? 4 : 0) + '%' : '0%' }"></div>
+              <span class="usage-chart__day">{{ formatDay(d.day) }}</span>
+            </div>
+          </div>
+        </template>
+        <p v-else class="empty-state" style="padding: 8px 0">Usage history is not available for this key yet.</p>
       </div>
     </div>
   </div>
@@ -188,5 +267,66 @@ td code {
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-sm);
   padding: 2px 8px;
+}
+
+/* R-18 usage card: totals row + a dependency-free daily bar series. */
+.usage-totals {
+  display: flex;
+  gap: 24px;
+  margin-bottom: 14px;
+}
+
+.usage-total {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.usage-total__value {
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.usage-total__label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.usage-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 120px;
+  padding-top: 4px;
+}
+
+.usage-chart__col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  height: 100%;
+  justify-content: flex-end;
+}
+
+.usage-chart__bar {
+  width: 100%;
+  max-width: 22px;
+  border-radius: 3px 3px 0 0;
+  background: var(--primary-500);
+  min-height: 0;
+}
+
+.usage-chart__day {
+  font-size: 9px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 </style>

@@ -168,7 +168,10 @@ func TestAuthenticate_RoutesAPIKeyPrefixToKeyPath(t *testing.T) {
 	}{
 		{"header", func(r *http.Request) { r.Header.Set("Authorization", "Bearer psk_deadbeef") }},
 		{"bare header", func(r *http.Request) { r.Header.Set("Authorization", "psk_deadbeef") }},
-		{"query", func(r *http.Request) { r.URL.RawQuery = "token=psk_deadbeef" }},
+		// R-28: the query path is reserved for the SSE streams, so the request
+		// targets one — a psk_ in `?token=` on a plain JSON route must NOT
+		// reach the API-key path (pinned by rate_limit_test.go).
+		{"query on sse path", func(r *http.Request) { r.URL.RawQuery = "token=psk_deadbeef"; r.URL.Path = "/message-stream" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			defer func() {
@@ -179,7 +182,7 @@ func TestAuthenticate_RoutesAPIKeyPrefixToKeyPath(t *testing.T) {
 
 			cfg := &config.Config{JWTSecret: testSecret}
 			mw := Authenticate(JWTAuth(cfg), nil, nil, nil)
-			req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+			req := httptest.NewRequest(http.MethodGet, "/message-stream", nil)
 			tc.apply(req)
 
 			o := okapi.NewTestServer(t)
