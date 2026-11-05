@@ -27,18 +27,30 @@ import (
 	"gorm.io/gorm"
 )
 
-// readVersion returns the stored app version. The fresh flag is true when no
-// app.version row exists yet
+// readVersion returns the stored app version. The fresh flag is true only when
+// the database has never been bootstrapped: no app.version row and no applied
+// upgrade steps.
+//
+// The step rows matter because a dev build never writes app.version. Keying
+// "fresh" off the setting alone makes every dev boot look like a first boot,
+// so markAllApplied re-inserts the whole registry and the second boot dies on
+// the upgrade_steps primary key. Applied steps are the durable evidence that
+// this database has already been sealed.
 func readVersion(db *gorm.DB) (version string, fresh bool, err error) {
 	var s models.Setting
 	err = db.Where("key = ?", KeyAppVersion).First(&s).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return "", true, nil
+	if err == nil {
+		return s.Value, false, nil
 	}
-	if err != nil {
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return "", false, err
 	}
-	return s.Value, false, nil
+
+	var applied int64
+	if err := db.Model(&models.UpgradeStep{}).Count(&applied).Error; err != nil {
+		return "", false, err
+	}
+	return "", applied == 0, nil
 }
 
 // writeVersion updates the app.version and app.last_started_at settings rows
