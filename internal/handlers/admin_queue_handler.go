@@ -256,7 +256,15 @@ func (h *AdminHandler) ListQueueTasks(c *okapi.Context, req *ListQueueTasksReque
 		return c.AbortBadRequest("invalid state: use pending, active, scheduled, retry or archived")
 	}
 	if err != nil {
-		return c.AbortInternalServerError(fmt.Sprintf("failed to list %s tasks: %v", state, err))
+		// asynq reports a queue that has never received a task as ErrQueueNotFound.
+		// That is the empty state, not a server failure: the overview above already
+		// reports such a queue as zeros, and the dashboard opens this tab on a fresh
+		// install before anything has been enqueued. Answer with an empty page.
+		if errors.Is(err, asynq.ErrQueueNotFound) {
+			tasks = nil
+		} else {
+			return c.AbortInternalServerError(fmt.Sprintf("failed to list %s tasks: %v", state, err))
+		}
 	}
 
 	out := make([]QueueTask, 0, len(tasks))
