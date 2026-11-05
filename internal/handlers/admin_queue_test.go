@@ -513,6 +513,31 @@ func TestAdminQueueTasksListByState(t *testing.T) {
 	}
 }
 
+func TestAdminQueueTasksOnQueueThatNeverExisted(t *testing.T) {
+	o, stub, _ := newQueueAdminServer(t)
+	// asynq's inspector answers ErrQueueNotFound for a managed queue that has
+	// never received a task (a fresh install). That is the empty state, not a
+	// server error: the overview reports the same queue as zeros.
+	stub.errOn["List:"+queues.Transactional] = asynq.ErrQueueNotFound
+
+	rec := doQueueAdminReq(t, o, http.MethodGet, "/admin/queues/transactional/tasks")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("empty queue tasks = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var res struct {
+		Data QueueTaskPage `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(res.Data.Tasks) != 0 || res.Data.Total != 0 {
+		t.Fatalf("empty queue returned tasks: %+v", res.Data)
+	}
+	if res.Data.Queue != queues.Transactional || res.Data.State != "pending" {
+		t.Fatalf("queue/state not echoed: %+v", res.Data)
+	}
+}
+
 func TestAdminQueueTaskActions(t *testing.T) {
 	o, stub, evt := newQueueAdminServer(t)
 
