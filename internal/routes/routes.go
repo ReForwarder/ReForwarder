@@ -21,6 +21,7 @@ package routes
 
 import (
 	"context"
+	"net/url"
 	"time"
 
 	"github.com/goposta/posta/internal/config"
@@ -55,6 +56,7 @@ import (
 	"github.com/goposta/posta/internal/services/tracking"
 	"github.com/goposta/posta/internal/services/updatecheck"
 	"github.com/goposta/posta/internal/services/verifier"
+	"github.com/goposta/posta/internal/services/webauthn"
 	"github.com/goposta/posta/internal/services/webhook"
 	"github.com/goposta/posta/internal/services/workermon"
 	"github.com/goposta/posta/internal/services/workspaceprovision"
@@ -137,6 +139,8 @@ type routerHandlers struct {
 	workspaceSetting *handlers.WorkspaceSettingHandler
 	security         *handlers.SecurityHandler
 	session          *handlers.SessionHandler
+	webauthn         *handlers.WebAuthnHandler
+	impersonation    *handlers.ImpersonationHandler
 	cron             *handlers.CronHandler
 	oauth            *handlers.OAuthHandler
 	oauthAdmin       *handlers.OAuthAdminHandler
@@ -356,6 +360,43 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	r.h.admin.SetMigrator(migrator)
 	// Recovery-code logins (R-10) land on the user audit trail.
 	r.h.user.SetAuditLogger(auditLogger)
+
+	// Passkeys (R-19). The WebAuthn Relying Party identity is derived from the
+	// dashboard origin: RPID is the origin's bare host (no scheme, no port),
+	// which the browser requires the ceremony to be scoped to. Without an app
+	// URL there is no valid identity, so passkeys stay disabled — every
+	// endpoint answers 503 and the dashboard hides the flow.
+	if cfg.AppWebURL != "" {
+		waCfg := webauthn.Config{
+			RPID:          webauthnRPID(cfg.AppWebURL),
+			RPDisplayName: "Posta",
+			RPOrigins:     []string{cfg.AppWebURL},
+		}
+		// Ceremony state rides Redis when available so challenges survive a
+		// restart and replicas share it; the in-process store covers the
+		// Redis-less single-instance case.
+		var challengeStore webauthn.ChallengeStore
+		if redisClient != nil {
+			challengeStore = webauthn.NewRedisChallengeStore(redisClient)
+		} else {
+			challengeStore = webauthn.NewMemoryChallengeStore()
+		}
+		if svc, err := webauthn.New(waCfg, webauthn.NewGormCredentialStore(db), challengeStore); err != nil {
+			logger.Error("passkeys disabled: invalid WebAuthn configuration", "err", err)
+		} else {
+			r.h.webauthn = handlers.NewWebAuthnHandler(svc, userRepo, userHandler)
+			r.h.webauthn.SetAuditLogger(auditLogger)
+		}
+	}
+	if r.h.webauthn == nil {
+		// Disabled passkeys still get a handler: it answers 503 on every
+		// endpoint instead of the route table dereferencing a nil handler.
+		r.h.webauthn = handlers.NewWebAuthnHandler(nil, userRepo, userHandler)
+	}
+
+	// Administrative impersonation (R-20): endpoint handlers plus wiring; the
+	// context marker lives in the auth middleware.
+	r.h.impersonation = handlers.NewImpersonationHandler(userRepo, sessionRepo, sessionStore, userHandler, auditLogger)
 
 	// Security rules read/write through the settings repository
 	r.h.security.SetSettingRepo(settingRepo)
@@ -669,6 +710,18 @@ func (a *emailPlanAdapter) EffectiveLimits(workspaceID *uint) *email.PlanLimits 
 
 // workspaceHeaderRequired is a reusable route option documenting the required workspace header.
 var workspaceHeaderRequired = okapi.DocHeader("X-Posta-Workspace-Id", "integer", "Workspace ID (required for workspace-scoped endpoints)", true)
+
+// webauthnRPID derives the WebAuthn Relying Party ID from the dashboard
+// origin: the bare host, without scheme or port, since the browser scopes
+// ceremonies to a registrable domain. A URL that will not parse falls back to
+// the raw string, which keeps a hand-configured bare hostname working.
+func webauthnRPID(appWebURL string) string {
+	u, err := url.Parse(appWebURL)
+	if err != nil || u.Hostname() == "" {
+		return appWebURL
+	}
+	return u.Hostname()
+}
 
 // loginLimiterMiddleware returns the login rate limit middleware when enabled,
 // or a pass-through middleware when disabled.

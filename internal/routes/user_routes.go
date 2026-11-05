@@ -308,5 +308,143 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 		},
 	}
 
+	// Passkeys (R-19). The ceremonies live under /auth/webauthn: registration
+	// and credential management demand a dashboard session (an API key cannot
+	// mint credentials for the account that issued it), while the login
+	// ceremonies are public but rate-limited and keyed to the user's email.
+	// Registered from the user route set because passkeys are account-level,
+	// not workspace-scoped, state.
+	webauthnAuthed := r.v1.Group("/auth/webauthn", r.mw.jwtOnly).WithTagInfo(okapi.GroupTag{
+		Name:        tagUser,
+		Description: "Passkey registration and credential management. Requires a dashboard session.",
+	})
+	webauthnAuthed.WithBearerAuth()
+	webauthnPublic := r.v1.Group("/auth/webauthn", r.mw.loginLimiter).WithTagInfo(okapi.GroupTag{
+		Name:        tagUser,
+		Description: "Passkey login ceremonies. Public, rate-limited, keyed to the user's email.",
+	})
+
+	routes = append(routes,
+		okapi.RouteDefinition{
+			Method:      http.MethodPost,
+			Path:        "/register/begin",
+			Handler:     r.h.webauthn.BeginRegistration,
+			Group:       webauthnAuthed,
+			Summary:     "Begin passkey registration",
+			Description: "Returns the PublicKeyCredentialCreationOptions for navigator.credentials.create().",
+			Response:    &dto.Response[any]{},
+			Options: []okapi.RouteOption{
+				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+			},
+		},
+		okapi.RouteDefinition{
+			Method:      http.MethodPost,
+			Path:        "/register/finish",
+			Handler:     r.h.webauthn.FinishRegistration,
+			Group:       webauthnAuthed,
+			Summary:     "Finish passkey registration",
+			Description: "Validates the attestation response (raw WebAuthn credential JSON body) and stores the credential. Audited.",
+			Response:    &dto.Response[models.WebAuthnCredential]{},
+			Options: []okapi.RouteOption{
+				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+			},
+		},
+		okapi.RouteDefinition{
+			Method:      http.MethodPost,
+			Path:        "/login/begin",
+			Handler:     okapi.H(r.h.webauthn.BeginLogin),
+			Group:       webauthnPublic,
+			Summary:     "Begin passkey login",
+			Description: "Returns the PublicKeyCredentialRequestOptions for navigator.credentials.get(). Requires the account's email; unknown or passkey-less accounts answer with one generic error.",
+			Request:     &handlers.BeginWebAuthnLoginRequest{},
+			Response:    &dto.Response[any]{},
+			Options: []okapi.RouteOption{
+				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(429, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+			},
+		},
+		okapi.RouteDefinition{
+			Method:      http.MethodPost,
+			Path:        "/login/finish",
+			Handler:     r.h.webauthn.FinishLogin,
+			Group:       webauthnPublic,
+			Summary:     "Finish passkey login",
+			Description: "Verifies the assertion and issues the JWT + session like a password login. With 2FA enabled the assertion alone is not enough: the response is a requires_2fa 401 carrying a one-shot pending token that this endpoint redeems together with the TOTP code. Body: {email, assertion} or {email, pending_token, two_factor_code}.",
+			Response:    &dto.Response[handlers.AuthResponse]{},
+			Options: []okapi.RouteOption{
+				okapi.DocErrorResponse(401, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(429, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+			},
+		},
+		okapi.RouteDefinition{
+			Method:      http.MethodGet,
+			Path:        "/credentials",
+			Handler:     r.h.webauthn.ListCredentials,
+			Group:       webauthnAuthed,
+			Summary:     "List registered passkeys",
+			Description: "The authenticated user's registered passkeys, oldest first.",
+			Response:    &dto.Response[[]models.WebAuthnCredential]{},
+			Options: []okapi.RouteOption{
+				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+			},
+		},
+		okapi.RouteDefinition{
+			Method:      http.MethodPut,
+			Path:        "/credentials/{id}",
+			Handler:     okapi.H(r.h.webauthn.RenameCredential),
+			Group:       webauthnAuthed,
+			Summary:     "Rename a passkey",
+			Description: "Renames one of the caller's own passkeys. The id is the base64url credential ID.",
+			Request:     &handlers.RenameWebAuthnCredentialRequest{},
+			Response:    &dto.Response[dto.MessageData]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "string", "Credential ID (base64url)"),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+			},
+		},
+		okapi.RouteDefinition{
+			Method:      http.MethodDelete,
+			Path:        "/credentials/{id}",
+			Handler:     okapi.H(r.h.webauthn.DeleteCredential),
+			Group:       webauthnAuthed,
+			Summary:     "Delete a passkey",
+			Description: "Removes one of the caller's own passkeys. The id is the base64url credential ID. Audited.",
+			Response:    &dto.Response[dto.MessageData]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "string", "Credential ID (base64url)"),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+			},
+		},
+	)
+
+	// R-20 impersonation exit. It sits on the /admin path because the dashboard
+	// shows the exit affordance while impersonating, but it must NOT use the
+	// admin middleware: the impersonated session carries the target's role, so
+	// requiring the admin role here would lock the impersonator out of the
+	// only route that restores them. Any authenticated session can call it;
+	// non-impersonated sessions are refused by the handler.
+	exitGroup := r.v1.Group("/admin/impersonate", r.mw.jwtOnly).WithTagInfo(okapi.GroupTag{
+		Name:        tagUser,
+		Description: "Impersonation session exit. Requires an impersonated session.",
+	})
+
+	routes = append(routes, okapi.RouteDefinition{
+		Method:      http.MethodPost,
+		Path:        "/exit",
+		Handler:     r.h.impersonation.ExitImpersonation,
+		Group:       exitGroup,
+		Summary:     "Exit impersonation",
+		Description: "Revokes the current impersonation session and expires the cookie; the admin re-authenticates. Audited.",
+		Response:    &dto.Response[okapi.M]{},
+		Options: []okapi.RouteOption{
+			okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+		},
+	})
+
 	return routes
 }

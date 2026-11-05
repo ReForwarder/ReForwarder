@@ -72,6 +72,7 @@ func Run(db *gorm.DB) error {
 		&models.EmailEvent{},
 		&models.IncomingWebhookEvent{},
 		&models.Session{},
+		&models.WebAuthnCredential{},
 		&models.UserEmailVerification{},
 		&models.PasswordResetToken{},
 		&models.UserRecoveryCode{},
