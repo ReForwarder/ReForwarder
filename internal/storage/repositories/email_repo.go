@@ -44,6 +44,50 @@ func (r *EmailRepository) Update(email *models.Email) error {
 	return r.db.Save(email).Error
 }
 
+// ClaimForProcessing atomically claims an email for delivery (R-26): the
+// queued→processing flip happens in a single UPDATE, so two concurrent
+// deliveries of duplicate tasks cannot both send. Only the claimant whose
+// UPDATE matched (RowsAffected > 0) proceeds; the loser skips the task.
+//
+// processing rows are claimable too: asynq redelivers a task after a worker
+// crash (graceful shutdown, lease expiry) while the row is still processing,
+// and no second task can exist for a processing row — the retry worker and the
+// queue reconcile only touch failed/queued rows, so a processing row's task is
+// always the redelivery of the same task.
+func (r *EmailRepository) ClaimForProcessing(id uint) (bool, error) {
+	res := r.db.Model(&models.Email{}).
+		Where("id = ? AND status IN ?", id,
+			[]models.EmailStatus{models.EmailStatusQueued, models.EmailStatusProcessing}).
+		Update("status", models.EmailStatusProcessing)
+	return res.RowsAffected > 0, res.Error
+}
+
+// ClaimForRetry atomically claims a failed email for another delivery attempt
+// (R-26): status flips failed→queued, the retry counter increments, and the
+// error clears in one UPDATE. A user retry and the retry poller (or two
+// concurrent retries) can therefore never both claim the same row and enqueue
+// two tasks. Returns false when the row was not failed — another claimant won.
+func (r *EmailRepository) ClaimForRetry(id uint) (bool, error) {
+	res := r.db.Model(&models.Email{}).
+		Where("id = ? AND status = ?", id, models.EmailStatusFailed).
+		Updates(map[string]interface{}{
+			"status":        models.EmailStatusQueued,
+			"retry_count":   gorm.Expr("retry_count + 1"),
+			"error_message": "",
+		})
+	return res.RowsAffected > 0, res.Error
+}
+
+// ClaimFailedForProcessing claims a failed email for an immediate synchronous
+// send attempt (R-26): failed→processing in one UPDATE, so two pollers (or a
+// poller and a user retry racing the send) cannot both deliver the same row.
+func (r *EmailRepository) ClaimFailedForProcessing(id uint) (bool, error) {
+	res := r.db.Model(&models.Email{}).
+		Where("id = ? AND status = ?", id, models.EmailStatusFailed).
+		Update("status", models.EmailStatusProcessing)
+	return res.RowsAffected > 0, res.Error
+}
+
 func (r *EmailRepository) FindByID(id uint) (*models.Email, error) {
 	var email models.Email
 	if err := r.db.First(&email, id).Error; err != nil {

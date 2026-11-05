@@ -482,6 +482,12 @@ func (s *Service) ValidateSend(ctx context.Context, userID uint, workspaceID *ui
 	if err := validateAddresses(req.From, req.To); err != nil {
 		return nil, err
 	}
+
+	// Header-bound strings are validated exactly like a real send (R-24), so a
+	// dry run flags an injection attempt instead of accepting it.
+	if err := validateSendHeaders(req.Subject, req.Headers); err != nil {
+		return nil, fmt.Errorf("header validation: %w", err)
+	}
 	req.From = s.applyDefaultSenderName(workspaceID, req.From)
 
 	if s.settings != nil && s.settings.MaintenanceMode() {
@@ -646,6 +652,12 @@ func (s *Service) Send(ctx context.Context, userID, apiKeyID uint, workspaceID *
 	// Validate email addresses
 	if err := validateAddresses(req.From, req.To); err != nil {
 		return nil, err
+	}
+
+	// Reject header injection up front (R-24): a CR/LF in the Subject or in a
+	// custom header name/value would add arbitrary headers to the message.
+	if err := validateSendHeaders(req.Subject, req.Headers); err != nil {
+		return nil, fmt.Errorf("header validation: %w", err)
 	}
 
 	req.From = s.applyDefaultSenderName(workspaceID, req.From)
@@ -1262,10 +1274,21 @@ func (s *Service) RetryEmail(emailUUID string, userID uint, workspaceID *uint) (
 
 	em.RetryCount++
 
+	// Claim the retry atomically (R-26): the failed→queued flip, the retry
+	// counter bump, and the error clear happen in one UPDATE, so a user retry
+	// and the 5-minute retry poller (or two user retries) can never both claim
+	// this email and enqueue two tasks. The loser gets the conflict error.
+	claimed, err := s.emailRepo.ClaimForRetry(em.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to claim email for retry: %w", err)
+	}
+	if !claimed {
+		return nil, fmt.Errorf("only failed emails can be retried")
+	}
+	em.Status = models.EmailStatusQueued
+	em.ErrorMessage = ""
+
 	if s.enqueuer != nil {
-		em.Status = models.EmailStatusQueued
-		em.ErrorMessage = ""
-		_ = s.emailRepo.Update(em)
 		if err := s.enqueuer.EnqueueEmailSend(em.ID, ""); err != nil {
 			em.Status = models.EmailStatusFailed
 			em.ErrorMessage = fmt.Sprintf("failed to enqueue: %v", err)
@@ -1275,7 +1298,11 @@ func (s *Service) RetryEmail(emailUUID string, userID uint, workspaceID *uint) (
 		return &SendResponse{ID: em.UUID, Status: em.Status}, nil
 	}
 
-	// Synchronous fallback
+	// Synchronous fallback (no background worker configured). The row is
+	// already claimed (queued), so no concurrent retry can re-enter; sendSync
+	// owns the failed/sent transition from here. Reset the in-memory status to
+	// the pre-claim state so its failure writes stay coherent.
+	em.Status = models.EmailStatusFailed
 	return s.sendSync(em, userID, em.WorkspaceID, &SendRequest{
 		From:                em.Sender,
 		To:                  em.Recipients,
@@ -1457,6 +1484,41 @@ func outboundHeaders(req *SendRequest, customEnabled bool) map[string]string {
 	return out
 }
 
+// containsHeaderInjection reports whether s carries a character that would let
+// it break out of a single header line: CR, LF, or NUL (R-24).
+func containsHeaderInjection(s string) bool {
+	return strings.ContainsAny(s, "\r\n\x00")
+}
+
+// validateHeaderContent rejects a header-bound string that contains CR, LF, or
+// NUL. The value is rejected rather than stripped so a caller learns its
+// payload is malformed instead of silently receiving different mail.
+func validateHeaderContent(field, value string) error {
+	if containsHeaderInjection(value) {
+		return fmt.Errorf("%s contains forbidden control characters (CR/LF/NUL)", field)
+	}
+	return nil
+}
+
+// validateSendHeaders validates the header-bound parts of a send request
+// (R-24): the Subject and every custom header name and value. A CR or LF in
+// any of them would inject arbitrary headers into the outbound message (e.g. a
+// smuggled Bcc); From/To are already covered by mail.ParseAddress.
+func validateSendHeaders(subject string, headers map[string]string) error {
+	if err := validateHeaderContent("subject", subject); err != nil {
+		return err
+	}
+	for name, value := range headers {
+		if err := validateHeaderContent("header name", name); err != nil {
+			return err
+		}
+		if err := validateHeaderContent("header value", value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // filterCustomHeaders removes headers that could conflict with system-set
 // headers or be used for spoofing. It returns a sanitized copy.
 //
@@ -1464,6 +1526,10 @@ func outboundHeaders(req *SendRequest, customEnabled bool) map[string]string {
 // when the caller has not supplied its own, so an integration that needs a
 // stable Message-ID (e.g. for threading against an external system) can set
 // one while every other message still gets a generated RFC 5322 pair.
+//
+// Entries whose name or value carries CR/LF/NUL are dropped (R-24): the API
+// paths reject them up front (validateSendHeaders), and this guard covers
+// internal callers that reach the header filter without that validation.
 func filterCustomHeaders(headers map[string]string) map[string]string {
 	// Headers that are set by the system and must not be overridden.
 	reserved := map[string]bool{
@@ -1495,6 +1561,9 @@ func filterCustomHeaders(headers map[string]string) map[string]string {
 			}
 		}
 		if blocked {
+			continue
+		}
+		if containsHeaderInjection(key) || containsHeaderInjection(value) {
 			continue
 		}
 		filtered[key] = value
@@ -1533,12 +1602,14 @@ func (s *Service) checkDomainVerification(userID uint, workspaceID *uint, from s
 		return nil
 	}
 
-	// Resolve whether strict domain mode is on for this scope.
+	// Resolve whether strict domain mode is on for this scope (R-23): an
+	// explicit workspace override wins; a workspace without a settings row
+	// inherits the platform-level require_domain_verification default (admin
+	// toggle, default true). Per-user sends have no tri-state, so the stored
+	// user flag decides.
 	strict := false
 	if workspaceID != nil {
-		if s.wsSettingRepo != nil {
-			strict = s.wsSettingRepo.RequireVerifiedDomain(*workspaceID)
-		}
+		strict, _ = s.wsSettingOverrideOrPlatformDefault(*workspaceID)
 	} else if s.userRepo != nil {
 		user, err := s.userRepo.FindByID(userID)
 		if err != nil {
@@ -1567,6 +1638,22 @@ func (s *Service) checkDomainVerification(userID uint, workspaceID *uint, from s
 	}
 
 	return nil
+}
+
+// wsSettingOverrideOrPlatformDefault resolves strict domain mode for a
+// workspace: the workspace's explicit settings row when one exists, otherwise
+// the platform require_domain_verification setting (R-23), which defaults to
+// true so out-of-the-box shared-server sending requires domain ownership.
+func (s *Service) wsSettingOverrideOrPlatformDefault(workspaceID uint) (strict, override bool) {
+	if s.wsSettingRepo != nil {
+		if strict, ok := s.wsSettingRepo.RequireVerifiedDomainOverride(workspaceID); ok {
+			return strict, true
+		}
+	}
+	if s.settings != nil {
+		return s.settings.RequireDomainVerification(), false
+	}
+	return false, false
 }
 
 // validateEmailAddress checks that a string is a valid RFC 5322 email address

@@ -185,9 +185,20 @@ func (h *EmailSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error
 		}
 	}
 
-	// Mark as processing
+	// Claim the email atomically (R-26): the queued→processing flip happens in
+	// a single UPDATE, so when a duplicate task is delivered (archived-task
+	// re-enqueue race, redelivery) only one handler wins and sends. The loser
+	// returns success — asynq must not retry a task it already delivered.
+	claimed, err := h.emailRepo.ClaimForProcessing(em.ID)
+	if err != nil {
+		return fmt.Errorf("failed to claim email %d for processing: %w", em.ID, err)
+	}
+	if !claimed {
+		logger.Info("worker: email already claimed by another delivery, skipping",
+			"id", em.ID, "status", em.Status)
+		return nil
+	}
 	em.Status = models.EmailStatusProcessing
-	_ = h.emailRepo.Update(em)
 
 	// Resolve sender address for validation/domain matching
 	senderAddr := em.Sender
@@ -389,7 +400,11 @@ func (h *EmailSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error
 	if sharedServerID != 0 && h.serverRepo != nil {
 		go h.serverRepo.IncrementSentCount(sharedServerID)
 	}
-	h.dispatcher.Dispatch(em.UserID, em.WorkspaceID, "email.sent", em.UUID, em.Sender)
+	if h.dispatcher != nil {
+		if h.dispatcher != nil {
+			h.dispatcher.Dispatch(em.UserID, em.WorkspaceID, "email.sent", em.UUID, em.Sender)
+		}
+	}
 	if h.onSent != nil {
 		h.onSent()
 	}
@@ -411,7 +426,11 @@ func (h *EmailSendHandler) markFailed(em *models.Email, reason string) {
 	em.ErrorMessage = reason
 	_ = h.emailRepo.Update(em)
 	emailhistory.RecordFailed(h.recorder, em, reason, nil)
-	h.dispatcher.Dispatch(em.UserID, em.WorkspaceID, "email.failed", em.UUID, em.Sender)
+	if h.dispatcher != nil {
+		if h.dispatcher != nil {
+			h.dispatcher.Dispatch(em.UserID, em.WorkspaceID, "email.failed", em.UUID, em.Sender)
+		}
+	}
 	if h.onFailed != nil {
 		h.onFailed()
 	}
@@ -531,7 +550,9 @@ func (h *EmailSendHandler) handlePermanentRejection(em *models.Email, se *email.
 		}
 	}
 
-	h.dispatcher.Dispatch(em.UserID, em.WorkspaceID, "email.failed", em.UUID, em.Sender)
+	if h.dispatcher != nil {
+		h.dispatcher.Dispatch(em.UserID, em.WorkspaceID, "email.failed", em.UUID, em.Sender)
+	}
 	if h.onFailed != nil {
 		h.onFailed()
 	}

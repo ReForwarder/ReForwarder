@@ -178,6 +178,15 @@ func runConstraints(db *gorm.DB) {
 		END IF;
 	END $$`)
 
+	// 2FA recovery codes (R-10) belong to their user: deleting the account
+	// (retention, GDPR erasure) removes the codes too.
+	db.Exec(`DO $$ BEGIN
+		IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_user_recovery_codes_user') THEN
+			ALTER TABLE user_recovery_codes ADD CONSTRAINT fk_user_recovery_codes_user
+				FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
+		END IF;
+	END $$`)
+
 	db.Exec(`DO $$ BEGIN
 		CREATE INDEX IF NOT EXISTS idx_message_filters_lookup ON message_filters (workspace_id, enabled);
 	EXCEPTION WHEN others THEN NULL;

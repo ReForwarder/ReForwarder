@@ -138,11 +138,23 @@ func (w *Worker) retryEmail(em *models.Email, server *models.SMTPServer) {
 		w.onRetry()
 	}
 
-	// If an enqueuer is available, re-enqueue instead of sending synchronously
+	// If an enqueuer is available, re-enqueue instead of sending synchronously.
+	// The claim is a CAS (R-26): failed→queued happens in one UPDATE, so this
+	// poller and a user retry (or a second poller) can never both claim the
+	// same email and enqueue two tasks.
 	if w.enqueuer != nil {
+		claimed, err := w.emailRepo.ClaimForRetry(em.ID)
+		if err != nil {
+			logger.Error("retry worker: failed to claim email", "id", em.ID, "error", err)
+			return
+		}
+		if !claimed {
+			logger.Info("retry worker: email no longer failed (claimed elsewhere), skipping", "id", em.ID)
+			return
+		}
 		em.Status = models.EmailStatusQueued
 		em.RetryCount++
-		_ = w.emailRepo.Update(em)
+		em.ErrorMessage = ""
 		if err := w.enqueuer.EnqueueEmailSend(em.ID, ""); err != nil {
 			em.Status = models.EmailStatusFailed
 			em.ErrorMessage = err.Error()
@@ -154,10 +166,23 @@ func (w *Worker) retryEmail(em *models.Email, server *models.SMTPServer) {
 		return
 	}
 
-	// Synchronous fallback
+	// Synchronous fallback. Claim failed→processing first so two pollers (or a
+	// poller and a user retry racing the send) cannot both deliver; the claim
+	// also stops FindFailedForRetry from re-listing the row mid-send.
+	claimed, err := w.emailRepo.ClaimFailedForProcessing(em.ID)
+	if err != nil {
+		logger.Error("retry worker: failed to claim email", "id", em.ID, "error", err)
+		return
+	}
+	if !claimed {
+		logger.Info("retry worker: email no longer failed (claimed elsewhere), skipping", "id", em.ID)
+		return
+	}
+	em.Status = models.EmailStatusProcessing
 	em.RetryCount++
 
 	if err := w.sender.Send(server, em.Sender, em.Recipients, em.Subject, em.HTMLBody, em.TextBody, nil, nil, em.ListUnsubscribeURL, em.ListUnsubscribeMailto, em.ListUnsubscribePost); err != nil {
+		em.Status = models.EmailStatusFailed
 		em.ErrorMessage = err.Error()
 		_ = w.emailRepo.Update(em)
 		logger.Debug("retry worker: email retry failed", "id", em.ID, "attempt", em.RetryCount, "error", err)

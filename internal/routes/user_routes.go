@@ -117,6 +117,28 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 		},
 		{
 			Method:      http.MethodPost,
+			Path:        "/2fa/recovery-codes",
+			Handler:     okapi.H(r.h.user.GenerateRecoveryCodes),
+			Group:       userGroup,
+			Summary:     "Regenerate 2FA recovery codes",
+			Description: "Issue a fresh set of single-use 2FA recovery codes (R-10). Requires the current TOTP code; the plaintext codes are returned once and never again.",
+			Request:     &handlers.GenerateRecoveryCodesRequest{},
+			Response:    &dto.Response[handlers.RecoveryCodesResponse]{},
+			Options: []okapi.RouteOption{
+				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodGet,
+			Path:        "/2fa/recovery-codes/count",
+			Handler:     r.h.user.RecoveryCodeCount,
+			Group:       userGroup,
+			Summary:     "Count remaining 2FA recovery codes",
+			Description: "How many single-use 2FA recovery codes the account has left.",
+			Response:    &dto.Response[handlers.RecoveryCodeCountResponse]{},
+		},
+		{
+			Method:      http.MethodPost,
 			Path:        "/delete",
 			Handler:     r.h.user.RequestAccountDeletion,
 			Group:       userGroup,

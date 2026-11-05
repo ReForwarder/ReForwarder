@@ -29,6 +29,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/goposta/posta/internal/dto"
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/audit"
 	"github.com/goposta/posta/internal/services/clientinfo"
 	"github.com/goposta/posta/internal/services/emailverify"
 	"github.com/goposta/posta/internal/services/eventbus"
@@ -58,6 +59,8 @@ type UserHandler struct {
 	passwordReset *passwordreset.Service
 	db            *gorm.DB
 	migrator      *workspaceprovision.Service
+	audit         *audit.Logger
+	recovery      *RecoveryCodeStore
 }
 
 func NewUserHandler(repo *repositories.UserRepository, jwtSecret string, seeder *seeder.Seeder, bus *eventbus.EventBus) *UserHandler {
@@ -72,6 +75,18 @@ func NewUserHandler(repo *repositories.UserRepository, jwtSecret string, seeder 
 func (h *UserHandler) SetMigrator(db *gorm.DB, m *workspaceprovision.Service) {
 	h.db = db
 	h.migrator = m
+	h.recovery = NewRecoveryCodeStore(db)
+}
+
+// SetAuditLogger wires the audit trail so recovery-code logins are recorded.
+func (h *UserHandler) SetAuditLogger(a *audit.Logger) {
+	h.audit = a
+}
+
+// recoveryCodes returns the recovery-code store, or nil when the handler was
+// built without a database (some tests construct it bare).
+func (h *UserHandler) recoveryCodes() *RecoveryCodeStore {
+	return h.recovery
 }
 
 func (h *UserHandler) ensurePersonalWorkspace(userID uint) {
@@ -494,8 +509,17 @@ func (h *UserHandler) Login(c *okapi.Context, req *LoginRequest) error {
 			})
 		}
 		if !twofactor.ValidateCode(user.TwoFactorSecret, req.Body.TwoFactorCode) {
-			h.publishLoginFailed(&user.ID, user.Email, c.RealIP(), "bad_2fa")
-			return c.AbortUnauthorized("invalid 2FA code")
+			// R-10: a single-use recovery code is accepted in place of the TOTP
+			// code, so a lost authenticator no longer requires admin help.
+			if !h.consumeRecoveryCode(user.ID, req.Body.TwoFactorCode) {
+				h.publishLoginFailed(&user.ID, user.Email, c.RealIP(), "bad_2fa")
+				return c.AbortUnauthorized("invalid 2FA code")
+			}
+			if h.audit != nil {
+				h.audit.Log(user.ID, user.Email, c.RealIP(), "user.recovery_code_login",
+					fmt.Sprintf("User %q signed in with a 2FA recovery code", user.Email),
+					map[string]any{"remaining_codes_hint": "see /users/me/2fa/recovery-codes/count"})
+			}
 		}
 	}
 
@@ -538,6 +562,15 @@ func (h *UserHandler) Login(c *okapi.Context, req *LoginRequest) error {
 			Role  models.UserRole `json:"role"`
 		}{ID: user.ID, Name: user.Name, Email: user.Email, Role: user.Role},
 	})
+}
+
+// consumeRecoveryCode burns a single-use 2FA recovery code (R-10). A handler
+// built without a database (some tests) never consumes.
+func (h *UserHandler) consumeRecoveryCode(userID uint, code string) bool {
+	if h.recovery == nil {
+		return false
+	}
+	return h.recovery.Consume(userID, code)
 }
 
 // Me returns the current user's profile.
@@ -620,9 +653,23 @@ func (h *UserHandler) Verify2FA(c *okapi.Context, req *Verify2FARequest) error {
 		return c.AbortInternalServerError("failed to enable 2FA")
 	}
 
+	// R-10: issue the single-use recovery codes at enable time. The plaintext
+	// is returned exactly once — only bcrypt digests are stored.
+	recoveryCodes := []string{}
+	if h.recovery != nil {
+		if codes, err := h.recovery.Generate(user.ID); err == nil {
+			recoveryCodes = codes
+		} else {
+			logger.Error("failed to generate recovery codes", "user_id", user.ID, "err", err)
+		}
+	}
+
 	h.sendTwoFactorAlert(user.ID, "enabled")
 
-	return ok(c, okapi.M{"message": "2FA enabled successfully"})
+	return ok(c, okapi.M{
+		"message":        "2FA enabled successfully",
+		"recovery_codes": recoveryCodes,
+	})
 }
 
 // Disable2FA disables 2FA after verifying a code.
@@ -644,6 +691,13 @@ func (h *UserHandler) Disable2FA(c *okapi.Context, req *Disable2FARequest) error
 	user.TwoFactorSecret = ""
 	if err := h.repo.Update(user); err != nil {
 		return c.AbortInternalServerError("failed to disable 2FA")
+	}
+
+	// R-10: codes belong to the disabled factor — drop them so none survive.
+	if h.recovery != nil {
+		if err := h.recovery.DeleteAll(user.ID); err != nil {
+			logger.Error("failed to delete recovery codes", "user_id", user.ID, "err", err)
+		}
 	}
 
 	h.sendTwoFactorAlert(user.ID, "disabled")

@@ -33,6 +33,7 @@ import (
 	"github.com/goposta/posta/internal/services/auth"
 	"github.com/goposta/posta/internal/services/automation"
 	"github.com/goposta/posta/internal/services/cache"
+	domainpkg "github.com/goposta/posta/internal/services/domain"
 	"github.com/goposta/posta/internal/services/email"
 	"github.com/goposta/posta/internal/services/emailhistory"
 	"github.com/goposta/posta/internal/services/emailverify"
@@ -116,6 +117,7 @@ type routerHandlers struct {
 	dashboard        *handlers.DashboardHandler
 	domain           *handlers.DomainHandler
 	domainSigning    *handlers.DomainSigningHandler
+	domainHealth     *handlers.DomainHealthHandler
 	bounce           *handlers.BounceHandler
 	suppression      *handlers.SuppressionHandler
 	unsubscribeList  *handlers.UnsubscribeListHandler
@@ -319,6 +321,7 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 			dashboard:        handlers.NewDashboardHandler(db, statsCache, webhookDeliveryRepo),
 			domain:           handlers.NewDomainHandler(domainRepo),
 			domainSigning:    handlers.NewDomainSigningHandler(repositories.NewDomainSigningKeyRepository(db), domainRepo, auditLogger),
+			domainHealth:     handlers.NewDomainHealthHandler(domainpkg.NewHealthService(db, repositories.NewDomainSigningKeyRepository(db)), domainRepo, auditLogger),
 			adminDomain:      handlers.NewAdminDomainHandler(db, domainRepo, auditLogger),
 			adminWorkspace:   handlers.NewAdminWorkspaceHandler(db, workspaceRepo),
 			notification:     handlers.NewNotificationHandler(notificationRepo, inboxService),
@@ -345,6 +348,8 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	r.h.user.SetSessionRepo(sessionRepo)
 	r.h.admin.SetSessionRepo(sessionRepo, sessionStore)
 	r.h.admin.SetMigrator(migrator)
+	// Recovery-code logins (R-10) land on the user audit trail.
+	r.h.user.SetAuditLogger(auditLogger)
 
 	// Security rules read/write through the settings repository
 	r.h.security.SetSettingRepo(settingRepo)

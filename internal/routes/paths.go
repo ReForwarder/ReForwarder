@@ -45,6 +45,8 @@ const (
 	pathAutomationByID        = "/automations/{id:int}"
 	pathCampaignByID          = "/campaigns/{id:int}"
 	pathDomainByID            = "/domains/{id:int}"
+	pathDomainHealth          = "/domains/{id:int}/health"
+	pathDomainDiagnose        = "/domains/{id:int}/health/diagnose"
 	pathFormByID              = "/forms/{id:int}"
 	pathPlanByID              = "/plans/{id:int}"
 	pathSegmentByID           = "/segments/{id:int}"

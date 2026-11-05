@@ -407,6 +407,19 @@ func (p *CampaignProcessor) HandleCampaignBatch(_ context.Context, t *asynq.Task
 			sender = fmt.Sprintf("%s <%s>", campaign.FromName, campaign.FromEmail)
 		}
 
+		// Claim the message atomically (R-26): pending→queued in one UPDATE
+		// before any email row exists, so a re-delivered batch task or the
+		// stuck-campaign restart sweep can never double-claim a message another
+		// batch is already sending (duplicate email rows). Deferred messages
+		// (A/B hold-back, timezone window) are never claimed and stay pending.
+		claimed, err := p.messageRepo.ClaimForSend(msg.ID)
+		if err != nil {
+			return fmt.Errorf("failed to claim campaign message %d: %w", msg.ID, err)
+		}
+		if !claimed {
+			continue // another batch claimed it
+		}
+
 		// Create email record. Assign the UUID up front so the per-recipient web
 		// view link can be built before persisting.
 		em := &models.Email{
@@ -453,9 +466,9 @@ func (p *CampaignProcessor) HandleCampaignBatch(_ context.Context, t *asynq.Task
 			_ = p.emailRepo.Update(em)
 		}
 
-		// Link email to campaign message
+		// Link email to campaign message. The message is already queued — the
+		// R-26 claim flipped it before the email row was created.
 		_ = p.messageRepo.SetEmailID(msg.ID, em.ID)
-		_ = p.messageRepo.UpdateStatus(msg.ID, models.CampaignMsgQueued, "")
 
 		// Enqueue email for sending
 		if err := p.producer.EnqueueEmailSend(em.ID, QueueBulk); err != nil {
