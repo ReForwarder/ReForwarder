@@ -169,6 +169,15 @@ func runConstraints(db *gorm.DB) {
 		END IF;
 	END $$`)
 
+	// DKIM signing keys belong to their domain: deleting a domain (and with it
+	// the verification basis of its keys) removes the keys too.
+	db.Exec(`DO $$ BEGIN
+		IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_domain_signing_keys_domain') THEN
+			ALTER TABLE domain_signing_keys ADD CONSTRAINT fk_domain_signing_keys_domain
+				FOREIGN KEY (domain_id) REFERENCES domains(id) ON DELETE CASCADE;
+		END IF;
+	END $$`)
+
 	db.Exec(`DO $$ BEGIN
 		CREATE INDEX IF NOT EXISTS idx_message_filters_lookup ON message_filters (workspace_id, enabled);
 	EXCEPTION WHEN others THEN NULL;

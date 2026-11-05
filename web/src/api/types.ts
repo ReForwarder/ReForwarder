@@ -1129,6 +1129,16 @@ export interface BulkImportResult {
 // Campaigns
 export type CampaignStatus = 'draft' | 'scheduled' | 'sending' | 'sent' | 'paused' | 'cancelled'
 
+/** One weighted A/B branch of a campaign (R-08). */
+export interface CampaignABTestVariant {
+  name: string
+  subject: string
+  template_id?: number | null
+  split_percentage: number
+}
+
+export type CampaignABTestMetric = 'open_rate' | 'click_rate'
+
 export interface CampaignStats {
   total: number
   pending: number
@@ -1151,12 +1161,58 @@ export interface Campaign {
   status: CampaignStatus
   list_id: number
   send_rate: number
+  // R-09: timezone-aware sending
+  send_at_local_time?: boolean
+  local_send_hour?: number | null
+  // R-08: A/B test
+  ab_test_enabled?: boolean
+  ab_test_variants?: CampaignABTestVariant[]
+  ab_test_metric?: CampaignABTestMetric
+  ab_test_window_hours?: number
+  ab_test_min_sample?: number
+  ab_test_winner?: string
+  ab_test_winner_sent?: boolean
   scheduled_at?: string
   started_at?: string
   completed_at?: string
   created_at: string
   updated_at?: string
   stats?: CampaignStats
+}
+
+/** Per-variant engagement for the campaign detail's A/B table (R-08). */
+export interface CampaignABVariantStat {
+  variant: string
+  sent: number
+  opened: number
+  clicked: number
+  open_rate: number
+  click_rate: number
+  winner: boolean
+}
+
+export interface CampaignABTestStats {
+  enabled: boolean
+  metric: CampaignABTestMetric
+  window_hours: number
+  min_sample: number
+  winner?: string
+  winner_sent: boolean
+  window_ends_at?: string
+  decision?: Record<string, any>
+  variants: CampaignABVariantStat[]
+}
+
+/** One timezone row of the campaign detail's distribution list (R-09). */
+export interface CampaignTimezoneCount {
+  timezone: string
+  count: number
+}
+
+export interface CampaignTimezones {
+  send_at_local_time: boolean
+  local_send_hour?: number | null
+  timezones: CampaignTimezoneCount[]
 }
 
 export type CampaignMessageStatus = 'pending' | 'queued' | 'sent' | 'failed' | 'skipped'

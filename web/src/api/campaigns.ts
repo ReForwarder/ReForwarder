@@ -1,5 +1,24 @@
 import api from './client'
-import type { ApiResponse, PaginatedResponse, Campaign, CampaignMessage, CampaignAnalyticsData } from './types'
+import type {
+  ApiResponse,
+  PaginatedResponse,
+  Campaign,
+  CampaignABTestMetric,
+  CampaignABTestStats,
+  CampaignABTestVariant,
+  CampaignMessage,
+  CampaignTimezones,
+  CampaignAnalyticsData,
+} from './types'
+
+/** A/B test configuration fields (R-08). */
+export interface CampaignABTestConfig {
+  ab_test_enabled: boolean
+  ab_test_variants?: CampaignABTestVariant[]
+  ab_test_metric?: CampaignABTestMetric
+  ab_test_window_hours?: number
+  ab_test_min_sample?: number
+}
 
 export const campaignsApi = {
   list(page = 0, size = 20, status?: string) {
@@ -21,6 +40,15 @@ export const campaignsApi = {
     list_id?: number
     segment_id?: number
     send_rate?: number
+    // R-09: timezone-aware sending
+    send_at_local_time?: boolean
+    local_send_hour?: number | null
+    // R-08: A/B test
+    ab_test_enabled?: boolean
+    ab_test_variants?: CampaignABTestVariant[]
+    ab_test_metric?: CampaignABTestMetric
+    ab_test_window_hours?: number
+    ab_test_min_sample?: number
     scheduled_at?: string
   }) {
     return api.post<ApiResponse<Campaign>>('/workspaces/current/campaigns', data)
@@ -37,6 +65,13 @@ export const campaignsApi = {
     list_id: number
     segment_id: number
     send_rate: number
+    send_at_local_time: boolean
+    local_send_hour: number | null
+    ab_test_enabled: boolean
+    ab_test_variants: CampaignABTestVariant[]
+    ab_test_metric: CampaignABTestMetric
+    ab_test_window_hours: number
+    ab_test_min_sample: number
     scheduled_at: string
   }>) {
     return api.put<ApiResponse<Campaign>>(`/workspaces/current/campaigns/${id}`, data)
@@ -61,5 +96,13 @@ export const campaignsApi = {
   },
   analytics(id: number) {
     return api.get<ApiResponse<CampaignAnalyticsData>>(`/workspaces/current/campaigns/${id}/analytics`)
+  },
+  // R-08: per-variant stats + winner decision for the campaign detail.
+  abTest(id: number) {
+    return api.get<ApiResponse<CampaignABTestStats>>(`/workspaces/current/campaigns/${id}/ab-test`)
+  },
+  // R-09: subscriber timezone distribution + timezone-aware sending config.
+  timezones(id: number) {
+    return api.get<ApiResponse<CampaignTimezones>>(`/workspaces/current/campaigns/${id}/timezones`)
   },
 }

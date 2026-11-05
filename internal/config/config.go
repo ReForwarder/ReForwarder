@@ -194,6 +194,17 @@ type Config struct {
 	// A stalled relay must fail within this budget so the worker slot frees up
 	// and asynq retries the task instead of wedging forever.
 	SMTPDialTimeoutSecs int
+
+	// Provider event webhook secrets (R-04). Each upstream provider that
+	// posts delivery events to /api/v1/webhooks/provider/{provider} is
+	// authenticated by its own signing secret; a provider whose secret is
+	// empty answers 501 — the endpoint exists but the integration is not
+	// configured. See internal/services/provider_events (package doc) for the
+	// scheme each secret keys.
+	ProviderSESSecret      string // POSTA_PROVIDER_SES_SECRET — SNS topic HMAC secret (SignatureVersion 1)
+	ProviderSendGridKey    string // POSTA_PROVIDER_SENDGRID_KEY — HMAC verification key for X-SendGrid-Signature
+	ProviderPostmarkSecret string // POSTA_PROVIDER_POSTMARK_SECRET — webhook token (header or Basic auth)
+	ProviderMailgunKey     string // POSTA_PROVIDER_MAILGUN_KEY — webhook signing key
 }
 type SystemSMTPConfig struct {
 	Host       string
@@ -408,6 +419,11 @@ func New() *Config {
 		SMTPRelayRateWindow:     goutils.EnvInt("POSTA_SMTP_RELAY_RATE_WINDOW", 60),
 
 		SMTPDialTimeoutSecs: goutils.EnvInt("POSTA_SMTP_DIAL_TIMEOUT_SECS", 15),
+
+		ProviderSESSecret:      goutils.Env("POSTA_PROVIDER_SES_SECRET", ""),
+		ProviderSendGridKey:    goutils.Env("POSTA_PROVIDER_SENDGRID_KEY", ""),
+		ProviderPostmarkSecret: goutils.Env("POSTA_PROVIDER_POSTMARK_SECRET", ""),
+		ProviderMailgunKey:     goutils.Env("POSTA_PROVIDER_MAILGUN_KEY", ""),
 	}
 }
 

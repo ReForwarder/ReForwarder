@@ -51,6 +51,7 @@ func Run(db *gorm.DB) error {
 		&models.Server{},
 		&models.Webhook{},
 		&models.Domain{},
+		&models.DomainSigningKey{},
 		&models.Bounce{},
 		&models.Suppression{},
 		&models.UnsubscribeList{},
