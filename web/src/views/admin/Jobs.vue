@@ -350,11 +350,56 @@ function scheduleName(schedule: string) {
           </div>
         </div>
       </section>
+
+      <!-- ==================== Prometheus metrics (R-12) ==================== -->
+      <section class="jobs-section">
+        <div class="section-head">
+          <h2>Prometheus metrics</h2>
+        </div>
+        <div class="card">
+          <div class="card-body">
+            <p style="margin: 0 0 10px; font-size: 13.5px; color: var(--text-secondary)">
+              A Prometheus endpoint serves counters for HTTP traffic, email delivery, bounces, suppressions,
+              inbound processing, webhooks, delivery queues, campaigns and automations.
+              It is <strong>off by default</strong> (the endpoint is unauthenticated, so leaving it off keeps
+              public deployments from exposing usage counters). Enable it on a trusted network with:
+            </p>
+            <code class="metrics-env">POSTA_METRICS_ENABLED=true</code>
+            <p style="margin: 10px 0 0; font-size: 13px; color: var(--text-muted)">
+              Scrape <code>GET /metrics</code> —
+              request counters <code>posta_http_requests_total</code> / <code>posta_http_request_duration_seconds</code>,
+              delivery <code>posta_emails_sent_total</code>, <code>posta_emails_failed_total</code>,
+              <code>posta_emails_queue_size</code>, <code>posta_email_retries_total</code>,
+              webhooks <code>posta_webhook_deliveries_total</code>, <code>posta_webhook_delivery_duration_seconds</code>,
+              bounces <code>posta_bounces_total</code>, <code>posta_suppressions_total</code>,
+              inbound <code>posta_inbound_messages_*_total</code>, <code>posta_inbound_bytes_total</code>,
+              <code>posta_inbound_ingest_duration_seconds</code>,
+              forms <code>posta_form_messages_received_total</code>, <code>posta_form_message_notifications_total</code>,
+              workers <code>posta_active_workers</code>, queues <code>posta_queue_archived_tasks</code>,
+              campaigns <code>posta_campaigns_started_total</code>, <code>posta_campaigns_completed_total</code>,
+              <code>posta_campaign_messages_queued_total</code>, and automations
+              <code>posta_automation_journeys_{enrolled,completed,exited,failed}_total</code>,
+              <code>posta_automation_node_failures_total</code>, <code>posta_automation_schedule_fires_total</code>.
+            </p>
+          </div>
+        </div>
+      </section>
     </template>
   </div>
 </template>
 
 <style scoped>
+.metrics-env {
+  display: inline-block;
+  padding: 4px 10px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm, 4px);
+}
+
 .queues-section,
 .jobs-section {
   margin-bottom: 2rem;

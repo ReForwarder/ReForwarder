@@ -120,7 +120,28 @@ export interface ApiKey {
   revoked: boolean
   allowed_ips: string[] | null
   scopes: string[] | null
+  /** Per-key request caps (R-15); 0 = unlimited. */
+  rate_limit_hourly?: number
+  rate_limit_daily?: number
   created_by?: ActorRef | null
+}
+
+/** One day of a key's usage (R-18); zero-count days are gap-free. */
+export interface ApiKeyUsageDay {
+  day: string
+  requests: number
+  sends: number
+}
+
+export interface ApiKeyUsageTotals {
+  requests: number
+  sends: number
+}
+
+export interface ApiKeyUsage {
+  days: ApiKeyUsageDay[]
+  days_trailing: number
+  totals: ApiKeyUsageTotals
 }
 
 export interface Contact {
@@ -1742,6 +1763,10 @@ export interface AutomationTriggerConfig {
   event_kind: string
   list_id?: number | null
   custom_event_name?: string
+  /** Schedule triggers (R-13): standard 5-field cron, optional CRON_TZ=. */
+  cron_expression?: string
+  /** Schedule-trigger audience when it targets a saved segment (R-13). */
+  segment_id?: number | null
   /** 'once' (deduped per contact) or 'every_time'. */
   frequency: string
   conditions?: AutomationFilterRule[]

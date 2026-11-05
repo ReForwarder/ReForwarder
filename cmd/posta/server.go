@@ -376,6 +376,7 @@ func newInboundServiceForWorker(db *gorm.DB,
 		svc.SetEventBus(bus)
 	}
 	attachThreadRouter(svc, db, cfg, producer)
+	attachDMARC(svc, db)
 	return svc
 }
 
@@ -393,6 +394,15 @@ func attachThreadRouter(svc *inbound.Service, db *gorm.DB, cfg *config.Config, p
 		router.SetEnqueuer(producer)
 	}
 	svc.SetThreadRouter(router)
+}
+
+// attachDMARC wires DMARC aggregate-report ingestion (R-17) into every inbound
+// service that parses mail. The receiver itself stays default-off; when it
+// runs, reports mailed to the tenants' rua: addresses are parsed and stored
+// beside the message. The processor contains its own errors — ingestion must
+// never fail because DMARC parsing did.
+func attachDMARC(svc *inbound.Service, db *gorm.DB) {
+	svc.EnableDMARC(db)
 }
 
 // startInboundSMTPServer configures and launches the built-in SMTP receiver.
@@ -429,6 +439,7 @@ func startInboundSMTPServer(
 	svc.OnRejected(metrics.IncrementInboundRejected)
 	svc.OnBytes(metrics.AddInboundBytes)
 	svc.OnIngestDuration(metrics.ObserveInboundIngestDuration)
+	attachDMARC(svc, db)
 
 	backend := inbound.NewBackend(svc, domainRepo, cfg.InboundMaxMessageSize)
 	if cfg.InboundSMTPRateLimit > 0 {

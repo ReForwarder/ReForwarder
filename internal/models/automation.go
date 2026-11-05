@@ -73,7 +73,8 @@ const (
 
 // Trigger event kinds matched against AutomationTriggerConfig.EventKind.
 // Custom ingested events use AutomationEventCustom; the specific name is
-// carried in CustomEventName.
+// carried in CustomEventName. AutomationEventSchedule is not an event at all:
+// the engine's cron scheduler fires it on the configured cadence (R-13).
 const (
 	AutomationEventListSubscribed = "list.subscribed"
 	AutomationEventContactCreated = "contact.created"
@@ -82,6 +83,7 @@ const (
 	AutomationEventEmailClicked   = "email.clicked"
 	AutomationEventEmailBounced   = "email.bounced"
 	AutomationEventCustom         = "custom"
+	AutomationEventSchedule       = "schedule"
 )
 
 // Trigger frequency: once dedups per (automation, subscriber) through the
@@ -163,9 +165,17 @@ type AutomationTriggerConfig struct {
 	ListID    *uint  `json:"list_id,omitempty"`
 	// CustomEventName matches the ingest event name when EventKind is a
 	// custom-event kind.
-	CustomEventName string       `json:"custom_event_name,omitempty"`
-	Frequency       string       `json:"frequency"`            // once|every_time
-	Conditions      []FilterRule `json:"conditions,omitempty"` // AND-combined vs the Subscriber
+	CustomEventName string `json:"custom_event_name,omitempty"`
+	// CronExpression drives schedule triggers (R-13): a standard 5-field cron
+	// expression, optionally with a CRON_TZ= prefix. Empty except for
+	// EventKind "schedule".
+	CronExpression string `json:"cron_expression,omitempty"`
+	// SegmentID is the schedule trigger's audience when the automation targets
+	// a saved segment instead of a list (R-13). Segment-membership conditions
+	// (R-14) reference segments through FilterRule values, not this field.
+	SegmentID  *uint        `json:"segment_id,omitempty"`
+	Frequency  string       `json:"frequency"`            // once|every_time
+	Conditions []FilterRule `json:"conditions,omitempty"` // AND-combined vs the Subscriber
 }
 
 // TriggerNodeConfig is the Config of the root trigger node; it mirrors
@@ -175,6 +185,8 @@ type TriggerNodeConfig struct {
 	EventKind       string       `json:"event_kind,omitempty"`
 	ListID          *uint        `json:"list_id,omitempty"`
 	CustomEventName string       `json:"custom_event_name,omitempty"`
+	CronExpression  string       `json:"cron_expression,omitempty"`
+	SegmentID       *uint        `json:"segment_id,omitempty"`
 	Frequency       string       `json:"frequency,omitempty"`
 	Conditions      []FilterRule `json:"conditions,omitempty"`
 }
@@ -249,6 +261,10 @@ type WorkflowStats struct {
 	Completed int64 `json:"completed"`
 	Exited    int64 `json:"exited"`
 	Failed    int64 `json:"failed"`
+	// LastFiredAt is the schedule trigger's checkpoint (R-13): the last cron
+	// occurrence that was fired (or the first-sight instant, so a fresh
+	// automation never replays the past). Nil for event-triggered automations.
+	LastFiredAt *time.Time `json:"last_fired_at,omitempty"`
 }
 
 // DefaultWorkflowStatsJSON is the zero-valued stats document persisted with a

@@ -216,6 +216,7 @@ func runWorker() error {
 		parseSvc.SetEnqueuer(parseProducer)
 		parseSvc.SetEventBus(parseBus)
 		attachThreadRouter(parseSvc, db, cfg, parseProducer)
+		parseSvc.EnableDMARC(db) // R-17: parse DMARC aggregate reports on the parse path
 		parseHandler := worker.NewInboundParseHandler(
 			repositories.NewInboundEmailRepository(db),
 			parseSvc,

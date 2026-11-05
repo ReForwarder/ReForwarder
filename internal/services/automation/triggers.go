@@ -25,7 +25,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goposta/posta/internal/metrics"
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/jkaninda/logger"
 )
 
@@ -106,15 +108,24 @@ func (e *Engine) enrollAutomation(automation *models.Automation, sub *models.Sub
 	if !triggerMatches(cfg, automation, ev) {
 		return
 	}
-	if !EvaluateConditions(cfg.Conditions, sub, func(listID uint) bool {
-		return e.lists.IsMember(listID, sub.ID)
-	}) {
+	// Conditions are evaluated in the automation's tenant so in_segment rules
+	// (R-14) resolve against segments the workflow's author can see.
+	scope := repositories.ResourceScope{UserID: sub.UserID, WorkspaceID: automation.WorkspaceID}
+	if !evaluateConditionSet(cfg.Conditions, sub,
+		func(listID uint) bool { return e.lists.IsMember(listID, sub.ID) },
+		e.segmentMemberChecker(scope, sub.ID),
+	) {
 		return
 	}
 
 	frequency := cfg.Frequency
 	if frequency == "" {
 		frequency = FrequencyOnce
+		if cfg.EventKind == models.AutomationEventSchedule {
+			// A schedule is inherently recurring: the once-per-contact-forever
+			// default would silence every digest after its first fire (R-13).
+			frequency = FrequencyEveryTime
+		}
 	}
 	if frequency == FrequencyOnce {
 		// The permanent dedup row decides atomically: false means this contact
@@ -165,6 +176,7 @@ func (e *Engine) createJourneyFor(automation *models.Automation, sub *models.Sub
 		logger.Error("automation: journey creation failed", "automation_id", automation.ID, "subscriber_id", sub.ID, "error", err)
 		return
 	}
+	metrics.IncrementAutomationJourneyEnrolled()
 	if err := e.automationRepo.IncrementStat(automation.ID, "enrolled"); err != nil {
 		logger.Warn("automation: enrolled stat increment failed", "automation_id", automation.ID, "error", err)
 	}

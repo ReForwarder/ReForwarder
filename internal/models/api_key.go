@@ -61,9 +61,32 @@ type APIKey struct {
 	AllowedIPs  pq.StringArray `json:"allowed_ips" gorm:"type:text[]"`
 	Scopes      pq.StringArray `json:"scopes" gorm:"type:text[]"`
 
+	// Per-key request caps (R-15). 0 = unlimited: the middleware skips the
+	// limiter for that window, and a key with both zero costs no Redis traffic.
+	RateLimitHourly int `json:"rate_limit_hourly" gorm:"not null;default:0"`
+	RateLimitDaily  int `json:"rate_limit_daily" gorm:"not null;default:0"`
+
 	User      User      `json:"-" gorm:"foreignKey:UserID"`
 	CreatedBy *ActorRef `json:"created_by,omitempty" gorm:"->;foreignKey:UserID;references:ID;constraint:false"`
 }
+
+// APIKeyUsageDaily is the per-day request counter for one API key (R-18). The
+// auth middleware bumps requests (and sends on the machine-facing send
+// endpoints) via an upsert keyed on (api_key_id, day); the API-key detail view
+// reads the trailing window.
+type APIKeyUsageDaily struct {
+	ID       uint      `json:"id" gorm:"primaryKey"`
+	APIKeyID uint      `json:"api_key_id" gorm:"uniqueIndex:idx_api_key_usage_key_day;not null"`
+	Day      time.Time `json:"day" gorm:"uniqueIndex:idx_api_key_usage_key_day;type:date;not null"`
+	Requests int64     `json:"requests" gorm:"not null;default:0"`
+	Sends    int64     `json:"sends" gorm:"not null;default:0"`
+
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt *time.Time `json:"updated_at"`
+}
+
+// TableName overrides GORM's default table naming.
+func (APIKeyUsageDaily) TableName() string { return "api_key_usage_daily" }
 
 // HasScope reports whether the key grants scope s. An empty scope set means the
 // key predates scopes and grants only `send`; "*" grants everything.

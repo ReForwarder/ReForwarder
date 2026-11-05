@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/goposta/posta/internal/metrics"
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/email"
 	"github.com/goposta/posta/internal/services/settings"
@@ -260,6 +261,8 @@ func (p *CampaignProcessor) HandleCampaignStart(_ context.Context, t *asynq.Task
 	if err := p.producer.EnqueueCampaignBatch(campaign.ID, firstDelay); err != nil {
 		return err
 	}
+	metrics.IncrementCampaignStarted()
+	metrics.AddCampaignMessagesQueued(len(messages))
 	if p.dispatcher != nil {
 		p.dispatcher.DispatchCampaign(campaign.UserID, campaign.WorkspaceID, "campaign.started", campaign.ID, campaign.Name, campaign.FromEmail)
 	}
@@ -512,6 +515,7 @@ func (p *CampaignProcessor) completeCampaign(campaign *models.Campaign) error {
 	if err := p.campaignRepo.UpdateStatus(campaign.ID, models.CampaignStatusSent); err != nil {
 		return err
 	}
+	metrics.IncrementCampaignCompleted()
 	if p.dispatcher != nil {
 		p.dispatcher.DispatchCampaign(campaign.UserID, campaign.WorkspaceID, "campaign.completed", campaign.ID, campaign.Name, campaign.FromEmail)
 	}
