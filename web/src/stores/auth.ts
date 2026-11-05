@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { authApi } from '../api/auth'
+import { webauthnApi, type WebAuthnAssertionPayload } from '../api/webauthn'
 import type { User, UserProfile } from '../api/types'
 
 // The session lives in an HttpOnly cookie that the browser attaches to every
@@ -24,6 +25,18 @@ export const useAuthStore = defineStore('auth', () => {
     }
     setUser(res.data.data.user)
     // Refresh to pick up extended profile fields (email_verified_at, etc).
+    await fetchUser()
+    return res.data.data
+  }
+
+  // passkeyLogin completes the R-19 passkey sign-in: the finish call issues
+  // the same session as a password login. A 401 with requires_2fa means the
+  // passkey verified but the account owes the second factor — the Login page
+  // resubmits with the pending token and the TOTP code.
+  async function passkeyLogin(payload: WebAuthnAssertionPayload) {
+    const res = await webauthnApi.finishLogin(payload)
+    setUser(res.data.data.user)
+    // Refresh to pick up extended profile fields (impersonation flag included).
     await fetchUser()
     return res.data.data
   }
@@ -63,5 +76,5 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  return { user, isAuthenticated, isAdmin, login, logout, clearSession, fetchUser, setUser }
+  return { user, isAuthenticated, isAdmin, login, passkeyLogin, logout, clearSession, fetchUser, setUser }
 })

@@ -1,0 +1,8 @@
+services:
+  posta:
+    environment:
+      POSTA_INBOUND_ENABLED: "true"
+      POSTA_SMTP_RELAY_ENABLED: "true"
+    ports:
+      - "2525:2525"
+      - "2526:2526"

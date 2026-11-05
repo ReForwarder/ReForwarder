@@ -103,6 +103,10 @@ interface NavItem {
   hideInSystem?: boolean
   /** Only show when the backend exposes the OpenAPI docs. */
   requiresOpenapiDocs?: boolean
+  /** Only show when the backend reports POSTA_MESSAGES_ENABLED (via /info). */
+  requiresMessages?: boolean
+  /** Only show when the backend reports POSTA_INBOUND_ENABLED (via /info). */
+  requiresInbound?: boolean
   /** Deep-link into a WorkspaceSettings tab of the current workspace. */
   workspaceTab?: 'members' | 'plan' | 'settings'
   /** Link to a dedicated workspace sub-page (e.g. /workspaces/:id/members). */
@@ -159,14 +163,17 @@ const navSections: NavSection[] = [
     id: 'inbound',
     title: 'Inbound',
     items: [
-      { name: 'Inbound Emails', path: '/inbound-emails', icon: 'inbox' },
+      // POSTA_INBOUND_ENABLED gates the whole inbound pipeline; when it is off
+      // every inbound page errors, so the entry point is hidden (Section-11).
+      { name: 'Inbound Emails', path: '/inbound-emails', icon: 'inbox', requiresInbound: true },
       {
         name: 'Messages',
         path: '/messages',
         icon: 'message-square',
+        requiresMessages: true,
         children: [
-          { name: 'Forms', path: '/forms', icon: 'edit-3' },
-          { name: 'Spam Filters', path: '/message-filters', icon: 'shield' },
+          { name: 'Forms', path: '/forms', icon: 'edit-3', requiresMessages: true },
+          { name: 'Spam Filters', path: '/message-filters', icon: 'shield', requiresMessages: true },
         ],
       },
     ],
@@ -334,14 +341,29 @@ const visibleSections = computed(() =>
   })
 )
 
+/** One visibility predicate for top-level items and nested children alike. */
+function isItemVisible(item: NavItem): boolean {
+  if (item.requiresWorkspace && !wsStore.isWorkspaceContext) return false
+  if (item.requiresWorkspaceAdmin && !wsStore.isWorkspaceAdmin) return false
+  if (item.hideInSystem && wsStore.currentWorkspaceIsSystem) return false
+  if (item.requiresOpenapiDocs && !appInfo.value?.openapi_docs) return false
+  // Feature-gated entries (Section-11 gate): hidden only when /info has
+  // explicitly reported the flag false. Unlike requiresOpenapiDocs this
+  // fails open — before /info answers (or if it never does) the entries
+  // stay visible, because hiding the Messages or Inbound pages on a failed
+  // info call would hide core navigation, not a docs link.
+  if (item.requiresMessages && appInfo.value?.features?.messages_enabled === false) return false
+  if (item.requiresInbound && appInfo.value?.features?.inbound_enabled === false) return false
+  return true
+}
+
 function sectionItems(section: NavSection): NavItem[] {
-  return section.items.filter((item) => {
-    if (item.requiresWorkspace && !wsStore.isWorkspaceContext) return false
-    if (item.requiresWorkspaceAdmin && !wsStore.isWorkspaceAdmin) return false
-    if (item.hideInSystem && wsStore.currentWorkspaceIsSystem) return false
-    if (item.requiresOpenapiDocs && !appInfo.value?.openapi_docs) return false
-    return true
-  })
+  return section.items.filter(isItemVisible)
+}
+
+/** Children of a collapsible item, filtered through the same predicate. */
+function visibleChildren(item: NavItem): NavItem[] {
+  return (item.children ?? []).filter(isItemVisible)
 }
 
 /** Resolve the effective target of an item (handles workspace tab deep-links). */
@@ -473,7 +495,11 @@ function getIcon(name: string): string {
   <div class="layout" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
     <aside class="sidebar">
         <div class="sidebar-header">
-            <img src="/logo-navy.png" alt="ReForwarder" class="sidebar-logo" @click="navigate('/')" />
+            <!-- :src, not src: a static asset path compiles into an import that
+                 vite-node cannot resolve under vitest (public-dir asset); the
+                 dynamic binding yields the identical runtime URL. The image is
+                 display:none either way — the wordmark below is the logo. -->
+            <img :src="'/logo-navy.png'" alt="ReForwarder" class="sidebar-logo" @click="navigate('/')" />
             <span class="sidebar-brand-text" @click="navigate('/')">ReForwarder<span class="sidebar-brand-text-dot">.</span></span>
          
           <button class="sidebar-collapse-btn" @click="toggleSidebar"
@@ -553,7 +579,7 @@ function getIcon(name: string): string {
                   <span class="nav-icon" v-html="getIcon(item.icon)"></span>
                   <span v-if="!sidebarCollapsed" class="nav-label">{{ item.name }}</span>
                 </router-link>
-                <router-link v-for="child in item.children" v-show="!item.collapsible || groupOpen[item.name]"
+                <router-link v-for="child in visibleChildren(item)" v-show="!item.collapsible || groupOpen[item.name]"
                   :key="child.path" class="nav-item nav-subitem" :class="{ active: isItemActive(child) }"
                   :title="sidebarCollapsed ? child.name : ''" :to="child.path">
                   <span class="nav-icon" v-html="getIcon(child.icon)"></span>
@@ -741,7 +767,7 @@ function getIcon(name: string): string {
     <Transition name="sidebar-slide">
       <aside v-if="mobileOpen" class="sidebar sidebar-mobile">
         <div class="sidebar-header">
-          <img src="/logo.png" alt="ReForwarder" class="sidebar-logo" />
+          <img :src="'/logo.png'" alt="ReForwarder" class="sidebar-logo" />
           <span class="sidebar-brand-text">ReForwarder<span class="sidebar-brand-text-dot">.</span></span>
           <button class="sidebar-collapse-btn" @click="mobileOpen = false">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -826,7 +852,7 @@ function getIcon(name: string): string {
                   <span class="nav-icon" v-html="getIcon(item.icon)"></span>
                   <span class="nav-label">{{ item.name }}</span>
                 </router-link>
-                <router-link v-for="child in item.children" v-show="!item.collapsible || groupOpen[item.name]"
+                <router-link v-for="child in visibleChildren(item)" v-show="!item.collapsible || groupOpen[item.name]"
                   :key="child.path" class="nav-item nav-subitem" :class="{ active: isItemActive(child) }"
                   @click="mobileOpen = false" :to="child.path">
                   <span class="nav-icon" v-html="getIcon(child.icon)"></span>

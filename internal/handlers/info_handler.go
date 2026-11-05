@@ -29,6 +29,20 @@ type AppInfo struct {
 	Version     string `json:"version" example:"v1.0.0"`
 	CommitID    string `json:"commit_id" example:"abc1234"`
 	OpenAPIDocs bool   `json:"openapi_docs" example:"true"`
+	// Features mirrors the env-gated subsystems (Section-11 gate): the
+	// dashboard hides the nav entries whose pages would only error when the
+	// subsystem is disabled (Messages/Forms/Spam Filters, Inbound Emails).
+	Features AppFeatures `json:"features"`
+}
+
+// AppFeatures reports which feature-flagged subsystems this install enables.
+// Every field defaults to false so the dashboard hides the corresponding
+// pages unless the backend says otherwise.
+type AppFeatures struct {
+	MessagesEnabled bool `json:"messages_enabled" example:"false"`
+	InboundEnabled  bool `json:"inbound_enabled" example:"false"`
+	RelayEnabled    bool `json:"relay_enabled" example:"false"`
+	MetricsEnabled  bool `json:"metrics_enabled" example:"false"`
 }
 
 func Info(c *okapi.Context) error {
@@ -38,5 +52,11 @@ func Info(c *okapi.Context) error {
 		Version:     config.Version,
 		CommitID:    config.CommitID,
 		OpenAPIDocs: cfg.OpenAPIDocs,
+		Features: AppFeatures{
+			MessagesEnabled: cfg.MessagesEnabled,
+			InboundEnabled:  cfg.InboundEnabled,
+			RelayEnabled:    cfg.SMTPRelayEnabled,
+			MetricsEnabled:  cfg.MetricsEnabled,
+		},
 	})
 }

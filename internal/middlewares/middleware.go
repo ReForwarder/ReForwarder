@@ -64,6 +64,13 @@ const (
 	CtxAPIKeyID          = "api_key_id"
 	CtxAPIKeyScopes      = "api_key_scopes"
 	CtxAPIKeyWorkspaceID = "api_key_workspace_id"
+
+	// R-20 impersonation: set from the JWT's impersonated_by /
+	// impersonation_reason claims when the token was minted by the admin
+	// impersonation flow. Handlers (and the dashboard via the profile
+	// response) read these to show who is really acting.
+	CtxImpersonatedBy      = "impersonated_by"
+	CtxImpersonationReason = "impersonation_reason"
 )
 
 // Values stored under CtxAuthMethod.
@@ -147,9 +154,52 @@ func validateClaims(store *sessionpkg.Store, requireAdmin bool) func(c *okapi.Co
 				return errors.New("admin role required")
 			}
 		}
+
+		// R-20: mark impersonation sessions. The claims ride the token itself,
+		// so a marker that survives to the context is proof the minting flow
+		// (admin-only) put it there.
+		if id := claimUint(mapClaims["impersonated_by"]); id > 0 {
+			c.Set(CtxImpersonatedBy, int(id))
+			if reason, ok := mapClaims["impersonation_reason"].(string); ok {
+				c.Set(CtxImpersonationReason, reason)
+			}
+		}
 		return nil
 	}
 }
+
+// claimUint normalizes a JWT claim value (a float64 once decoded from JSON,
+// or an integer the minting side set directly) into a uint.
+func claimUint(v any) uint {
+	switch n := v.(type) {
+	case uint:
+		return n
+	case uint64:
+		return uint(n)
+	case int:
+		return uint(n)
+	case int64:
+		return uint(n)
+	case float64:
+		if n < 0 {
+			return 0
+		}
+		return uint(n)
+	}
+	return 0
+}
+
+// ImpersonatedBy returns the admin user ID acting through this session, or
+// 0 when the caller is not impersonated (R-20).
+func ImpersonatedBy(c *okapi.Context) uint { return uint(c.GetInt(CtxImpersonatedBy)) }
+
+// IsImpersonated reports whether the current session is an impersonation
+// session (R-20).
+func IsImpersonated(c *okapi.Context) bool { return ImpersonatedBy(c) > 0 }
+
+// ImpersonationReason returns the reason the impersonation session was
+// started, or "" when not impersonated (R-20).
+func ImpersonationReason(c *okapi.Context) string { return c.GetString(CtxImpersonationReason) }
 
 // JWTAuth builds user JWT auth (Authorization header or session cookie).
 // Revoked sessions are rejected when sessionStore is provided.
