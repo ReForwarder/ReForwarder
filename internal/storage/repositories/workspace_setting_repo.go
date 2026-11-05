@@ -61,15 +61,17 @@ func (r *WorkspaceSettingRepository) CreateOrUpdate(setting *models.WorkspaceSet
 	return r.db.Save(setting).Error
 }
 
-// RequireVerifiedDomain reports whether strict domain mode is enabled for the
-// workspace. A focused read for the email-send hot path that does not
-// auto-create a settings row; returns false when no row exists.
-func (r *WorkspaceSettingRepository) RequireVerifiedDomain(workspaceID uint) bool {
+// RequireVerifiedDomainOverride reports the workspace's strict-domain-mode
+// value and whether an explicit settings row exists (R-23). ok is false when
+// the workspace has no row, letting the caller fall back to the platform-level
+// require_domain_verification default instead of the schema's false. A focused
+// read for the email-send hot path that does not auto-create a settings row.
+func (r *WorkspaceSettingRepository) RequireVerifiedDomainOverride(workspaceID uint) (strict, ok bool) {
 	var setting models.WorkspaceSetting
 	if err := r.db.Select("require_verified_domain").
 		Where("workspace_id = ?", workspaceID).
 		First(&setting).Error; err != nil {
-		return false
+		return false, false
 	}
-	return setting.RequireVerifiedDomain
+	return setting.RequireVerifiedDomain, true
 }

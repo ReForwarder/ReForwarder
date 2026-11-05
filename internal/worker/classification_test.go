@@ -32,7 +32,6 @@ import (
 	"github.com/goposta/posta/internal/services/email"
 	"github.com/goposta/posta/internal/services/emailhistory"
 	"github.com/goposta/posta/internal/services/provider_events"
-	"github.com/goposta/posta/internal/services/webhook"
 	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/lib/pq"
 	"gorm.io/driver/postgres"
@@ -221,7 +220,7 @@ func newClassificationHandler(t *testing.T) (*EmailSendHandler, *workerCapture, 
 	h := NewEmailSendHandler(
 		repositories.NewEmailRepository(dry),
 		nil, nil, nil, nil,
-		webhook.NewDispatcher(repositories.NewWebhookRepository(dry)),
+		nil, // nil dispatcher: Dispatch goroutine races with the non-thread-safe dry-run fake DB under -race.
 	)
 	h.SetSuppressionRepo(repositories.NewSuppressionRepository(dry))
 	h.SetBounceRepo(repositories.NewBounceRepository(dry))

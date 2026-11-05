@@ -79,6 +79,20 @@ func (r *CampaignMessageRepository) FindPendingByCampaign(campaignID uint, batch
 	return items, nil
 }
 
+// ClaimForSend atomically claims a pending campaign message for batch
+// processing (R-26): the pending→queued flip happens in one UPDATE, so a
+// re-delivered batch task (asynq recovery) or the stuck-campaign restart sweep
+// can never double-claim a message another batch is already sending. The claim
+// runs before the email row is created — on creation failure the caller marks
+// the message failed, while deferred messages (A/B hold-back, timezone window)
+// are never claimed and stay pending for a later tick.
+func (r *CampaignMessageRepository) ClaimForSend(id uint) (bool, error) {
+	res := r.db.Model(&models.CampaignMessage{}).
+		Where("id = ? AND status = ?", id, models.CampaignMsgPending).
+		Update("status", models.CampaignMsgQueued)
+	return res.RowsAffected > 0, res.Error
+}
+
 func (r *CampaignMessageRepository) UpdateStatus(id uint, status models.CampaignMessageStatus, errorMsg string) error {
 	updates := map[string]interface{}{"status": status}
 	if errorMsg != "" {

@@ -899,6 +899,34 @@ func (r *Router) workspaceResourceRoutes() []okapi.RouteDefinition {
 				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
 			},
 		},
+
+		// ==================== Domain deliverability health (R-07) ====================
+		{
+			Method:      http.MethodGet,
+			Path:        pathDomainHealth,
+			Handler:     okapi.H(r.h.domainHealth.Get),
+			Group:       opsGroup,
+			Summary:     "Get domain deliverability health",
+			Description: "One view per domain: current SPF/DKIM/DMARC check results, managed DKIM signing status, recent bounce and complaint rates for mail sent from the domain, and the DNS records to set when something is off. Serves stored state — no DNS traffic.",
+			Response:    &dto.Response[handlers.DomainHealthReport]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Domain ID"),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodPost,
+			Path:        pathDomainDiagnose,
+			Handler:     okapi.H(r.h.domainHealth.Diagnose),
+			Group:       opsGroup,
+			Summary:     "Re-run domain DNS checks",
+			Description: "The health page's diagnose button: re-runs the live SPF/DKIM/DMARC checks, records the fresh results on the domain, and returns the full health report built from them.",
+			Response:    &dto.Response[handlers.DomainHealthReport]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Domain ID"),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
 		{
 			Method:      http.MethodPost,
 			Path:        pathBounces,

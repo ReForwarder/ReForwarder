@@ -433,8 +433,14 @@ func isASCII(s string) bool {
 
 // encodeHeader encodes s for an unstructured header such as Subject, folding
 // its encoded-words onto separate lines. Plain text containing "=?" is encoded
-// too, or a reader would decode what merely looks like an encoded-word.
+// too, or a reader would decode what merely looks like an encoded-word. CR, LF,
+// and NUL are replaced with a space first (R-24): a raw CR/LF in the value
+// would inject an arbitrary header line, and this is the last guard for
+// internal paths (e.g. campaign subjects) that never pass validateSendHeaders.
 func encodeHeader(s string) string {
+	if strings.ContainsAny(s, "\r\n\x00") {
+		s = strings.NewReplacer("\r", " ", "\n", " ", "\x00", " ").Replace(s)
+	}
 	if mime.BEncoding.Encode("UTF-8", s) == s && !strings.Contains(s, "=?") {
 		return foldPlain(s)
 	}
@@ -566,8 +572,14 @@ func buildMessage(from string, to []string, subject, htmlBody, textBody string, 
 		}
 	}
 
-	// Write custom headers (already filtered for safety)
+	// Write custom headers (already filtered for safety). The guard here is the
+	// final boundary (R-24): an entry whose name or value carries CR/LF/NUL
+	// would inject an arbitrary header line, so it is dropped rather than
+	// written even when a caller skipped the upstream filters.
 	for key, value := range headers {
+		if containsHeaderInjection(key) || containsHeaderInjection(value) {
+			continue
+		}
 		fmt.Fprintf(&b, "%s: %s\r\n", key, value)
 	}
 

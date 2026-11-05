@@ -74,6 +74,15 @@ func (r *SMTPCredentialRepository) UpdateLastUsed(id uint) error {
 	return r.db.Model(&models.SMTPCredential{}).Where("id = ?", id).Update("last_used_at", now).Error
 }
 
+// UpdatePasswordHashIfUnchanged replaces the stored hash only when it still
+// equals previous. Used by the R-25 legacy-hash migration so a concurrent
+// upgrade (or a reset/revoke racing it) is never clobbered.
+func (r *SMTPCredentialRepository) UpdatePasswordHashIfUnchanged(id uint, previous, next string) error {
+	return r.db.Model(&models.SMTPCredential{}).
+		Where("id = ? AND password_hash = ?", id, previous).
+		Update("password_hash", next).Error
+}
+
 func (r *SMTPCredentialRepository) Revoke(id uint) error {
 	return r.db.Model(&models.SMTPCredential{}).Where("id = ?", id).Update("revoked", true).Error
 }
