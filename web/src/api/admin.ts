@@ -8,6 +8,7 @@ import type {
   SecurityEventRecord, SecurityRule, SecurityRuleInput,
   AllowlistEntry, SecurityAllowlistInput,
   QueueStats, QueueTask, QueuesOverview, QueueTaskPage,
+  ImpersonationResponse,
 } from './types'
 import type { Announcement, AnnouncementInput } from './inbox'
 
@@ -24,6 +25,15 @@ export const adminApi = {
   },
   listUsers(page = 0, size = 20, search = '') {
     return api.get<PaginatedResponse<User>>('/admin/users', { params: { page, size, search: search || undefined } })
+  },
+  // ---- Impersonation (R-20) ----
+  impersonateUser(id: number, reason: string) {
+    return api.post<ApiResponse<ImpersonationResponse>>(`/admin/users/${id}/impersonate`, { reason })
+  },
+  // The exit route is reachable by the impersonated (non-admin) session, so it
+  // lives outside the admin middleware — see internal/routes/user_routes.go.
+  exitImpersonation() {
+    return api.post<ApiResponse<{ message: string; original_admin_id: number }>>('/admin/impersonate/exit')
   },
   // ---- Domains (platform-wide) ----
   listDomains(page = 0, size = 20, search = '', status = '', workspace = 0) {

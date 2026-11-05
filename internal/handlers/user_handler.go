@@ -161,8 +161,13 @@ type UserProfile struct {
 	DefaultWorkspaceID        *uint           `json:"default_workspace_id"`
 	// Deprecated: renamed to default_workspace_id. Mirrors it for one minor
 	// release so an older dashboard build keeps working.
-	PersonalWorkspaceID *uint     `json:"personal_workspace_id"`
-	CreatedAt           time.Time `json:"created_at"`
+	PersonalWorkspaceID *uint `json:"personal_workspace_id"`
+	// ImpersonatedBy carries the admin's user ID while the caller's session is
+	// an R-20 impersonation session, so the dashboard can show the
+	// "viewing as" banner. Absent on ordinary sessions.
+	ImpersonatedBy       *uint     `json:"impersonated_by,omitempty"`
+	ImpersonationReason  string    `json:"impersonation_reason,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
 }
 
 type Enable2FAResponse struct {
@@ -434,7 +439,7 @@ func (h *UserHandler) UpdateProfile(c *okapi.Context, req *UpdateProfileRequest)
 		return c.AbortInternalServerError("failed to update profile")
 	}
 
-	return ok(c, h.buildProfile(user))
+	return ok(c, h.buildProfile(c, user))
 }
 
 // ChangePassword allows authenticated users to change their own password.
@@ -581,12 +586,12 @@ func (h *UserHandler) Me(c *okapi.Context) error {
 		return c.AbortNotFound("user not found")
 	}
 
-	return ok(c, h.buildProfile(user))
+	return ok(c, h.buildProfile(c, user))
 }
 
-func (h *UserHandler) buildProfile(user *models.User) UserProfile {
+func (h *UserHandler) buildProfile(c *okapi.Context, user *models.User) UserProfile {
 	required := h.emailVerifier != nil && h.emailVerifier.Required()
-	return UserProfile{
+	profile := UserProfile{
 		ID:                        user.ID,
 		Name:                      user.Name,
 		Email:                     user.Email,
@@ -600,6 +605,14 @@ func (h *UserHandler) buildProfile(user *models.User) UserProfile {
 		PersonalWorkspaceID:       user.DefaultWorkspaceID,
 		CreatedAt:                 user.CreatedAt,
 	}
+	// R-20: an impersonation session surfaces who is acting, so the dashboard
+	// can banner "Viewing as …" instead of silently operating as someone else.
+	if adminID := c.GetInt("impersonated_by"); adminID > 0 {
+		id := uint(adminID)
+		profile.ImpersonatedBy = &id
+		profile.ImpersonationReason = c.GetString("impersonation_reason")
+	}
+	return profile
 }
 
 // Setup2FA generates a TOTP secret for the user (doesn't enable yet).
@@ -758,15 +771,29 @@ func (h *UserHandler) sendTwoFactorAlert(userID uint, action string) {
 
 // generateTokenWithSession creates a JWT with a jti claim and records the session.
 func (h *UserHandler) generateTokenWithSession(c *okapi.Context, user *models.User) (string, string, error) { //nolint:unparam
+	return h.IssueSession(c, user, nil)
+}
+
+// IssueSession mints a JWT for user with the standard claims (sub, email,
+// role, aud, jti) plus any extra claims the caller adds, records the matching
+// session row, and returns the token and its JTI. R-19's passkey login and
+// R-20's impersonation both issue sessions here so the JWT, the session row,
+// and the cookie never drift apart.
+func (h *UserHandler) IssueSession(c *okapi.Context, user *models.User, extraClaims map[string]any) (string, string, error) {
 	jti := uuid.NewString()
 
-	token, err := okapi.GenerateJwtToken(h.jwtSecret, map[string]any{
+	claims := map[string]any{
 		"sub":   user.ID,
 		"email": user.Email,
 		"role":  string(user.Role),
 		"aud":   "posta",
 		"jti":   jti,
-	}, jwtTokenTTL)
+	}
+	for k, v := range extraClaims {
+		claims[k] = v
+	}
+
+	token, err := okapi.GenerateJwtToken(h.jwtSecret, claims, jwtTokenTTL)
 	if err != nil {
 		return "", "", err
 	}
@@ -777,17 +804,104 @@ func (h *UserHandler) generateTokenWithSession(c *okapi.Context, user *models.Us
 		if len(ua) > 512 {
 			ua = ua[:512]
 		}
-		session := &models.Session{
+		sess := &models.Session{
 			UserID:    user.ID,
 			JTI:       jti,
 			IPAddress: c.RealIP(),
 			UserAgent: ua,
 			ExpiresAt: time.Now().Add(jwtTokenTTL),
 		}
-		_ = h.sessionRepo.Create(session)
+		// R-20: an impersonation session records who is acting on the row, so
+		// the sessions list and audits can tell support logins apart.
+		if raw, ok := extraClaims["impersonated_by"]; ok {
+			if id := claimToUint(raw); id > 0 {
+				sess.ImpersonatedBy = &id
+				if reason, ok := extraClaims["impersonation_reason"].(string); ok {
+					sess.ImpersonationReason = reason
+				}
+			}
+		}
+		_ = h.sessionRepo.Create(sess)
 	}
 
 	return token, jti, nil
+}
+
+// CompletePasskeyLogin finishes a successful passkey authentication exactly
+// like the password login completes: workspace provisioning, last-login
+// bookkeeping, the login event, new-device alerting, and the JWT + session
+// issue (R-19). Called by the WebAuthn handler once the assertion has verified.
+func (h *UserHandler) CompletePasskeyLogin(c *okapi.Context, user *models.User) (AuthResponse, error) {
+	h.ensurePersonalWorkspace(user.ID)
+
+	// Record last login time
+	now := time.Now()
+	user.LastLoginAt = &now
+	_ = h.repo.Update(user)
+
+	if h.bus != nil {
+		h.bus.PublishSimple(models.EventCategoryUser, "user.passkey_login", &user.ID, user.Email, c.RealIP(),
+			fmt.Sprintf("User %q logged in with a passkey", user.Email), nil)
+	}
+
+	// Detect a sign-in from a new device before the session is recorded, so the
+	// freshly created session doesn't count as a prior known device.
+	ua := c.Header("User-Agent")
+	newDevice := h.isNewDevice(user.ID, ua)
+
+	token, _, err := h.IssueSession(c, user, nil)
+	if err != nil {
+		return AuthResponse{}, c.AbortInternalServerError("failed to generate token", err)
+	}
+
+	// Browser clients ride the HttpOnly cookie; the body's token remains for
+	// CLI/SDK clients, which send it back as a Bearer header.
+	session.SetCookie(c, token, jwtTokenTTL)
+
+	if newDevice {
+		h.sendLoginAlert(user.ID, ua, c.RealIP())
+	}
+
+	return AuthResponse{
+		Token: token,
+		User: struct {
+			ID    uint            `json:"id"`
+			Name  string          `json:"name"`
+			Email string          `json:"email"`
+			Role  models.UserRole `json:"role"`
+		}{ID: user.ID, Name: user.Name, Email: user.Email, Role: user.Role},
+	}, nil
+}
+
+// validateSecondFactor checks a second-factor code for a passkey login: the
+// TOTP code first, then a single-use recovery code, mirroring the password
+// login's acceptance rules (R-19).
+func (h *UserHandler) validateSecondFactor(user *models.User, code string) bool {
+	if twofactor.ValidateCode(user.TwoFactorSecret, code) {
+		return true
+	}
+	return h.consumeRecoveryCode(user.ID, code)
+}
+
+// claimToUint normalizes a JWT claim value (a float64 once decoded from JSON)
+// into a uint.
+func claimToUint(v any) uint {
+	switch n := v.(type) {
+	case uint:
+		return n
+	case uint64:
+		return uint(n)
+	case int:
+		return uint(n)
+	case int64:
+		return uint(n)
+	case float64:
+		if n < 0 {
+			return 0
+		}
+		return uint(n)
+	}
+	return 0
 }
 
 // RequestAccountDeletion schedules the current user's account for deletion in 7 days.

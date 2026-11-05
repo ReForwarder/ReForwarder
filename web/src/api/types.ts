@@ -868,6 +868,37 @@ export interface UserProfile extends User {
   scheduled_deletion_at: string | null
   email_verification_required: boolean
   default_workspace_id: number | null
+  // R-20 impersonation: set while the session acts as another user via the
+  // admin impersonation flow. The dashboard banners "Viewing as …" off it.
+  impersonated_by?: number
+  impersonation_reason?: string
+}
+
+// R-19 passkey: one registered WebAuthn credential of the current account.
+export interface WebAuthnCredential {
+  id: string
+  user_id: number
+  name: string
+  attestation_type: string
+  transport: string[]
+  sign_count: number
+  last_used_at: string | null
+  created_at: string
+}
+
+// R-20 impersonation: the response of POST /admin/users/{id}/impersonate. The
+// token replaces the admin's browser session (cookie set server-side); the
+// dashboard switches to the target user and banners the impersonation.
+export interface ImpersonationResponse {
+  token: string
+  impersonated: boolean
+  target: {
+    id: number
+    name: string
+    email: string
+    role: 'admin' | 'user'
+  }
+  original_admin: string
 }
 
 // User Data Export/Import

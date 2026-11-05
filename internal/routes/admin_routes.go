@@ -157,6 +157,22 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			},
 		},
 		{
+			Method:      http.MethodPost,
+			Path:        "/users/{id:int}/impersonate",
+			Handler:     okapi.H(r.h.impersonation.Impersonate),
+			Group:       adminGroup,
+			Summary:     "Impersonate a user",
+			Description: "Open a session acting as the target user (admin only, R-20). Requires a reason of at least 10 characters, is audited, and issues a new JWT + session carrying impersonated_by / impersonation_reason. Administrators and disabled accounts cannot be impersonated; the browser's session cookie is replaced, so exiting requires re-authentication.",
+			Request:     &handlers.ImpersonateRequest{},
+			Response:    &dto.Response[handlers.ImpersonationResponse]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Target user ID"),
+				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(403, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
 			Method:      http.MethodGet,
 			Path:        "/users/{id:int}/workspaces",
 			Handler:     okapi.H(r.h.admin.UserWorkspaces),
