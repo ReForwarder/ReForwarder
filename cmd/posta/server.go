@@ -762,6 +762,18 @@ func initCronManager(
 		))
 	}
 	retentionJob.SetNotificationRepo(repositories.NewNotificationRepository(db))
+	// Scheduled pg_dump backups with retention (R-11). Off by default — the
+	// runtime image ships no postgres client, so the operator opts in once
+	// POSTA_BACKUP_PG_DUMP_BIN resolves. See jobs.BackupJob for the runbook.
+	if cfg.BackupEnabled {
+		manager.Register(jobs.NewBackupJob(
+			cfg.Database.DSN(),
+			cfg.BackupDir,
+			cfg.BackupRetentionDays,
+			cfg.BackupPgDumpBin,
+			cfg.BackupSchedule,
+		))
+	}
 	if cfg.MessagesEnabled {
 		retentionJob.SetMessageRepo(repositories.NewMessageRepository(db))
 		retentionJob.SetFormRepo(repositories.NewFormRepository(db))

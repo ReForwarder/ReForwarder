@@ -72,6 +72,7 @@ func Run(db *gorm.DB) error {
 		&models.Session{},
 		&models.UserEmailVerification{},
 		&models.PasswordResetToken{},
+		&models.UserRecoveryCode{},
 		&models.Subscriber{},
 		&models.SubscriberList{},
 		&models.SubscriberListMember{},

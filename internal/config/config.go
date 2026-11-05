@@ -136,6 +136,19 @@ type Config struct {
 	// System SMTP for platform notifications (daily reports, invitations, etc.)
 	SystemSMTP SystemSMTPConfig
 
+	// Backup automation (R-11, POSTA_BACKUP_*). When enabled, the server's cron
+	// manager runs pg_dump on a schedule, gzips the plain-format dump into
+	// BackupDir, and prunes files older than BackupRetentionDays. Off by
+	// default; the runtime image does not ship the postgres client, so enable
+	// it only where pg_dump is installed (or point BackupPgDumpBin at a
+	// mounted binary). See internal/cron/jobs/backup.go for the restore
+	// runbook.
+	BackupEnabled       bool
+	BackupSchedule      string
+	BackupDir           string
+	BackupRetentionDays int
+	BackupPgDumpBin     string
+
 	EmailVerificationRequired bool
 
 	// Encryption key for SMTP password encryption (if empty, base64 encoding is used)
@@ -229,6 +242,17 @@ type DatabaseConfig struct {
 	sslMode  string
 	url      string
 }
+
+// DSN returns the postgres connection string in the form external tools such
+// as pg_dump (R-11 backup automation) accept, honoring POSTA_DB_URL overrides.
+func (c *DatabaseConfig) DSN() string {
+	if c.url != "" {
+		return c.url
+	}
+	return fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%d sslmode=%s",
+		c.host, c.user, c.password, c.name, c.port, c.sslMode)
+}
+
 type RedisConfig struct {
 	Client   *redis.Client
 	Addr     string
@@ -371,6 +395,13 @@ func New() *Config {
 		},
 
 		EmailVerificationRequired: goutils.EnvBool("POSTA_EMAIL_VERIFICATION_REQUIRED", false),
+
+		// Backup automation (R-11): off by default, daily at 03:00 UTC when on.
+		BackupEnabled:       goutils.EnvBool("POSTA_BACKUP_ENABLED", false),
+		BackupSchedule:      goutils.Env("POSTA_BACKUP_SCHEDULE", "0 3 * * *"),
+		BackupDir:           goutils.Env("POSTA_BACKUP_DIR", "backups"),
+		BackupRetentionDays: goutils.EnvInt("POSTA_BACKUP_RETENTION_DAYS", 14),
+		BackupPgDumpBin:     goutils.Env("POSTA_BACKUP_PG_DUMP_BIN", "pg_dump"),
 
 		EncryptionKey: goutils.Env("POSTA_ENCRYPTION_KEY", ""),
 

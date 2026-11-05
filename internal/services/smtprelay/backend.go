@@ -113,7 +113,7 @@ func (s *session) Auth(mech string) (sasl.Server, error) {
 			s.guard.RecordAuthFailure(username)
 			return smtp.ErrAuthFailed
 		}
-		if !VerifyPassword(cred, password) {
+		if !VerifyPassword(s.backend.credRepo, cred, password) {
 			s.guard.RecordAuthFailure(username)
 			return smtp.ErrAuthFailed
 		}
