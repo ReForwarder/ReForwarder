@@ -44,9 +44,9 @@ import (
 	"github.com/goposta/posta/internal/middlewares"
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/audit"
-	wa "github.com/goposta/posta/internal/services/webauthn"
 	"github.com/goposta/posta/internal/services/eventbus"
 	"github.com/goposta/posta/internal/services/twofactor"
+	wa "github.com/goposta/posta/internal/services/webauthn"
 	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/jkaninda/okapi"
 	"github.com/pquerna/otp/totp"
@@ -284,7 +284,9 @@ type waFakeCreds struct {
 	creds map[uint][]*models.WebAuthnCredential
 }
 
-func newWAFakeCreds() *waFakeCreds { return &waFakeCreds{creds: map[uint][]*models.WebAuthnCredential{}} }
+func newWAFakeCreds() *waFakeCreds {
+	return &waFakeCreds{creds: map[uint][]*models.WebAuthnCredential{}}
+}
 
 func (s *waFakeCreds) ListByUser(userID uint) ([]models.WebAuthnCredential, error) {
 	s.mu.Lock()
@@ -1219,5 +1221,24 @@ func TestWebAuthnCredentialManagement(t *testing.T) {
 	begin := h.do(t, http.MethodPost, "/auth/webauthn/login/begin", "", []byte(`{"email":"`+waUserMail+`"}`))
 	if begin.Code != http.StatusBadRequest {
 		t.Fatalf("login begin after delete status = %d, want 400", begin.Code)
+	}
+}
+
+// TestWebAuthnVanishedUserAbortsNotPanics covers the guard where a valid JWT
+// resolves to a user row the repository can no longer find: the ceremony
+// endpoints must answer 404, not fall through with a nil user (the old
+// currentUser returned (nil, nil) and the service dereferenced it).
+func TestWebAuthnVanishedUserAbortsNotPanics(t *testing.T) {
+	h := newWaHarness(t, false)
+	// No user is seeded; the token below carries a user_id nothing resolves.
+	token := waUserToken(t)
+
+	begin := h.do(t, http.MethodPost, "/auth/webauthn/register/begin", token, []byte("{}"))
+	if begin.Code != http.StatusNotFound {
+		t.Fatalf("register begin with vanished user status = %d, want 404", begin.Code)
+	}
+	finish := h.do(t, http.MethodPost, "/auth/webauthn/register/finish", token, []byte("{}"))
+	if finish.Code != http.StatusNotFound {
+		t.Fatalf("register finish with vanished user status = %d, want 404", finish.Code)
 	}
 }

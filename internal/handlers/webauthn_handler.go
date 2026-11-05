@@ -21,6 +21,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -89,10 +90,16 @@ func (h *WebAuthnHandler) enabled(c *okapi.Context) bool {
 	return true
 }
 
+// errWebAuthnUserNotFound marks the currentUser abort path. okapi's Abort
+// helpers write the 404 and return nil, so the sentinel — not the abort's
+// return value — is what stops callers from falling through with a nil user.
+var errWebAuthnUserNotFound = errors.New("webauthn: user lookup aborted")
+
 func (h *WebAuthnHandler) currentUser(c *okapi.Context) (*models.User, error) {
 	user, err := h.repo.FindByID(uint(c.GetInt("user_id")))
 	if err != nil || user == nil {
-		return nil, c.AbortNotFound("user not found")
+		_ = c.AbortNotFound("user not found")
+		return nil, errWebAuthnUserNotFound
 	}
 	return user, nil
 }
@@ -106,7 +113,9 @@ func (h *WebAuthnHandler) BeginRegistration(c *okapi.Context) error {
 	}
 	user, err := h.currentUser(c)
 	if err != nil {
-		return err
+		// currentUser already wrote the 404; returning its sentinel would
+		// make okapi answer the request a second time.
+		return nil
 	}
 
 	creation, err := h.svc.BeginRegistration(c.Request().Context(), user, c.GetString("jti"))
@@ -129,7 +138,9 @@ func (h *WebAuthnHandler) FinishRegistration(c *okapi.Context) error {
 	}
 	user, err := h.currentUser(c)
 	if err != nil {
-		return err
+		// currentUser already wrote the 404; returning its sentinel would
+		// make okapi answer the request a second time.
+		return nil
 	}
 
 	cred, err := h.svc.FinishRegistration(c.Request().Context(), user, c.GetString("jti"), c.Request().Body)
