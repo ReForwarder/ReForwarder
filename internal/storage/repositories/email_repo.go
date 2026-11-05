@@ -373,23 +373,33 @@ func (r *EmailRepository) ListFilteredMessages(page, size int, scope ResourceSco
 	return items, total, nil
 }
 
-// FindFailedForRetry returns failed emails with retry_count < maxRetries for a given user.
-func (r *EmailRepository) FindFailedForRetry(userID uint, maxRetries int) ([]models.Email, error) {
+// FindFailedForRetry returns failed emails with retry_count < maxRetries for a
+// given user, oldest first, capped at limit rows (R-27). limit <= 0 means
+// unbounded — the retry worker always passes an explicit bound so one bad hour
+// of failures cannot turn a sweep tick into a requeue storm.
+func (r *EmailRepository) FindFailedForRetry(userID uint, maxRetries, limit int) ([]models.Email, error) {
 	var emails []models.Email
-	if err := r.db.Where("user_id = ? AND status = ? AND retry_count < ?", userID, models.EmailStatusFailed, maxRetries).
-		Order("created_at ASC").
-		Find(&emails).Error; err != nil {
+	q := r.db.Where("user_id = ? AND status = ? AND retry_count < ?", userID, models.EmailStatusFailed, maxRetries).
+		Order("created_at ASC")
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	if err := q.Find(&emails).Error; err != nil {
 		return nil, err
 	}
 	return emails, nil
 }
 
-// FindFailedForRetryByWorkspace returns failed emails for a workspace that haven't exceeded max retries.
-func (r *EmailRepository) FindFailedForRetryByWorkspace(workspaceID uint, maxRetries int) ([]models.Email, error) {
+// FindFailedForRetryByWorkspace returns failed emails for a workspace that
+// haven't exceeded max retries, oldest first, capped at limit rows (R-27).
+func (r *EmailRepository) FindFailedForRetryByWorkspace(workspaceID uint, maxRetries, limit int) ([]models.Email, error) {
 	var emails []models.Email
-	if err := r.db.Where("workspace_id = ? AND status = ? AND retry_count < ?", workspaceID, models.EmailStatusFailed, maxRetries).
-		Order("created_at ASC").
-		Find(&emails).Error; err != nil {
+	q := r.db.Where("workspace_id = ? AND status = ? AND retry_count < ?", workspaceID, models.EmailStatusFailed, maxRetries).
+		Order("created_at ASC")
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	if err := q.Find(&emails).Error; err != nil {
 		return nil, err
 	}
 	return emails, nil

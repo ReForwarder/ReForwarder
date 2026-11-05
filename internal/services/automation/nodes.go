@@ -202,7 +202,9 @@ func (e *Engine) executeFilterNode(nc *nodeContext, node *models.AutomationNode)
 	if err != nil {
 		return nil, fmt.Errorf("filter node %q: %w", node.ID, err)
 	}
-	matched := EvaluateConditions(cfg.Conditions, nc.subscriber, e.listCheckerFor(nc.journey))
+	// R-14: the engine's evaluator adds in_segment resolution on top of the
+	// shared EvaluateConditions rules.
+	matched := e.evaluateJourneyConditions(cfg.Conditions, nc)
 	branch := BranchExit
 	if matched {
 		branch = BranchContinue

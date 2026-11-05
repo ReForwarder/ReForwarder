@@ -24,12 +24,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/goposta/posta/internal/metrics"
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/webhook"
 	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/jkaninda/logger"
+	"github.com/robfig/cron/v3"
 	"gorm.io/gorm"
 )
 
@@ -82,6 +85,7 @@ type Engine struct {
 
 	lists          *repositories.SubscriberListRepository
 	subscriberRepo *repositories.SubscriberRepository
+	segmentRepo    *repositories.SegmentRepository
 	automationRepo *repositories.AutomationRepository
 	journeyRepo    *repositories.AutomationJourneyRepository
 	runRepo        *repositories.AutomationRunRepository
@@ -106,6 +110,7 @@ func NewEngine(db *gorm.DB, producer AutomationRunProducer, emailSender EmailSen
 		emailSender:    emailSender,
 		lists:          lists,
 		subscriberRepo: subscriberRepo,
+		segmentRepo:    repositories.NewSegmentRepository(db),
 		automationRepo: repositories.NewAutomationRepository(db),
 		journeyRepo:    repositories.NewAutomationJourneyRepository(db),
 		runRepo:        repositories.NewAutomationRunRepository(db),
@@ -168,6 +173,7 @@ func (e *Engine) loop(ctx context.Context) {
 		if err := e.ProcessBatch(ctx, DefaultBatchSize); err != nil {
 			logger.Error("automation: batch processing failed", "error", err)
 		}
+		e.ProcessSchedules(ctx)
 		ticks++
 		if ticks >= sweepEveryTicks {
 			ticks = 0
@@ -334,6 +340,7 @@ func (e *Engine) ExecuteJourney(ctx context.Context, journeyID uint) error {
 		durationMs := int(e.now().Sub(started).Milliseconds())
 
 		if execErr != nil {
+			metrics.IncrementAutomationNodeFailure(node.Type)
 			// The run row and the journey's last_error surface through the
 			// execution inspector and the API, so they are written as the
 			// guard's canonical text: raw delivery detail (resolved addresses,
@@ -403,6 +410,7 @@ func (e *Engine) handleNodeError(journey *models.AutomationJourney, errMsg strin
 			return
 		}
 		if ok {
+			metrics.IncrementAutomationJourneyFailed()
 			if err := e.automationRepo.IncrementStat(journey.AutomationID, "failed"); err != nil {
 				logger.Warn("automation: failed stat increment failed", "automation_id", journey.AutomationID, "error", err)
 			}
@@ -427,6 +435,7 @@ func (e *Engine) completeJourney(journeyID, automationID uint) {
 		return
 	}
 	if ok {
+		metrics.IncrementAutomationJourneyCompleted()
 		if err := e.automationRepo.IncrementStat(automationID, "completed"); err != nil {
 			logger.Warn("automation: completed stat increment failed", "automation_id", automationID, "error", err)
 		}
@@ -442,6 +451,7 @@ func (e *Engine) exitJourney(journeyID, automationID uint, reason string) {
 	}
 	if ok {
 		logger.Info("automation: journey exited", "journey_id", journeyID, "reason", reason)
+		metrics.IncrementAutomationJourneyExited()
 		if err := e.automationRepo.IncrementStat(automationID, "exited"); err != nil {
 			logger.Warn("automation: exited stat increment failed", "automation_id", automationID, "error", err)
 		}
@@ -480,4 +490,251 @@ func (e *Engine) Sweep(ctx context.Context) error {
 // timePtr returns a pointer to t (the CAS APIs take *time.Time).
 func timePtr(t time.Time) *time.Time {
 	return &t
+}
+
+// ---------- R-14: segment-membership conditions ----------
+
+// evaluateJourneyConditions evaluates a filter node's condition set against the
+// journey's subscriber. in_segment rules (R-14) resolve through the engine's
+// segment checker; every other rule goes through the shared EvaluateConditions
+// evaluator. The scope is the automation's tenant (the journey's workspace) —
+// the author of the workflow, not the contact, picked the segment.
+func (e *Engine) evaluateJourneyConditions(conditions []models.FilterRule, nc *nodeContext) bool {
+	scope := repositories.ResourceScope{UserID: nc.subscriber.UserID, WorkspaceID: nc.journey.WorkspaceID}
+	return evaluateConditionSet(conditions, nc.subscriber,
+		e.listCheckerFor(nc.journey),
+		e.segmentMemberChecker(scope, nc.subscriber.ID),
+	)
+}
+
+// evaluateConditionSet AND-combines a condition set. in_segment rules (R-14)
+// resolve through segmentChecker (nil checker ⇒ they never match, so a store
+// without segment support degrades to closed); everything else delegates to
+// the shared EvaluateConditions evaluator whose operator support
+// filterRuleProblem mirrors for save-time validation. An empty set matches.
+func evaluateConditionSet(conditions []models.FilterRule, sub *models.Subscriber, listChecker func(uint) bool, segmentChecker func(uint) bool) bool {
+	pass := make([]models.FilterRule, 0, len(conditions))
+	for _, rule := range conditions {
+		if strings.TrimSpace(rule.Field) != FieldInSegment {
+			pass = append(pass, rule)
+			continue
+		}
+		id, ok := coerceUint(rule.Value)
+		if !ok || segmentChecker == nil {
+			return false
+		}
+		if !segmentChecker(id) {
+			return false
+		}
+	}
+	return EvaluateConditions(pass, sub, listChecker)
+}
+
+// segmentMemberChecker returns the in_segment predicate bound to one scope and
+// subscriber (R-14).
+func (e *Engine) segmentMemberChecker(scope repositories.ResourceScope, subscriberID uint) func(uint) bool {
+	return func(segmentID uint) bool {
+		return e.subscriberInSegment(scope, segmentID, subscriberID)
+	}
+}
+
+// subscriberInSegment reports whether one subscriber matches a saved segment's
+// condition, evaluated live with the same SQL the segment preview and the
+// campaign audience resolution use. A segment outside the scope, an invalid
+// condition, or a condition-less segment matches nothing.
+func (e *Engine) subscriberInSegment(scope repositories.ResourceScope, segmentID, subscriberID uint) bool {
+	if e.segmentRepo == nil {
+		return false
+	}
+	seg, err := e.segmentRepo.FindByID(segmentID)
+	if err != nil || !repositories.OwnsWorkspaceResource(scope, seg.WorkspaceID) {
+		return false
+	}
+	if seg.Condition.IsEmpty() {
+		return false
+	}
+	expr, args, err := repositories.BuildSegmentConditionSQL(seg.Condition)
+	if err != nil {
+		logger.Warn("automation: in_segment references a segment with an invalid condition", "segment_id", segmentID, "error", err)
+		return false
+	}
+	var count int64
+	q := repositories.ApplyScope(
+		e.db.Model(&models.Subscriber{}).
+			Where("id = ?", subscriberID).
+			Where(expr, args...),
+		scope,
+	)
+	if err := q.Count(&count).Error; err != nil {
+		logger.Warn("automation: in_segment membership query failed", "segment_id", segmentID, "subscriber_id", subscriberID, "error", err)
+		return false
+	}
+	return count > 0
+}
+
+// ---------- R-13: schedule (cron) triggers ----------
+
+// maxScheduleCatchup bounds how many missed cron occurrences one fire chases.
+// A process that was down for a long time (or an automation whose checkpoint
+// predates a schedule change) must not iterate an unbounded backlog: past the
+// bound the checkpoint jumps forward without firing, so a buried schedule
+// drains cheaply and resumes on its cadence.
+const maxScheduleCatchup = 1440
+
+// liveScheduleAutomations loads every live automation whose trigger config
+// mentions the schedule kind. The substring pre-filter keeps the per-tick JSON
+// parses bounded; a false positive (e.g. a custom event named "…schedule…")
+// costs one cheap parse and is skipped by the exact kind check. Soft-deleted
+// rows are excluded by GORM's DeletedAt handling.
+func (e *Engine) liveScheduleAutomations() []models.Automation {
+	var automations []models.Automation
+	if err := e.db.Where("status = ?", models.AutomationStatusLive).Find(&automations).Error; err != nil {
+		logger.Error("automation: schedule lookup failed", "error", err)
+		return nil
+	}
+	var out []models.Automation
+	for i := range automations {
+		if strings.Contains(automations[i].TriggerConfig, models.AutomationEventSchedule) {
+			out = append(out, automations[i])
+		}
+	}
+	return out
+}
+
+// ProcessSchedules fires every live schedule-trigger automation whose cron has
+// an occurrence due (R-13). Called from the engine loop every tick — the cron
+// granularity is a minute, the tick is 10s, and the persisted checkpoint makes
+// the check idempotent across overlapping processes. Exported for tests.
+func (e *Engine) ProcessSchedules(_ context.Context) {
+	automations := e.liveScheduleAutomations()
+	for i := range automations {
+		e.processSchedule(&automations[i])
+	}
+}
+
+func (e *Engine) processSchedule(automation *models.Automation) {
+	cfg, err := parseTriggerConfig(automation.TriggerConfig)
+	if err != nil || cfg.EventKind != models.AutomationEventSchedule {
+		return
+	}
+	if strings.TrimSpace(cfg.CronExpression) == "" {
+		logger.Warn("automation: schedule trigger has no cron expression", "automation_id", automation.ID)
+		return
+	}
+	sched, err := cron.ParseStandard(cfg.CronExpression)
+	if err != nil {
+		logger.Warn("automation: schedule trigger has an invalid cron expression", "automation_id", automation.ID, "cron", cfg.CronExpression, "error", err)
+		return
+	}
+
+	now := e.now()
+	stats := models.ParseWorkflowStats(automation.Stats)
+	if stats.LastFiredAt == nil {
+		// First sight (creation or the first tick after the trigger became a
+		// schedule): checkpoint at now WITHOUT firing, so a fresh automation
+		// never replays the past.
+		e.persistScheduleCheckpoint(automation.ID, now)
+		return
+	}
+
+	next := sched.Next(*stats.LastFiredAt)
+	if next.After(now) {
+		return // nothing due
+	}
+	fireAt := next
+	behind := 1
+	for t := sched.Next(fireAt); !t.After(now) && behind < maxScheduleCatchup; t = sched.Next(t) {
+		fireAt = t
+		behind++
+	}
+	if !sched.Next(fireAt).After(now) {
+		// Still buried after the catch-up bound: advance the checkpoint
+		// without firing so the backlog drains in bounded steps.
+		logger.Warn("automation: schedule backlog too deep; advancing checkpoint without firing", "automation_id", automation.ID, "checkpoint", fireAt.Format(time.RFC3339))
+		e.persistScheduleCheckpoint(automation.ID, fireAt)
+		return
+	}
+
+	e.fireSchedule(automation, cfg, fireAt)
+	e.persistScheduleCheckpoint(automation.ID, fireAt)
+}
+
+// fireSchedule enrolls every eligible audience member into the automation for
+// one schedule occurrence. The audience is the trigger's segment or list
+// (segment wins when both are set); non-subscribed members are skipped and
+// the per-contact frequency dedup (once / every_time) applies as for any
+// trigger.
+func (e *Engine) fireSchedule(automation *models.Automation, cfg models.AutomationTriggerConfig, fireAt time.Time) {
+	scope := repositories.ResourceScope{UserID: automation.UserID, WorkspaceID: automation.WorkspaceID}
+	audience, err := e.scheduleAudience(scope, cfg)
+	if err != nil {
+		logger.Error("automation: schedule audience resolution failed", "automation_id", automation.ID, "error", err)
+		return
+	}
+
+	enrolled := 0
+	for i := range audience {
+		sub := audience[i]
+		if sub.Status != models.SubscriberStatusSubscribed {
+			continue
+		}
+		member := sub
+		e.enrollAutomation(automation, &member, TriggerEvent{
+			Kind: models.AutomationEventSchedule,
+			Properties: map[string]any{
+				"scheduled_at": fireAt.UTC().Format(time.RFC3339),
+			},
+		})
+		enrolled++
+	}
+	metrics.IncrementAutomationScheduleFire()
+	logger.Info("automation: schedule fired", "automation_id", automation.ID, "audience", len(audience), "enrolled", enrolled, "fire_at", fireAt.Format(time.RFC3339))
+}
+
+// scheduleAudience resolves a schedule trigger's audience. The segment branch
+// mirrors the campaign processor's segment path (ownership-checked, live
+// condition); the list branch resolves static members of an owned list.
+func (e *Engine) scheduleAudience(scope repositories.ResourceScope, cfg models.AutomationTriggerConfig) ([]models.Subscriber, error) {
+	if cfg.SegmentID != nil && *cfg.SegmentID > 0 {
+		seg, err := e.segmentRepo.FindByID(*cfg.SegmentID)
+		if err != nil {
+			return nil, fmt.Errorf("schedule segment %d not found", *cfg.SegmentID)
+		}
+		if !repositories.OwnsWorkspaceResource(scope, seg.WorkspaceID) {
+			return nil, fmt.Errorf("schedule segment %d does not belong to the automation's workspace", seg.ID)
+		}
+		subs, _, err := e.segmentRepo.FindSubscribersByCondition(scope, seg.Condition, -1, 0)
+		return subs, err
+	}
+
+	listID := uint(0)
+	if cfg.ListID != nil {
+		listID = *cfg.ListID
+	}
+	if listID == 0 {
+		return nil, fmt.Errorf("schedule trigger has no audience: set list_id or segment_id")
+	}
+	list, err := e.lists.FindByID(listID)
+	if err != nil {
+		return nil, fmt.Errorf("schedule list %d not found", listID)
+	}
+	if !repositories.OwnsWorkspaceResource(scope, list.WorkspaceID) {
+		return nil, fmt.Errorf("schedule list %d does not belong to the automation's workspace", list.ID)
+	}
+	subs, _, err := e.lists.ListMembers(listID, -1, 0)
+	return subs, err
+}
+
+// persistScheduleCheckpoint writes the schedule trigger's fire checkpoint into
+// the Automation.Stats JSONB (R-13). It survives restarts, so a restarted
+// scheduler never refires an occurrence.
+func (e *Engine) persistScheduleCheckpoint(automationID uint, t time.Time) {
+	err := e.db.Exec(
+		`UPDATE automations SET stats = jsonb_set(COALESCE(stats, '{}'::jsonb), '{last_fired_at}', to_jsonb(?::text), true) WHERE id = ?`,
+		t.UTC().Format(time.RFC3339Nano),
+		automationID,
+	).Error
+	if err != nil {
+		logger.Error("automation: failed to persist schedule checkpoint", "automation_id", automationID, "error", err)
+	}
 }

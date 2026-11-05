@@ -77,12 +77,16 @@ type Service struct {
 	producer        Enqueuer
 	bus             *eventbus.EventBus
 	threadRouter    ThreadRouter
-	maxMsgSize      int64
-	maxAttachSize   int64
-	onReceived      func(source models.InboundSource)
-	onRejected      func(reason string)
-	onBytes         func(int64)
-	onIngestMs      func(float64)
+	// dmarc ingests RFC 7489 aggregate reports from the inbound pipeline
+	// (R-17); nil until EnableDMARC, and ingestion then behaves exactly as
+	// before.
+	dmarc         *dmarcProcessor
+	maxMsgSize    int64
+	maxAttachSize int64
+	onReceived    func(source models.InboundSource)
+	onRejected    func(reason string)
+	onBytes       func(int64)
+	onIngestMs    func(float64)
 }
 
 // Config holds runtime configuration for the inbound service.
@@ -295,6 +299,10 @@ func (s *Service) Ingest(ctx context.Context, p *ParsedEmail, source models.Inbo
 
 	routed := s.RouteThread(ctx, rec, recipients, p.Cc)
 
+	// R-17: offer the stored message to the DMARC aggregate-report processor
+	// (a no-op unless EnableDMARC wired one). Never fails the ingestion.
+	s.processDMARC(ctx, rec)
+
 	if s.producer != nil && !routed {
 		if err := s.producer.EnqueueInboundProcess(rec.ID); err != nil {
 			logger.Error("failed to enqueue inbound:process", "inbound_id", rec.ID, "error", err)
@@ -471,6 +479,11 @@ func (s *Service) ApplyParsed(ctx context.Context, rec *models.InboundEmail, p *
 	if err := s.repo.Update(rec); err != nil {
 		return fmt.Errorf("update inbound email: %w", err)
 	}
+
+	// R-17: the SMTP path parses asynchronously (IngestRaw stores only the
+	// raw message), so ApplyParsed is where attachments first exist. Offer
+	// the parsed record to the DMARC processor (a no-op unless wired).
+	s.processDMARC(ctx, rec)
 
 	if s.bus != nil {
 		actor := rec.UserID

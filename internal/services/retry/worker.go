@@ -21,6 +21,7 @@ package retry
 
 import (
 	"context"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -43,9 +44,19 @@ type Worker struct {
 	onSent     func()
 	onFailed   func()
 	onRetry    func()
-	stopOnce   sync.Once
-	stop       chan struct{}
+	// batchLimit caps how many failed emails one sweep tick loads per SMTP
+	// server (R-27): a large failed backlog re-enqueues in bounded batches
+	// across ticks instead of all at once. SetBatchLimit overrides it (tests).
+	batchLimit int
+	// jitter returns the random pre-sweep delay that desynchronizes the retry
+	// sweeps of multiple processes started at the same moment (R-27).
+	jitter   func() time.Duration
+	stopOnce sync.Once
+	stop     chan struct{}
 }
+
+// DefaultBatchLimit is the per-server, per-tick cap on re-enqueued retries.
+const DefaultBatchLimit = 200
 
 func NewWorker(
 	emailRepo *repositories.EmailRepository,
@@ -59,8 +70,35 @@ func NewWorker(
 		sender:     email.NewSMTPSender(),
 		dispatcher: dispatcher,
 		interval:   interval,
-		stop:       make(chan struct{}),
+		batchLimit: DefaultBatchLimit,
+		jitter: func() time.Duration {
+			return time.Duration(rand.Int63n(int64(interval / 10)))
+		},
+		stop: make(chan struct{}),
 	}
+}
+
+// SetBatchLimit overrides the per-tick retry batch cap. 0 removes the cap
+// (unbounded, the pre-R-27 behavior); negative values are ignored.
+func (w *Worker) SetBatchLimit(limit int) {
+	if limit >= 0 {
+		w.batchLimit = limit
+	}
+}
+
+// SetJitter overrides the pre-sweep jitter function (tests).
+func (w *Worker) SetJitter(fn func() time.Duration) {
+	if fn != nil {
+		w.jitter = fn
+	}
+}
+
+// Jitter returns one sample of the configured pre-sweep jitter delay.
+func (w *Worker) Jitter() time.Duration {
+	if w.jitter == nil {
+		return 0
+	}
+	return w.jitter()
 }
 
 // SetEnqueuer sets an enqueuer so retries are re-enqueued to the background worker
@@ -102,12 +140,27 @@ func (w *Worker) run(ctx context.Context) {
 			logger.Info("retry worker stopped")
 			return
 		case <-ticker.C:
-			w.processRetries()
+			// Jittered spread (R-27): stagger the sweep so processes started
+			// together do not stampede the queue with identical re-enqueues.
+			if d := w.jitter(); d > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-w.stop:
+					return
+				case <-time.After(d):
+				}
+			}
+			w.ProcessRetries()
 		}
 	}
 }
 
-func (w *Worker) processRetries() {
+// ProcessRetries runs one sweep: it loads the retry-enabled SMTP servers and,
+// per server, re-enqueues up to batchLimit failed emails. Exported so the
+// R-27 bounded-batch test (internal/worker/retry_bound_test.go) can drive a
+// single sweep without waiting on the ticker.
+func (w *Worker) ProcessRetries() {
 	// Get all SMTP servers that have retries enabled
 	smtpServers, err := w.smtpRepo.FindAllWithRetries()
 	if err != nil {
@@ -117,10 +170,13 @@ func (w *Worker) processRetries() {
 
 	for _, server := range smtpServers {
 		var emails []models.Email
+		// Bounded batch (R-27): each tick claims at most batchLimit failed
+		// emails per server, oldest first. Claimed rows leave the failed set,
+		// so the next tick naturally advances through the backlog.
 		if server.WorkspaceID != nil {
-			emails, err = w.emailRepo.FindFailedForRetryByWorkspace(*server.WorkspaceID, server.MaxRetries)
+			emails, err = w.emailRepo.FindFailedForRetryByWorkspace(*server.WorkspaceID, server.MaxRetries, w.batchLimit)
 		} else {
-			emails, err = w.emailRepo.FindFailedForRetry(server.UserID, server.MaxRetries)
+			emails, err = w.emailRepo.FindFailedForRetry(server.UserID, server.MaxRetries, w.batchLimit)
 		}
 		if err != nil {
 			logger.Error("retry worker: failed to load failed emails", "user_id", server.UserID, "error", err)

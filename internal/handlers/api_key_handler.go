@@ -52,6 +52,10 @@ type CreateAPIKeyRequest struct {
 		AllowedIPs    []string `json:"allowed_ips"`
 		Scopes        []string `json:"scopes" enum:"send,read,webhooks,write,admin,*" default:"send"`
 		ExpiresInDays *int     `json:"expires_in_days"`
+		// Optional per-key request caps (R-15). 0 (the default) = unlimited;
+		// negative values are rejected.
+		RateLimitHourly int `json:"rate_limit_hourly"`
+		RateLimitDaily  int `json:"rate_limit_daily"`
 	} `json:"body"`
 }
 type RevokeAPIKeyRequest struct {
@@ -114,6 +118,18 @@ func (h *APIKeyHandler) Create(c *okapi.Context, req *CreateAPIKeyRequest) error
 	rawKey, key, err := h.service.GenerateKey(scope.UserID, scope.WorkspaceID, req.Body.Name, req.Body.AllowedIPs, scopes, expiresAt)
 	if err != nil {
 		return c.AbortInternalServerError("failed to create API key", err)
+	}
+
+	// Per-key rate limits (R-15): applied after creation so GenerateKey's
+	// signature stays untouched. Negative caps are rejected up front.
+	if req.Body.RateLimitHourly < 0 || req.Body.RateLimitDaily < 0 {
+		_ = h.repo.Delete(key.ID)
+		return c.AbortBadRequest("rate limits must be non-negative")
+	}
+	if req.Body.RateLimitHourly > 0 || req.Body.RateLimitDaily > 0 {
+		if err := h.repo.SetRateLimits(key.ID, req.Body.RateLimitHourly, req.Body.RateLimitDaily); err != nil {
+			return c.AbortInternalServerError("failed to set API key rate limits", err)
+		}
 	}
 
 	h.audit.LogCtx(c, "apikey.created", "API key created: "+req.Body.Name, map[string]any{

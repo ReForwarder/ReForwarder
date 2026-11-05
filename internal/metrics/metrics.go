@@ -187,6 +187,79 @@ var (
 		},
 		[]string{"queue"},
 	)
+
+	// --- R-12 families: campaigns and automations ---------------------------
+	//
+	// Deliberately unlabeled by campaign/automation id: those are
+	// user-controlled identifiers whose cardinality would grow without bound
+	// on a default registry. The per-campaign / per-automation breakdown lives
+	// in the campaign analytics and automation stats APIs.
+
+	campaignsStartedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "posta_campaigns_started_total",
+			Help: "Total number of campaigns that started sending",
+		},
+	)
+
+	campaignsCompletedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "posta_campaigns_completed_total",
+			Help: "Total number of campaigns that finished sending",
+		},
+	)
+
+	campaignMessagesQueuedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "posta_campaign_messages_queued_total",
+			Help: "Total number of campaign messages enqueued for delivery",
+		},
+	)
+
+	automationJourneysEnrolledTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "posta_automation_journeys_enrolled_total",
+			Help: "Total number of automation journeys created (enrollments)",
+		},
+	)
+
+	automationJourneysCompletedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "posta_automation_journeys_completed_total",
+			Help: "Total number of automation journeys that ran to completion",
+		},
+	)
+
+	automationJourneysExitedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "posta_automation_journeys_exited_total",
+			Help: "Total number of automation journeys that exited early",
+		},
+	)
+
+	automationJourneysFailedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "posta_automation_journeys_failed_total",
+			Help: "Total number of automation journeys that failed permanently",
+		},
+	)
+
+	// nodeType is a bounded enum (delay, email, filter, ab_test, list_status,
+	// add_to_list, remove_from_list, webhook), so this label is safe.
+	automationNodeFailuresTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "posta_automation_node_failures_total",
+			Help: "Total number of automation node execution failures, by node type",
+		},
+		[]string{"node_type"},
+	)
+
+	automationScheduleFiresTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "posta_automation_schedule_fires_total",
+			Help: "Total number of schedule-trigger fires (R-13)",
+		},
+	)
 )
 
 func init() {
@@ -210,6 +283,15 @@ func init() {
 	prometheus.MustRegister(messageNotificationsTotal)
 	prometheus.MustRegister(activeWorkers)
 	prometheus.MustRegister(queueArchivedTasks)
+	prometheus.MustRegister(campaignsStartedTotal)
+	prometheus.MustRegister(campaignsCompletedTotal)
+	prometheus.MustRegister(campaignMessagesQueuedTotal)
+	prometheus.MustRegister(automationJourneysEnrolledTotal)
+	prometheus.MustRegister(automationJourneysCompletedTotal)
+	prometheus.MustRegister(automationJourneysExitedTotal)
+	prometheus.MustRegister(automationJourneysFailedTotal)
+	prometheus.MustRegister(automationNodeFailuresTotal)
+	prometheus.MustRegister(automationScheduleFiresTotal)
 }
 
 // IncrementEmailSent increments the emails sent counter.
@@ -309,6 +391,55 @@ func SetActiveWorkers(n int) {
 // queue. Call per queue on every admin-metrics refresh.
 func SetQueueArchivedTasks(queue string, count int) {
 	queueArchivedTasks.WithLabelValues(queue).Set(float64(count))
+}
+
+// IncrementCampaignStarted bumps the campaigns-started counter (R-12).
+func IncrementCampaignStarted() {
+	campaignsStartedTotal.Inc()
+}
+
+// IncrementCampaignCompleted bumps the campaigns-completed counter (R-12).
+func IncrementCampaignCompleted() {
+	campaignsCompletedTotal.Inc()
+}
+
+// AddCampaignMessagesQueued records n campaign messages enqueued for delivery
+// in one batch (R-12).
+func AddCampaignMessagesQueued(n int) {
+	if n > 0 {
+		campaignMessagesQueuedTotal.Add(float64(n))
+	}
+}
+
+// IncrementAutomationJourneyEnrolled bumps the journey-enrollment counter (R-12).
+func IncrementAutomationJourneyEnrolled() {
+	automationJourneysEnrolledTotal.Inc()
+}
+
+// IncrementAutomationJourneyCompleted bumps the journey-completed counter (R-12).
+func IncrementAutomationJourneyCompleted() {
+	automationJourneysCompletedTotal.Inc()
+}
+
+// IncrementAutomationJourneyExited bumps the journey-exited counter (R-12).
+func IncrementAutomationJourneyExited() {
+	automationJourneysExitedTotal.Inc()
+}
+
+// IncrementAutomationJourneyFailed bumps the journey-failed counter (R-12).
+func IncrementAutomationJourneyFailed() {
+	automationJourneysFailedTotal.Inc()
+}
+
+// IncrementAutomationNodeFailure records one failed node execution of the
+// given node type (R-12).
+func IncrementAutomationNodeFailure(nodeType string) {
+	automationNodeFailuresTotal.WithLabelValues(nodeType).Inc()
+}
+
+// IncrementAutomationScheduleFire bumps the schedule-fire counter (R-13).
+func IncrementAutomationScheduleFire() {
+	automationScheduleFiresTotal.Inc()
 }
 
 // PrometheusMiddleware records HTTP request metrics.

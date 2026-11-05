@@ -20,6 +20,7 @@
 package repositories
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/goposta/posta/internal/models"
@@ -110,6 +111,17 @@ func (r *APIKeyRepository) FindByIDWithCreator(id uint) (*models.APIKey, error) 
 func (r *APIKeyRepository) UpdateLastUsed(id uint) error {
 	now := time.Now()
 	return r.db.Model(&models.APIKey{}).Where("id = ?", id).Update("last_used_at", now).Error
+}
+
+// SetRateLimits persists a key's per-key request caps (R-15). 0 = unlimited.
+func (r *APIKeyRepository) SetRateLimits(id uint, hourly, daily int) error {
+	if hourly < 0 || daily < 0 {
+		return fmt.Errorf("rate limits must be non-negative")
+	}
+	return r.db.Model(&models.APIKey{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"rate_limit_hourly": hourly,
+		"rate_limit_daily":  daily,
+	}).Error
 }
 
 func (r *APIKeyRepository) Revoke(id uint) error {

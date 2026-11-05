@@ -38,6 +38,7 @@ import (
 
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/webhook"
+	"github.com/robfig/cron/v3"
 )
 
 // Node types (AutomationNode.Type), aliased to the canonical values in
@@ -83,7 +84,13 @@ const (
 	EventKindEmailClicked        = models.AutomationEventEmailClicked
 	EventKindEmailBounced        = models.AutomationEventEmailBounced
 	EventKindCustom              = models.AutomationEventCustom
+	EventKindSchedule            = models.AutomationEventSchedule
 )
+
+// FieldInSegment is the condition field that references a saved segment
+// (R-14); its value is the segment id. Evaluated live against the segment's
+// saved condition via the segment query builder.
+const FieldInSegment = "in_segment"
 
 // Trigger frequencies (AutomationTriggerConfig.Frequency).
 const (
@@ -120,6 +127,7 @@ var (
 		EventKindEmailClicked:        true,
 		EventKindEmailBounced:        true,
 		EventKindCustom:              true,
+		EventKindSchedule:            true,
 	}
 	validFrequencies = map[string]bool{
 		FrequencyOnce:      true,
@@ -563,6 +571,17 @@ func (w *WorkflowDoc) validateTriggerNode(node *models.AutomationNode, listID *u
 		if strings.TrimSpace(cfg.CustomEventName) == "" {
 			errs = append(errs, fmt.Sprintf("trigger node %q: event_kind %q requires a custom_event_name", node.ID, EventKindCustom))
 		}
+	case EventKindSchedule:
+		// R-13: a schedule trigger needs a parsable cron expression and an
+		// audience (its own list_id, the automation-level list, or a segment).
+		if strings.TrimSpace(cfg.CronExpression) == "" {
+			errs = append(errs, fmt.Sprintf("trigger node %q: event_kind %q requires a cron_expression", node.ID, EventKindSchedule))
+		} else if _, err := cron.ParseStandard(cfg.CronExpression); err != nil {
+			errs = append(errs, fmt.Sprintf("trigger node %q: cron_expression %q is not a valid cron expression: %v", node.ID, cfg.CronExpression, err))
+		}
+		if (cfg.ListID == nil || *cfg.ListID == 0) && (cfg.SegmentID == nil || *cfg.SegmentID == 0) && (listID == nil || *listID == 0) {
+			errs = append(errs, fmt.Sprintf("trigger node %q: event_kind %q requires an audience: set list_id or segment_id", node.ID, EventKindSchedule))
+		}
 	}
 	if !validFrequencies[cfg.Frequency] {
 		errs = append(errs, fmt.Sprintf("trigger node %q: unknown frequency %q: use %q or %q", node.ID, cfg.Frequency, FrequencyOnce, FrequencyEveryTime))
@@ -648,6 +667,14 @@ func filterRuleProblem(field, operator string, value any) string {
 		// The operator is irrelevant for membership; the value must be a list id.
 		if _, ok := coerceUint(value); !ok {
 			return "in_list needs a numeric list id as its value"
+		}
+		return ""
+	case FieldInSegment:
+		// R-14: same shape as in_list, referencing a saved segment. The
+		// evaluator resolves membership live through the segment query
+		// builder; membership tracking (entry/exit events) stays deferred.
+		if _, ok := coerceUint(value); !ok {
+			return "in_segment needs a numeric segment id as its value"
 		}
 		return ""
 	}
