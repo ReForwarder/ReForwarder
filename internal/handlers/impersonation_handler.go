@@ -172,11 +172,15 @@ func (h *ImpersonationHandler) ExitImpersonation(c *okapi.Context) error {
 	targetID := uint(c.GetInt("user_id"))
 	targetEmail := c.GetString("email")
 
+	var alreadyRevoked bool
 	if jti != "" && h.sessionRepo != nil {
-		if sess, err := h.sessionRepo.FindByJTI(jti); err == nil && sess != nil && !sess.Revoked {
-			_ = h.sessionRepo.Revoke(sess.ID)
-			if h.store != nil {
-				h.store.MarkRevoked(c.Request().Context(), sess.JTI, sess.ExpiresAt)
+		if sess, err := h.sessionRepo.FindByJTI(jti); err == nil && sess != nil {
+			alreadyRevoked = sess.Revoked
+			if !sess.Revoked {
+				_ = h.sessionRepo.Revoke(sess.ID)
+				if h.store != nil {
+					h.store.MarkRevoked(c.Request().Context(), sess.JTI, sess.ExpiresAt)
+				}
 			}
 		}
 	}
@@ -189,7 +193,10 @@ func (h *ImpersonationHandler) ExitImpersonation(c *okapi.Context) error {
 	if admin, err := h.repo.FindByID(adminID); err == nil && admin != nil {
 		actorEmail = admin.Email
 	}
-	if h.audit != nil {
+	// A replayed exit reaches here only when the first exit's revocation itself
+	// failed (the JWT middleware rejects revoked sessions otherwise); the stop
+	// event must still fire exactly once per impersonation.
+	if h.audit != nil && !alreadyRevoked {
 		h.audit.Log(actorID, actorEmail, c.RealIP(), "admin.impersonation.stopped",
 			fmt.Sprintf("Impersonation ended for %q", targetEmail),
 			map[string]any{

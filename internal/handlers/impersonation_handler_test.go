@@ -271,8 +271,10 @@ func (r *impHRows) Next(dest []driver.Value) error {
 
 type impHConnector struct{ state *impHState }
 
-func (c impHConnector) Connect(context.Context) (driver.Conn, error) { return &impHConn{s: c.state}, nil }
-func (c impHConnector) Driver() driver.Driver                        { return impHDrv{} }
+func (c impHConnector) Connect(context.Context) (driver.Conn, error) {
+	return &impHConn{s: c.state}, nil
+}
+func (c impHConnector) Driver() driver.Driver { return impHDrv{} }
 
 type impHDrv struct{}
 
@@ -913,6 +915,16 @@ func TestExitImpersonationRevokesAndAudits(t *testing.T) {
 	}
 	if !cleared {
 		t.Fatalf("exit did not clear the %s cookie (cookies %+v)", middlewares.SessionCookieName, rec.Result().Cookies())
+	}
+
+	// A replayed exit with the same token — reachable only when the first
+	// exit's revocation itself failed — must not mint a second stop event.
+	replay := h.do(t, http.MethodPost, "/admin/impersonate/exit", tok, "")
+	if replay.Code != http.StatusOK && replay.Code != http.StatusUnauthorized {
+		t.Fatalf("replayed exit status = %d, want 200 or 401 (body %s)", replay.Code, replay.Body.String())
+	}
+	if n := len(h.state.rowMaps("events")); n != 2 {
+		t.Fatalf("events after replayed exit = %d, want 2 (no duplicate stop event)", n)
 	}
 
 	// The stop is audited naming the admin as the actor and the target as subject.
