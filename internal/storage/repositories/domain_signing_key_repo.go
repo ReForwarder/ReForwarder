@@ -114,3 +114,19 @@ func (r *DomainSigningKeyRepository) RotateActive(domainID uint, newKey *models.
 		return tx.Create(newKey).Error
 	})
 }
+
+// MarkRetired completes the manual retirement step (R-02): the operator flips
+// a Retiring key to Retired once receivers no longer see its signatures, which
+// makes it deletable. The UPDATE ... WHERE status='retiring' is a CAS — an
+// Active key (rotate it first), an already-Retired key, or a key that lost a
+// concurrent retire matches no row and returns false. Retired keys sign
+// nothing (CanSign is false for anything but Active+published).
+func (r *DomainSigningKeyRepository) MarkRetired(id uint) (bool, error) {
+	res := r.db.Model(&models.DomainSigningKey{}).
+		Where("id = ? AND status = ?", id, models.DomainSigningStatusRetiring).
+		Update("status", models.DomainSigningStatusRetired)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}

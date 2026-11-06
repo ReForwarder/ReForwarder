@@ -2068,3 +2068,93 @@ export interface SigningKey {
   created_at: string
   dns_record?: DnsRecordView | null
 }
+
+// ---- Domain deliverability health (R-07) ----
+
+/** One auth check (SPF / DKIM / DMARC) with the operator guidance when it fails. */
+export interface HealthCheckResult {
+  verified: boolean
+  record?: string
+  guidance?: string
+}
+
+/** State of the managed DKIM signing key (R-02) for this domain. */
+export interface HealthSigningStatus {
+  enabled: boolean
+  selector?: string
+  algorithm?: string
+  dns_state?: string
+  guidance?: string
+}
+
+/** Recent deliverability record of mail from this domain; rates are percent of sent. */
+export interface HealthSendingHealth {
+  sent: number
+  bounced: number
+  complained: number
+  bounce_rate: number
+  complaint_rate: number
+  since: string
+}
+
+/** Payload of GET/POST /workspaces/current/domains/{id}/health. */
+export interface DomainHealthReport {
+  domain_id: number
+  domain: string
+  ownership_verified: boolean
+  spf: HealthCheckResult
+  dkim: HealthCheckResult
+  dmarc: HealthCheckResult
+  signing: HealthSigningStatus
+  sending: HealthSendingHealth
+  records?: DnsRecords
+  checked_at: string
+}
+
+/** Roll-up of the RFC 7489 aggregate reports ingested for one domain (R-17). */
+export interface DmarcSummary {
+  /** Number of stored report records. */
+  record_count: number
+  /** Total message volume the records carried. */
+  message_count: number
+  dkim_aligned_messages: number
+  spf_aligned_messages: number
+  /** Message-weighted alignment ratios (0..1; 0 when nothing is stored). */
+  dkim_alignment: number
+  spf_alignment: number
+  /** Policy disposition receiving providers reported applying. */
+  disposition_none: number
+  disposition_quarantine: number
+  disposition_reject: number
+  /** End of the newest stored report window; null when nothing is stored. */
+  latest_window_end: string | null
+}
+
+/** One stored DMARC aggregate-report record (models.DMARCReport). */
+export interface DmarcReportRecord {
+  id: number
+  user_id: number
+  workspace_id?: number
+  domain_id?: number
+  inbound_id: number
+  domain: string
+  reporter: string
+  reporter_email: string
+  report_id: string
+  source_ip: string
+  window_start: string
+  window_end: string
+  count: number
+  dkim_aligned: boolean
+  spf_aligned: boolean
+  /** none | quarantine | reject */
+  disposition: 'none' | 'quarantine' | 'reject' | string
+  header_from: string
+  created_at: string
+}
+
+/** Payload of GET /workspaces/current/domains/{id}/dmarc. */
+export interface DomainDmarcResponse {
+  summary: DmarcSummary
+  records: DmarcReportRecord[]
+}

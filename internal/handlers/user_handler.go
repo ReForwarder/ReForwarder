@@ -165,9 +165,9 @@ type UserProfile struct {
 	// ImpersonatedBy carries the admin's user ID while the caller's session is
 	// an R-20 impersonation session, so the dashboard can show the
 	// "viewing as" banner. Absent on ordinary sessions.
-	ImpersonatedBy       *uint     `json:"impersonated_by,omitempty"`
-	ImpersonationReason  string    `json:"impersonation_reason,omitempty"`
-	CreatedAt            time.Time `json:"created_at"`
+	ImpersonatedBy      *uint     `json:"impersonated_by,omitempty"`
+	ImpersonationReason string    `json:"impersonation_reason,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
 }
 
 type Enable2FAResponse struct {

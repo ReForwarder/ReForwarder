@@ -155,8 +155,8 @@ type MemoryChallengeStore struct {
 }
 
 type memoryEntry struct {
-	payload  []byte
-	expires  time.Time
+	payload []byte
+	expires time.Time
 }
 
 // NewMemoryChallengeStore builds the in-memory store.

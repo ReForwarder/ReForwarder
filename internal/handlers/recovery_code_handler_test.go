@@ -253,7 +253,7 @@ func (c *rcConn) ExecContext(_ context.Context, query string, args []driver.Name
 	case strings.Contains(lower, `update "user_recovery_codes"`):
 		// SET used_at=$1 WHERE id=$2 AND used_at IS NULL
 		if v, ok := rcArg(args, 1).(time.Time); ok {
-			id := int64(rcArg(args, 2).(int64))
+			id := rcArg(args, 2).(int64)
 			matched := int64(0)
 			for _, r := range s.rows {
 				if r.id == id && r.usedAt == nil {

@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { domainsApi } from '../../api/domains'
-import type { Domain, DnsRecord, Pageable, SigningKey } from '../../api/types'
+import type { Domain, DnsRecord, Pageable, SigningKey, DomainHealthReport, DomainDmarcResponse } from '../../api/types'
 import { useNotificationStore } from '../../stores/notification'
+import { apiMessage } from '../../composables/apiError'
 import { useConfirm } from '../../composables/useConfirm'
 import { useModalSafeClose } from '../../composables/useModalSafeClose';
 import { useWorkspaceStore } from '../../stores/workspace'
@@ -157,6 +158,8 @@ async function viewDnsRecords(domain: Domain) {
   expandedDomainId.value = domain.id
   signingFreshId.value = null
   loadSigningKeys(domain.id)
+  loadHealth(domain.id)
+  loadDmarcSummary(domain.id)
   try {
     const res = await domainsApi.get(domain.id)
     dnsRecordsDomain.value = res.data.data
@@ -249,6 +252,25 @@ async function verifyKeyDns(domain: Domain, key: SigningKey) {
   }
 }
 
+async function retireKey(domain: Domain, key: SigningKey) {
+  const confirmed = await confirm({
+    title: 'Retire signing key',
+    message: `Retire the key "${key.selector}"? Only do this once receivers no longer see its signatures — a retired key no longer verifies old mail and cannot be un-retired, but it can then be deleted.`,
+    confirmText: 'Retire',
+  })
+  if (!confirmed) return
+  signingBusy.value = true
+  try {
+    await domainsApi.retireSigningKey(domain.id, key.id)
+    notify.success(`Signing key "${key.selector}" retired`)
+    await loadSigningKeys(domain.id)
+  } catch (e: any) {
+    notify.error(e?.response?.data?.message || 'Failed to retire signing key')
+  } finally {
+    signingBusy.value = false
+  }
+}
+
 async function deleteKey(domain: Domain, key: SigningKey) {
   const confirmed = await confirm({
     title: 'Delete signing key',
@@ -267,6 +289,103 @@ async function deleteKey(domain: Domain, key: SigningKey) {
   } finally {
     signingBusy.value = false
   }
+}
+
+// ---- Deliverability health (R-07) ----
+// The stored report loads lazily on first row expansion and is cached per
+// domain id; Diagnose replaces the cache entry with the fresh report the
+// backend returns from the live re-check.
+const healthByDomain = ref<Record<number, DomainHealthReport>>({})
+const healthLoadingId = ref<number | null>(null)
+const diagnosingId = ref<number | null>(null)
+
+const expandedHealth = computed(() =>
+  expandedDomainId.value ? healthByDomain.value[expandedDomainId.value] || null : null,
+)
+
+const healthCheckRows = computed(() => {
+  const h = expandedHealth.value
+  if (!h) return []
+  return [
+    { key: 'spf', label: 'SPF', result: h.spf },
+    { key: 'dkim', label: 'DKIM', result: h.dkim },
+    { key: 'dmarc', label: 'DMARC', result: h.dmarc },
+  ]
+})
+
+async function loadHealth(domainId: number) {
+  if (healthByDomain.value[domainId]) return
+  healthLoadingId.value = domainId
+  try {
+    const res = await domainsApi.health(domainId)
+    healthByDomain.value[domainId] = res.data.data
+  } catch (e: any) {
+    notify.error(apiMessage(e, 'Failed to load deliverability health'))
+  } finally {
+    healthLoadingId.value = null
+  }
+}
+
+async function diagnoseDomain(domain: Domain) {
+  diagnosingId.value = domain.id
+  try {
+    const res = await domainsApi.diagnose(domain.id)
+    healthByDomain.value[domain.id] = res.data.data
+  } catch (e: any) {
+    notify.error(apiMessage(e, 'Diagnose failed'))
+  } finally {
+    diagnosingId.value = null
+  }
+}
+
+// ---- DMARC aggregate reports (R-17) ----
+// Loaded alongside the health report on first expansion and cached per domain
+// id. A failure here is non-fatal: the panel falls back to the empty state
+// instead of an error toast.
+const dmarcByDomain = ref<Record<number, DomainDmarcResponse | null>>({})
+const dmarcLoadingId = ref<number | null>(null)
+
+const expandedDmarc = computed(() =>
+  expandedDomainId.value ? dmarcByDomain.value[expandedDomainId.value] ?? null : null,
+)
+
+const dispositionLabels: Record<string, string> = {
+  none: 'None',
+  quarantine: 'Quarantine',
+  reject: 'Reject',
+}
+
+function dispositionBadgeClass(disposition: string): string {
+  if (disposition === 'quarantine') return 'badge-warning'
+  if (disposition === 'reject') return 'badge-danger'
+  return 'badge-neutral'
+}
+
+async function loadDmarcSummary(domainId: number) {
+  if (dmarcByDomain.value[domainId] !== undefined) return
+  dmarcLoadingId.value = domainId
+  try {
+    const res = await domainsApi.dmarcSummary(domainId)
+    dmarcByDomain.value[domainId] = res.data.data
+  } catch {
+    dmarcByDomain.value[domainId] = null
+  } finally {
+    dmarcLoadingId.value = null
+  }
+}
+
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleString()
+}
+
+// The backend already expresses the rates as percent of sent.
+function ratePct(rate: number): string {
+  return `${rate.toFixed(2)}%`
+}
+
+// The DMARC alignment ratios are 0..1 fractions of messages.
+function ratioPct(ratio: number): string {
+  return `${(ratio * 100).toFixed(1)}%`
 }
 
 async function deleteDomain(domain: Domain) {
@@ -434,12 +553,16 @@ const { watchClickStart, confirmClickEnd } = useModalSafeClose(() => {
                                 :disabled="signingBusy" @click="verifyKeyDns(domain, key)">
                                 Check DNS
                               </button>
+                              <button v-if="wsStore.canEdit && key.status === 'retiring'" class="btn btn-secondary btn-sm"
+                                :disabled="signingBusy" @click="retireKey(domain, key)">
+                                Retire
+                              </button>
                               <button v-if="wsStore.canEdit && key.status === 'retired'" class="btn btn-danger btn-sm"
                                 :disabled="signingBusy" @click="deleteKey(domain, key)">
                                 Delete
                               </button>
                               <span v-if="key.status === 'retiring'" class="signing-note">
-                                Keep until receivers stop seeing its signatures, then retire and delete it.
+                                Keep until receivers stop seeing its signatures, then retire it and delete it.
                               </span>
                             </div>
                           </div>
@@ -466,6 +589,147 @@ const { watchClickStart, confirmClickEnd } = useModalSafeClose(() => {
                             </p>
                           </div>
                         </template>
+                      </div>
+
+                      <!-- ==================== Deliverability health (R-07) ==================== -->
+                      <div class="signing-section">
+                        <div class="signing-head">
+                          <div>
+                            <h4 class="dns-panel-title">Deliverability health</h4>
+                            <p class="dns-panel-subtitle">
+                              Stored report from the last verification<span v-if="expandedHealth"> — last checked
+                                {{ formatDate(expandedHealth.checked_at) }}</span>. Diagnose re-runs the live DNS
+                              checks.
+                            </p>
+                          </div>
+                          <div class="dns-panel-actions">
+                            <button v-if="wsStore.canEdit" class="btn btn-primary btn-sm"
+                              :disabled="diagnosingId === domain.id" @click="diagnoseDomain(domain)">
+                              {{ diagnosingId === domain.id ? 'Diagnosing…' : 'Diagnose' }}
+                            </button>
+                          </div>
+                        </div>
+
+                        <div v-if="healthLoadingId === domain.id" class="loading-page" style="min-height: 60px">
+                          <div class="spinner"></div>
+                        </div>
+
+                        <template v-else-if="expandedHealth">
+                          <div v-for="check in healthCheckRows" :key="check.key" class="health-row">
+                            <div class="health-row-head">
+                              <span class="dns-label">{{ check.label }}</span>
+                              <span class="badge" :class="check.result.verified ? 'badge-success' : 'badge-neutral'">
+                                {{ check.result.verified ? 'Verified' : 'Pending' }}
+                              </span>
+                            </div>
+                            <code v-if="check.result.record"
+                              class="dns-field-value dns-field-value-block health-record">{{ check.result.record }}</code>
+                            <p v-if="check.result.guidance" class="dns-field-hint">{{ check.result.guidance }}</p>
+                          </div>
+
+                          <div class="health-row">
+                            <div class="health-row-head">
+                              <span class="dns-label">DKIM signing</span>
+                              <span class="health-row-badges">
+                                <span class="badge"
+                                  :class="expandedHealth.signing.enabled ? 'badge-success' : 'badge-neutral'">
+                                  {{ expandedHealth.signing.enabled ? 'Signing' : 'Not signing' }}
+                                </span>
+                                <span v-if="expandedHealth.signing.dns_state" class="badge"
+                                  :class="expandedHealth.signing.dns_state === 'published' ? 'badge-success' : 'badge-neutral'">
+                                  {{ dnsStateLabels[expandedHealth.signing.dns_state] || expandedHealth.signing.dns_state }}
+                                </span>
+                              </span>
+                            </div>
+                            <div v-if="expandedHealth.signing.selector || expandedHealth.signing.algorithm"
+                              class="health-signing-meta">
+                              <code v-if="expandedHealth.signing.selector" class="signing-selector">{{ expandedHealth.signing.selector }}</code>
+                              <span v-if="expandedHealth.signing.algorithm" class="dns-type-badge">{{ expandedHealth.signing.algorithm }}</span>
+                            </div>
+                            <p v-if="expandedHealth.signing.guidance" class="dns-field-hint">{{ expandedHealth.signing.guidance }}</p>
+                          </div>
+
+                          <div class="health-row">
+                            <div class="health-row-head">
+                              <span class="dns-label">Sending health</span>
+                              <span class="health-since">since {{ formatDate(expandedHealth.sending.since) }}</span>
+                            </div>
+                            <div class="health-stats">
+                              <div class="health-stat">
+                                <span class="health-stat-value">{{ expandedHealth.sending.sent }}</span>
+                                <span class="health-stat-label">sent</span>
+                              </div>
+                              <div class="health-stat">
+                                <span class="health-stat-value">{{ expandedHealth.sending.bounced }}</span>
+                                <span class="health-stat-label">bounced ({{ ratePct(expandedHealth.sending.bounce_rate) }})</span>
+                              </div>
+                              <div class="health-stat">
+                                <span class="health-stat-value">{{ expandedHealth.sending.complained }}</span>
+                                <span class="health-stat-label">complained ({{ ratePct(expandedHealth.sending.complaint_rate) }})</span>
+                              </div>
+                            </div>
+                          </div>
+                        </template>
+
+                        <div v-else class="signing-empty">
+                          No health report available yet.
+                        </div>
+
+                        <!-- DMARC aggregate reports (R-17) — non-fatal when nothing is ingested -->
+                        <div class="health-dmarc">
+                          <div class="health-row-head">
+                            <span class="dns-label">DMARC aggregate reports</span>
+                            <span v-if="expandedDmarc && expandedDmarc.summary.latest_window_end" class="health-since">
+                              latest window ended {{ formatDate(expandedDmarc.summary.latest_window_end) }}
+                            </span>
+                          </div>
+
+                          <div v-if="dmarcLoadingId === domain.id" class="loading-page" style="min-height: 40px">
+                            <div class="spinner"></div>
+                          </div>
+
+                          <template v-else-if="expandedDmarc && expandedDmarc.summary.record_count > 0">
+                            <div class="health-stats">
+                              <div class="health-stat">
+                                <span class="health-stat-value">{{ expandedDmarc.summary.record_count }}</span>
+                                <span class="health-stat-label">report records</span>
+                              </div>
+                              <div class="health-stat">
+                                <span class="health-stat-value">{{ expandedDmarc.summary.message_count }}</span>
+                                <span class="health-stat-label">messages</span>
+                              </div>
+                              <div class="health-stat">
+                                <span class="health-stat-value">{{ ratioPct(expandedDmarc.summary.dkim_alignment) }}</span>
+                                <span class="health-stat-label">DKIM aligned</span>
+                              </div>
+                              <div class="health-stat">
+                                <span class="health-stat-value">{{ ratioPct(expandedDmarc.summary.spf_alignment) }}</span>
+                                <span class="health-stat-label">SPF aligned</span>
+                              </div>
+                            </div>
+
+                            <div class="health-row-badges">
+                              <span class="badge badge-neutral">none {{ expandedDmarc.summary.disposition_none }}</span>
+                              <span class="badge badge-warning">quarantine {{ expandedDmarc.summary.disposition_quarantine }}</span>
+                              <span class="badge badge-danger">reject {{ expandedDmarc.summary.disposition_reject }}</span>
+                            </div>
+
+                            <div v-for="rec in expandedDmarc.records" :key="rec.id" class="health-dmarc-record">
+                              <div class="health-row-head">
+                                <span class="health-dmarc-reporter">{{ rec.reporter || rec.reporter_email || rec.source_ip }}</span>
+                                <span class="badge" :class="dispositionBadgeClass(rec.disposition)">
+                                  {{ dispositionLabels[rec.disposition] || rec.disposition }}
+                                </span>
+                              </div>
+                              <div class="health-dmarc-meta">
+                                {{ rec.count }} messages · {{ formatDate(rec.window_start) }} →
+                                {{ formatDate(rec.window_end) }}
+                              </div>
+                            </div>
+                          </template>
+
+                          <div v-else class="signing-empty">No DMARC reports ingested yet.</div>
+                        </div>
                       </div>
 
                       <div class="dns-record-list">
@@ -655,6 +919,89 @@ const { watchClickStart, confirmClickEnd } = useModalSafeClose(() => {
 
 .signing-hint {
   margin-top: 0.4rem;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* Deliverability health panel (R-07) — same card idiom as the signing keys */
+.health-row {
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md, 8px);
+  padding: 0.75rem;
+  margin-bottom: 0.75rem;
+  background: var(--bg-secondary);
+}
+
+.health-row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.health-row-badges {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.health-record {
+  margin-top: 0.5rem;
+}
+
+.health-signing-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.health-since {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.health-stats {
+  display: flex;
+  gap: 1.5rem;
+  margin-top: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.health-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.health-stat-value {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.health-stat-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* DMARC aggregate reports subsection (R-17) */
+.health-dmarc {
+  margin-top: 0.25rem;
+}
+
+.health-dmarc-record {
+  border-top: 1px solid var(--border-primary);
+  padding: 0.5rem 0;
+}
+
+.health-dmarc-reporter {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.health-dmarc-meta {
+  margin-top: 0.25rem;
   font-size: 12px;
   color: var(--text-muted);
 }

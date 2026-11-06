@@ -131,7 +131,7 @@ func (s *impHState) rowMaps(table string) []map[string]driver.Value {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	spec := impHColumns[table]
-	var out []map[string]driver.Value
+	out := make([]map[string]driver.Value, 0, len(s.tables[table].rows))
 	for _, row := range s.tables[table].rows {
 		m := make(map[string]driver.Value, len(spec))
 		for i, c := range spec {
@@ -140,19 +140,6 @@ func (s *impHState) rowMaps(table string) []map[string]driver.Value {
 		out = append(out, m)
 	}
 	return out
-}
-
-func (s *impHState) countWhere(table, col string, val driver.Value) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	idx := s.colIndex(table, col)
-	n := 0
-	for _, row := range s.tables[table].rows {
-		if driverValEqual(row[idx], val) {
-			n++
-		}
-	}
-	return n
 }
 
 func driverValEqual(a, b driver.Value) bool {
@@ -556,10 +543,10 @@ func impMintJWT(t *testing.T, claims map[string]any) string {
 	return tok
 }
 
-func impAdminJWT(t *testing.T, jti string) string {
+func impAdminJWT(t *testing.T) string {
 	t.Helper()
 	return impMintJWT(t, map[string]any{
-		"sub": impAdminID, "email": "user1@example.com", "role": impRoleAdmin, "jti": jti,
+		"sub": impAdminID, "email": "user1@example.com", "role": impRoleAdmin, "jti": "jti-admin-1",
 	})
 }
 
@@ -599,13 +586,13 @@ func newImpHarness(t *testing.T) *impHarness {
 	return &impHarness{state: state, o: o}
 }
 
-func (h *impHarness) do(t *testing.T, method, path, token, body string) *httptest.ResponseRecorder {
+func (h *impHarness) do(t *testing.T, path, token, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	var rd io.Reader
 	if body != "" {
 		rd = strings.NewReader(body)
 	}
-	req := httptest.NewRequest(method, path, rd)
+	req := httptest.NewRequest(http.MethodPost, path, rd)
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -638,7 +625,7 @@ func impDecode(t *testing.T, rec *httptest.ResponseRecorder) (bool, map[string]a
 // impStartImpersonation drives the happy-path start and returns the new token.
 func (h *impHarness) impStartImpersonation(t *testing.T, adminToken string, targetID int, reason string) string {
 	t.Helper()
-	rec := h.do(t, http.MethodPost, fmt.Sprintf("/admin/users/%d/impersonate", targetID), adminToken,
+	rec := h.do(t, fmt.Sprintf("/admin/users/%d/impersonate", targetID), adminToken,
 		fmt.Sprintf(`{"reason":%q}`, reason))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("impersonate status = %d, want 201 (body %s)", rec.Code, rec.Body.String())
@@ -662,9 +649,9 @@ func TestImpersonateIssuesMarkedSession(t *testing.T) {
 	impSeedUser(t, h.state, impAdminID, impRoleAdmin, true)
 	impSeedUser(t, h.state, impTargetID, impRoleUser, true)
 
-	adminToken := impAdminJWT(t, "jti-admin-1")
+	adminToken := impAdminJWT(t)
 	reason := "Reproducing the reported forwarding loop"
-	rec := h.do(t, http.MethodPost, fmt.Sprintf("/admin/users/%d/impersonate", impTargetID), adminToken,
+	rec := h.do(t, fmt.Sprintf("/admin/users/%d/impersonate", impTargetID), adminToken,
 		fmt.Sprintf(`{"reason":%q}`, reason))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("impersonate status = %d, want 201 (body %s)", rec.Code, rec.Body.String())
@@ -739,22 +726,13 @@ func TestImpersonateIssuesMarkedSession(t *testing.T) {
 	}
 }
 
-// impCookies runs a request and returns the cookies it set.
-func impCookies(t *testing.T, h *impHarness, method, path, token, body string) []*http.Cookie {
-	t.Helper()
-	rec := h.do(t, method, path, token, body)
-	res := rec.Result()
-	defer res.Body.Close()
-	return res.Cookies()
-}
-
 func TestImpersonateResponseCarriesTargetProfile(t *testing.T) {
 	h := newImpHarness(t)
 	impSeedUser(t, h.state, impAdminID, impRoleAdmin, true)
 	impSeedUser(t, h.state, impTargetID, impRoleUser, true)
 
-	rec := h.do(t, http.MethodPost, fmt.Sprintf("/admin/users/%d/impersonate", impTargetID),
-		impAdminJWT(t, "jti-admin-1"), `{"reason":"Checking the user's mailbox settings"}`)
+	rec := h.do(t, fmt.Sprintf("/admin/users/%d/impersonate", impTargetID),
+		impAdminJWT(t), `{"reason":"Checking the user's mailbox settings"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -785,7 +763,7 @@ func TestImpersonateGuards(t *testing.T) {
 	impSeedUser(t, h.state, 3, impRoleAdmin, true)
 	impSeedUser(t, h.state, 4, impRoleUser, false)
 
-	adminToken := impAdminJWT(t, "jti-admin-1")
+	adminToken := impAdminJWT(t)
 	reason := "A reason of sufficient length"
 
 	cases := []struct {
@@ -804,14 +782,14 @@ func TestImpersonateGuards(t *testing.T) {
 		},
 		{
 			name:     "admin targets refused",
-			path:     fmt.Sprintf("/admin/users/3/impersonate"),
+			path:     "/admin/users/3/impersonate",
 			body:     fmt.Sprintf(`{"reason":%q}`, reason),
 			wantCode: http.StatusForbidden,
 			wantSub:  "cannot impersonate other administrators",
 		},
 		{
 			name:     "disabled accounts refused",
-			path:     fmt.Sprintf("/admin/users/4/impersonate"),
+			path:     "/admin/users/4/impersonate",
 			body:     fmt.Sprintf(`{"reason":%q}`, reason),
 			wantCode: http.StatusBadRequest,
 			wantSub:  "disabled",
@@ -851,7 +829,7 @@ func TestImpersonateGuards(t *testing.T) {
 					"sub": impTargetID, "email": "user2@example.com", "role": impRoleUser, "jti": "jti-user-1",
 				})
 			}
-			rec := h.do(t, http.MethodPost, tc.path, token, tc.body)
+			rec := h.do(t, tc.path, token, tc.body)
 			if rec.Code != tc.wantCode {
 				t.Fatalf("status = %d, want %d (body %s)", rec.Code, tc.wantCode, rec.Body.String())
 			}
@@ -876,13 +854,13 @@ func TestExitImpersonationRevokesAndAudits(t *testing.T) {
 	impSeedUser(t, h.state, impAdminID, impRoleAdmin, true)
 	impSeedUser(t, h.state, impTargetID, impRoleUser, true)
 
-	adminToken := impAdminJWT(t, "jti-admin-1")
+	adminToken := impAdminJWT(t)
 	tok := h.impStartImpersonation(t, adminToken, impTargetID, "Reproducing the reported forwarding loop")
 	if n := len(impSessionRows(h.state)); n != 1 {
 		t.Fatalf("setup created %d session rows, want 1", n)
 	}
 
-	rec := h.do(t, http.MethodPost, "/admin/impersonate/exit", tok, "")
+	rec := h.do(t, "/admin/impersonate/exit", tok, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("exit status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -919,7 +897,7 @@ func TestExitImpersonationRevokesAndAudits(t *testing.T) {
 
 	// A replayed exit with the same token — reachable only when the first
 	// exit's revocation itself failed — must not mint a second stop event.
-	replay := h.do(t, http.MethodPost, "/admin/impersonate/exit", tok, "")
+	replay := h.do(t, "/admin/impersonate/exit", tok, "")
 	if replay.Code != http.StatusOK && replay.Code != http.StatusUnauthorized {
 		t.Fatalf("replayed exit status = %d, want 200 or 401 (body %s)", replay.Code, replay.Body.String())
 	}
@@ -952,8 +930,8 @@ func TestExitImpersonationRefusesNonImpersonatedSession(t *testing.T) {
 	impSeedUser(t, h.state, impAdminID, impRoleAdmin, true)
 
 	// An ordinary admin session carries no impersonated_by claim.
-	adminToken := impAdminJWT(t, "jti-admin-1")
-	rec := h.do(t, http.MethodPost, "/admin/impersonate/exit", adminToken, "")
+	adminToken := impAdminJWT(t)
+	rec := h.do(t, "/admin/impersonate/exit", adminToken, "")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("exit status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
 	}

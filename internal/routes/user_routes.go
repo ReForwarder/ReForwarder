@@ -36,7 +36,8 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 	})
 	userGroup.WithBearerAuth()
 
-	routes := []okapi.RouteDefinition{
+	routes := make([]okapi.RouteDefinition, 0, 35)
+	routes = append(routes, []okapi.RouteDefinition{
 		{
 			Method:   http.MethodGet,
 			Path:     "",
@@ -306,7 +307,7 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 			Description: "Clears the dashboard banner for the active workspace.",
 			Response:    &dto.Response[dto.MessageData]{},
 		},
-	}
+	}...)
 
 	// Passkeys (R-19). The ceremonies live under /auth/webauthn: registration
 	// and credential management demand a dashboard session (an API key cannot
