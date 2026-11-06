@@ -35,8 +35,8 @@ type Session struct {
 	// Impersonation (R-20): set when the session's JWT was minted by the
 	// admin impersonation flow, so the sessions trail can tell a support
 	// login apart from the user's own sign-in. Empty on ordinary sessions.
-	ImpersonatedBy      *uint   `json:"impersonated_by,omitempty" gorm:"index"`
-	ImpersonationReason string  `json:"impersonation_reason,omitempty"`
+	ImpersonatedBy      *uint  `json:"impersonated_by,omitempty" gorm:"index"`
+	ImpersonationReason string `json:"impersonation_reason,omitempty"`
 
 	User User `json:"-" gorm:"foreignKey:UserID"`
 }

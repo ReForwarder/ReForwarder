@@ -121,6 +121,7 @@ type routerHandlers struct {
 	domain           *handlers.DomainHandler
 	domainSigning    *handlers.DomainSigningHandler
 	domainHealth     *handlers.DomainHealthHandler
+	dmarc            *handlers.DMARCReportHandler
 	bounce           *handlers.BounceHandler
 	suppression      *handlers.SuppressionHandler
 	unsubscribeList  *handlers.UnsubscribeListHandler
@@ -332,6 +333,7 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 			domain:           handlers.NewDomainHandler(domainRepo),
 			domainSigning:    handlers.NewDomainSigningHandler(repositories.NewDomainSigningKeyRepository(db), domainRepo, auditLogger),
 			domainHealth:     handlers.NewDomainHealthHandler(domainpkg.NewHealthService(db, repositories.NewDomainSigningKeyRepository(db)), domainRepo, auditLogger),
+			dmarc:            handlers.NewDMARCReportHandler(repositories.NewDMARCReportRepository(db), domainRepo, auditLogger),
 			adminDomain:      handlers.NewAdminDomainHandler(db, domainRepo, auditLogger),
 			adminWorkspace:   handlers.NewAdminWorkspaceHandler(db, workspaceRepo),
 			notification:     handlers.NewNotificationHandler(notificationRepo, inboxService),

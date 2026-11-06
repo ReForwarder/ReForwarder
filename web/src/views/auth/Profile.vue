@@ -4,10 +4,11 @@ import { useRouter } from 'vue-router'
 import { authApi } from '../../api/auth'
 import { oauthApi } from '../../api/oauth'
 import { sessionsApi, type Session } from '../../api/sessions'
+import { webauthnApi, passkeysSupported, serializeCreation } from '../../api/webauthn'
 import { useAuthStore } from '../../stores/auth'
 import { useNotificationStore } from '../../stores/notification'
 import { useConfirm } from '../../composables/useConfirm'
-import type { Plan, OAuthLinkedAccount, OAuthProviderInfo } from '../../api/types'
+import type { Plan, OAuthLinkedAccount, OAuthProviderInfo, WebAuthnCredential } from '../../api/types'
 const auth = useAuthStore()
 const notify = useNotificationStore()
 const { confirm } = useConfirm()
@@ -48,7 +49,10 @@ onMounted(async () => {
     const res = await authApi.me()
     twoFactorEnabled.value = res.data.data.two_factor_enabled
     scheduledDeletionAt.value = res.data.data.scheduled_deletion_at
+    if (twoFactorEnabled.value) await loadRecoveryCount()
   } catch { /* ignore */ }
+
+  if (passkeysSupportedHere.value) await loadPasskeys()
 
   // Fetch user plan
   planLoading.value = true
@@ -184,19 +188,79 @@ async function verify2FA() {
   }
   tfaLoading.value = true
   try {
-    await authApi.verify2FA(tfaCode.value)
+    const res = await authApi.verify2FA(tfaCode.value)
     twoFactorEnabled.value = true
     show2FASetup.value = false
     tfaCode.value = ''
     tfaSecret.value = ''
     tfaURL.value = ''
-    notify.success('Two-factor authentication enabled')
+    // R-10: the enable response carries the one-time recovery codes — surface
+    // them immediately, they are never retrievable again.
+    recoveryCodes.value = res.data.data.recovery_codes || []
+    recoveryRemaining.value = recoveryCodes.value.length
+    notify.success('Two-factor authentication enabled — save your recovery codes')
   } catch (e: any) {
     const message = e?.response?.data?.error?.message || 'Invalid code. Please try again.'
     notify.error(message)
   } finally {
     tfaLoading.value = false
   }
+}
+
+// Recovery codes (R-10): the profile card keeps the count fresh, regenerates
+// the single-use set behind a TOTP confirmation, and shows the fresh codes
+// exactly once with a local copy/download.
+const recoveryCodes = ref<string[]>([])
+const recoveryRemaining = ref<number | null>(null)
+const showRecoveryRegen = ref(false)
+const recoveryRegenCode = ref('')
+const recoveryRegenLoading = ref(false)
+
+async function loadRecoveryCount() {
+  try {
+    const res = await authApi.recoveryCodeCount()
+    recoveryRemaining.value = res.data.data.remaining
+  } catch { /* the count is advisory; a failure leaves the card quiet */ }
+}
+
+async function regenerateRecoveryCodes() {
+  if (!recoveryRegenCode.value || recoveryRegenCode.value.length !== 6) {
+    notify.error('Please enter a valid 6-digit code')
+    return
+  }
+  recoveryRegenLoading.value = true
+  try {
+    const res = await authApi.regenerateRecoveryCodes(recoveryRegenCode.value)
+    recoveryCodes.value = res.data.data.codes || []
+    recoveryRemaining.value = recoveryCodes.value.length
+    showRecoveryRegen.value = false
+    recoveryRegenCode.value = ''
+    notify.success('New recovery codes generated — the previous set is no longer valid')
+  } catch (e: any) {
+    const message = e?.response?.data?.error?.message || 'Invalid code. Please try again.'
+    notify.error(message)
+  } finally {
+    recoveryRegenLoading.value = false
+  }
+}
+
+function copyRecoveryCodes() {
+  const text = recoveryCodes.value.join('\n')
+  navigator.clipboard?.writeText(text).then(
+    () => notify.success('Recovery codes copied to clipboard'),
+    () => notify.error('Copy failed — select the codes manually'),
+  )
+}
+
+function downloadRecoveryCodes() {
+  const header = `Posta recovery codes for ${email.value} — each code works once.\n`
+  const blob = new Blob([header + recoveryCodes.value.join('\n') + '\n'], { type: 'text/plain' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = 'posta-recovery-codes.txt'
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 async function disable2FA() {
@@ -210,6 +274,9 @@ async function disable2FA() {
     twoFactorEnabled.value = false
     show2FADisable.value = false
     tfaDisableCode.value = ''
+    // The backend deletes every recovery code with 2FA.
+    recoveryCodes.value = []
+    recoveryRemaining.value = null
     notify.success('Two-factor authentication disabled')
   } catch (e: any) {
     const message = e?.response?.data?.error?.message || 'Invalid code. Please try again.'
@@ -217,6 +284,94 @@ async function disable2FA() {
   } finally {
     tfaDisableLoading.value = false
   }
+}
+
+// Passkeys (R-19): list, register, rename and delete this account's WebAuthn
+// credentials. The browser runs the ceremonies; the private key never leaves
+// the authenticator.
+const passkeysSupportedHere = computed(() => passkeysSupported())
+const passkeyCredentials = ref<WebAuthnCredential[]>([])
+const passkeyLoading = ref(false)
+const showPasskeyAdd = ref(false)
+const newPasskeyName = ref('')
+const renamingPasskeyId = ref<string | null>(null)
+const renamePasskeyValue = ref('')
+
+async function loadPasskeys() {
+  passkeyLoading.value = true
+  try {
+    const res = await webauthnApi.listCredentials()
+    passkeyCredentials.value = res.data.data || []
+  } catch { /* the card shows the empty state */ }
+  finally { passkeyLoading.value = false }
+}
+
+async function registerPasskey() {
+  passkeyLoading.value = true
+  try {
+    const begin = await webauthnApi.beginRegistration()
+    const options = begin.data.data as unknown as PublicKeyCredentialCreationOptions
+    const credential = await navigator.credentials.create({ publicKey: options })
+    if (!credential) throw new Error('The passkey ceremony returned no credential')
+    const saved = await webauthnApi.finishRegistration(serializeCreation(credential as PublicKeyCredential))
+    const name = newPasskeyName.value.trim()
+    if (name && saved.data.data.name !== name) {
+      try { await webauthnApi.renameCredential(saved.data.data.id, name) } catch { /* cosmetic */ }
+    }
+    showPasskeyAdd.value = false
+    newPasskeyName.value = ''
+    notify.success('Passkey registered — you can now sign in with it')
+    await loadPasskeys()
+  } catch (e: any) {
+    if (e?.name === 'NotAllowedError') {
+      notify.error('Passkey registration was cancelled or timed out')
+    } else {
+      const message = e?.response?.data?.error?.message || e?.message || 'Failed to register the passkey'
+      notify.error(message)
+    }
+  } finally {
+    passkeyLoading.value = false
+  }
+}
+
+async function renamePasskey(cred: WebAuthnCredential) {
+  const name = renamePasskeyValue.value.trim()
+  if (!name || name === cred.name) {
+    renamingPasskeyId.value = null
+    return
+  }
+  try {
+    await webauthnApi.renameCredential(cred.id, name)
+    cred.name = name
+    notify.success('Passkey renamed')
+  } catch (e: any) {
+    notify.error(e?.response?.data?.error?.message || 'Failed to rename the passkey')
+  } finally {
+    renamingPasskeyId.value = null
+    renamePasskeyValue.value = ''
+  }
+}
+
+async function deletePasskey(cred: WebAuthnCredential) {
+  const confirmed = await confirm({
+    title: 'Remove passkey',
+    message: `Remove the passkey "${cred.name}"? You will no longer be able to sign in with it.`,
+    confirmText: 'Remove',
+    variant: 'danger',
+  })
+  if (!confirmed) return
+  try {
+    await webauthnApi.deleteCredential(cred.id)
+    passkeyCredentials.value = passkeyCredentials.value.filter(c => c.id !== cred.id)
+    notify.success('Passkey removed')
+  } catch (e: any) {
+    notify.error(e?.response?.data?.error?.message || 'Failed to remove the passkey')
+  }
+}
+
+function formatPasskeyDate(dateStr: string | null): string {
+  if (!dateStr) return 'never'
+  return new Date(dateStr).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
 }
 
 function cancel2FASetup() {
@@ -494,6 +649,61 @@ onMounted(() => { loadSessions() })
           <template v-if="twoFactorEnabled && !show2FADisable">
             <p class="tfa-description">Two-factor authentication is currently enabled on your account.</p>
             <button class="btn btn-danger" @click="show2FADisable = true">Disable 2FA</button>
+
+            <!-- Recovery codes (R-10): single-use backup codes for a lost
+                 authenticator. Shown once at generation, never retrievable. -->
+            <div class="recovery-section">
+              <div class="recovery-head">
+                <div>
+                  <h3 class="recovery-title">Recovery codes</h3>
+                  <p class="tfa-description" style="margin-bottom: 0">
+                    <template v-if="recoveryRemaining === null">Loading remaining codes…</template>
+                    <template v-else-if="recoveryRemaining === 0">No unused recovery codes left — generate a new set.</template>
+                    <template v-else>{{ recoveryRemaining }} unused recovery code{{ recoveryRemaining === 1 ? '' : 's' }} left. Each works once in place of your authenticator code at sign-in.</template>
+                  </p>
+                </div>
+                <button class="btn btn-secondary btn-sm" :disabled="recoveryRegenLoading" @click="showRecoveryRegen = !showRecoveryRegen">
+                  Regenerate codes
+                </button>
+              </div>
+
+              <form v-if="showRecoveryRegen" @submit.prevent="regenerateRecoveryCodes" class="profile-form" style="margin-top: 12px">
+                <div class="form-group">
+                  <label class="form-label" for="recovery-regen-code">Confirm with your authenticator</label>
+                  <input
+                    id="recovery-regen-code"
+                    v-model="recoveryRegenCode"
+                    type="text"
+                    class="form-input totp-input"
+                    placeholder="000000"
+                    maxlength="6"
+                    inputmode="numeric"
+                    autocomplete="one-time-code"
+                  />
+                  <small class="form-hint">Regenerating invalidates every outstanding code.</small>
+                </div>
+                <div style="display: flex; gap: 8px">
+                  <button type="submit" class="btn btn-primary btn-sm" :disabled="recoveryRegenLoading">
+                    {{ recoveryRegenLoading ? 'Generating…' : 'Generate new codes' }}
+                  </button>
+                  <button type="button" class="btn btn-secondary btn-sm" @click="showRecoveryRegen = false; recoveryRegenCode = ''">Cancel</button>
+                </div>
+              </form>
+
+              <div v-if="recoveryCodes.length > 0" class="recovery-codes">
+                <p class="recovery-once-warning">
+                  Save these codes now — they are shown only this once and cannot be retrieved again.
+                </p>
+                <div class="recovery-code-grid">
+                  <code v-for="code in recoveryCodes" :key="code" class="recovery-code">{{ code }}</code>
+                </div>
+                <div style="display: flex; gap: 8px; margin-top: 12px">
+                  <button type="button" class="btn btn-secondary btn-sm" @click="copyRecoveryCodes">Copy all</button>
+                  <button type="button" class="btn btn-secondary btn-sm" @click="downloadRecoveryCodes">Download .txt</button>
+                  <button type="button" class="btn btn-ghost btn-sm" @click="recoveryCodes = []">I've saved them</button>
+                </div>
+              </div>
+            </div>
           </template>
 
           <!-- 2FA Disable Flow -->
@@ -521,6 +731,76 @@ onMounted(() => { loadSessions() })
               </div>
             </form>
           </template>
+        </div>
+      </div>
+
+      <!-- Passkeys (R-19) -->
+      <div class="card" v-if="passkeysSupportedHere">
+        <div class="card-header">
+          <h2>Passkeys</h2>
+          <span v-if="passkeyCredentials.length > 0" class="badge badge-success">{{ passkeyCredentials.length }}</span>
+        </div>
+        <div class="card-body">
+          <p class="tfa-description">
+            Passkeys let you sign in with your fingerprint, face or device PIN — no password, phishing-proof. They stay
+            on this device.
+          </p>
+
+          <div v-if="passkeyLoading && passkeyCredentials.length === 0" style="text-align: center; padding: 12px 0">
+            <div class="spinner"></div>
+          </div>
+
+          <div v-else-if="passkeyCredentials.length === 0" class="text-muted" style="font-size: 13px; margin-bottom: 12px">
+            No passkeys registered yet.
+          </div>
+
+          <div v-else class="session-list" style="margin-bottom: 12px">
+            <div v-for="cred in passkeyCredentials" :key="cred.id" class="session-item">
+              <div class="session-info">
+                <template v-if="renamingPasskeyId === cred.id">
+                  <input
+                    v-model="renamePasskeyValue"
+                    type="text"
+                    class="form-input"
+                    style="max-width: 240px"
+                    maxlength="64"
+                    @keyup.enter="renamePasskey(cred)"
+                    @keyup.esc="renamingPasskeyId = null"
+                  />
+                </template>
+                <template v-else>
+                  <div class="session-browser">{{ cred.name }}</div>
+                </template>
+                <div class="session-meta">Last used {{ formatPasskeyDate(cred.last_used_at) }} &middot; Added {{ formatPasskeyDate(cred.created_at) }}</div>
+              </div>
+              <div style="display: flex; gap: 6px">
+                <button
+                  class="btn btn-ghost btn-sm"
+                  @click="renamingPasskeyId = cred.id; renamePasskeyValue = cred.name"
+                >Rename</button>
+                <button class="btn btn-danger btn-sm" @click="deletePasskey(cred)">Remove</button>
+              </div>
+            </div>
+          </div>
+
+          <template v-if="showPasskeyAdd">
+            <form @submit.prevent="registerPasskey" class="profile-form">
+              <div class="form-group">
+                <label class="form-label" for="passkey-name">Name this passkey</label>
+                <input id="passkey-name" v-model="newPasskeyName" type="text" class="form-input"
+                  placeholder="e.g. Work laptop" maxlength="64" />
+              </div>
+              <div style="display: flex; gap: 8px">
+                <button type="submit" class="btn btn-primary" :disabled="passkeyLoading">
+                  {{ passkeyLoading ? 'Waiting for your device…' : 'Create passkey' }}
+                </button>
+                <button type="button" class="btn btn-secondary" @click="showPasskeyAdd = false; newPasskeyName = ''">Cancel</button>
+              </div>
+            </form>
+          </template>
+          <button v-else class="btn btn-primary" :disabled="passkeyLoading" @click="showPasskeyAdd = true">
+            Add a passkey
+          </button>
         </div>
       </div>
 
@@ -738,6 +1018,59 @@ onMounted(() => { loadSessions() })
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   max-width: 220px;
+}
+
+/* Recovery codes (R-10) */
+.recovery-section {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-primary);
+}
+
+.recovery-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.recovery-title {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.recovery-codes {
+  margin-top: 14px;
+  padding: 14px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius);
+}
+
+.recovery-once-warning {
+  margin: 0 0 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--warning-text, var(--text-secondary));
+}
+
+.recovery-code-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.recovery-code {
+  padding: 8px 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  letter-spacing: 1px;
+  text-align: center;
+  user-select: all;
 }
 
 .session-list {

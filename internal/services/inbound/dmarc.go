@@ -280,7 +280,9 @@ func (p *dmarcProcessor) process(ctx context.Context, rec *models.InboundEmail) 
 
 // attachmentContent loads one attachment's bytes: inline base64 content when
 // present, else the blob store. A blob-backed attachment without a store
-// configured is skipped.
+// configured is skipped. Every read is bounded by maxDecompressedReportBytes
+// (R-17): the ingest gate caps compressed attachment bytes, but that says
+// nothing about how far the content expands once decompressed.
 func (p *dmarcProcessor) attachmentContent(ctx context.Context, att models.InboundAttachmentMeta) ([]byte, error) {
 	if att.Content != "" {
 		raw, err := base64.StdEncoding.DecodeString(att.Content)
@@ -297,7 +299,7 @@ func (p *dmarcProcessor) attachmentContent(ctx context.Context, att models.Inbou
 		return nil, err
 	}
 	defer func() { _ = rc.Close() }()
-	raw, err := io.ReadAll(rc)
+	raw, err := readBounded(rc)
 	if err != nil {
 		return nil, err
 	}
@@ -305,7 +307,10 @@ func (p *dmarcProcessor) attachmentContent(ctx context.Context, att models.Inbou
 }
 
 // maybeGunzip unwraps gzip content — providers commonly attach the XML
-// gzipped (.gz).
+// gzipped (.gz). The decompressed stream is bounded (R-17): a gzip bomb inside
+// the 10 MiB compressed-attachment envelope still expands ~1000x, and an
+// unbounded io.ReadAll here is a remotely triggerable memory-exhaustion vector
+// for any sender able to deliver mail to the tenant's inbound receiver.
 func maybeGunzip(raw []byte) ([]byte, error) {
 	if len(raw) < 2 || raw[0] != 0x1f || raw[1] != 0x8b {
 		return raw, nil
@@ -315,7 +320,28 @@ func maybeGunzip(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 	defer func() { _ = zr.Close() }()
-	return io.ReadAll(zr)
+	return readBounded(zr)
+}
+
+// maxDecompressedReportBytes bounds how much of one attachment the DMARC
+// processor holds in memory (R-17). Real aggregate reports are well under
+// 1 MiB even for high-volume domains; 16 MiB leaves headroom for every
+// legitimate report while capping the expansion a crafted archive can force.
+const maxDecompressedReportBytes = 16 << 20
+
+// readBounded reads r up to maxDecompressedReportBytes bytes. A stream that
+// still has more left — a gzip bomb, an oversized blob — is refused rather
+// than read to the end: the attachment is skipped (process() swallows
+// per-attachment errors) and the inbound record is unaffected.
+func readBounded(r io.Reader) ([]byte, error) {
+	out, err := io.ReadAll(io.LimitReader(r, maxDecompressedReportBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(out) > maxDecompressedReportBytes {
+		return nil, fmt.Errorf("dmarc: attachment content exceeds the %d byte report cap", maxDecompressedReportBytes)
+	}
+	return out, nil
 }
 
 // store persists one parsed report: one row per <record>, keyed by

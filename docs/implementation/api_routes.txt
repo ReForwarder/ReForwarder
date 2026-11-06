@@ -144,6 +144,7 @@ GET    /api/v1/workspaces/current/dashboard/stats
 GET    /api/v1/workspaces/current/data/export
 GET    /api/v1/workspaces/current/domains
 GET    /api/v1/workspaces/current/domains/{id}
+GET    /api/v1/workspaces/current/domains/{id}/dmarc
 GET    /api/v1/workspaces/current/domains/{id}/health
 GET    /api/v1/workspaces/current/domains/{id}/signing-keys
 GET    /api/v1/workspaces/current/emails
@@ -293,6 +294,7 @@ POST   /api/v1/workspaces/current/domains
 POST   /api/v1/workspaces/current/domains/{id}/health/diagnose
 POST   /api/v1/workspaces/current/domains/{id}/signing-keys
 POST   /api/v1/workspaces/current/domains/{id}/signing-keys/rotate
+POST   /api/v1/workspaces/current/domains/{id}/signing-keys/{keyId}/retire
 POST   /api/v1/workspaces/current/domains/{id}/signing-keys/{keyId}/verify-dns
 POST   /api/v1/workspaces/current/domains/{id}/verify
 POST   /api/v1/workspaces/current/emails/preview

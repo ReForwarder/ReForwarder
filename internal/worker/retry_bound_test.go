@@ -64,20 +64,20 @@ type rbState struct {
 
 func newRBState() *rbState { return &rbState{seq: 1000} }
 
-func (s *rbState) seedServer(userID uint, workspaceID *uint, maxRetries int) {
+func (s *rbState) seedServer(workspaceID *uint, maxRetries int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.seq++
-	row := rbRow{"id": s.seq, "user_id": int64(userID), "workspace_id": rbUintPtr(workspaceID), "max_retries": int64(maxRetries), "status": models.SMTPStatusEnabled}
+	row := rbRow{"id": s.seq, "user_id": int64(1), "workspace_id": rbUintPtr(workspaceID), "max_retries": int64(maxRetries), "status": models.SMTPStatusEnabled}
 	s.servers = append(s.servers, row)
 }
 
-func (s *rbState) seedFailedEmail(id uint, userID uint, workspaceID *uint, ageHours int) {
+func (s *rbState) seedFailedEmail(id uint, workspaceID *uint, ageHours int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.emails = append(s.emails, rbRow{
 		"id":            int64(id),
-		"user_id":       int64(userID),
+		"user_id":       int64(1),
 		"workspace_id":  rbUintPtr(workspaceID),
 		"status":        models.EmailStatusFailed,
 		"retry_count":   int64(0),
@@ -478,9 +478,9 @@ func newRetryWorker(t *testing.T, state *rbState, eq *rbEnqueuer, batchLimit int
 func TestRetrySweepBoundedBatch(t *testing.T) {
 	state := newRBState()
 	var wsID uint = 7
-	state.seedServer(1, &wsID, 3)
+	state.seedServer(&wsID, 3)
 	for i := 1; i <= 5; i++ {
-		state.seedFailedEmail(uint(i), 1, &wsID, 6-i) // id 1 is oldest
+		state.seedFailedEmail(uint(i), &wsID, 6-i) // id 1 is oldest
 	}
 	eq := &rbEnqueuer{first: make(chan struct{})}
 	w := newRetryWorker(t, state, eq, 2)
@@ -526,9 +526,9 @@ func TestRetrySweepBoundedBatch(t *testing.T) {
 func TestRetrySweepZeroLimitUnbounded(t *testing.T) {
 	state := newRBState()
 	var wsID uint = 7
-	state.seedServer(1, &wsID, 3)
+	state.seedServer(&wsID, 3)
 	for i := 1; i <= 6; i++ {
-		state.seedFailedEmail(uint(i), 1, &wsID, 7-i)
+		state.seedFailedEmail(uint(i), &wsID, 7-i)
 	}
 	eq := &rbEnqueuer{first: make(chan struct{})}
 	w := retry.NewWorker(
@@ -552,9 +552,9 @@ func TestRetrySweepZeroLimitUnbounded(t *testing.T) {
 func TestRetrySweepExhaustedRetriesSkipped(t *testing.T) {
 	state := newRBState()
 	var wsID uint = 7
-	state.seedServer(1, &wsID, 1) // maxRetries = 1
-	state.seedFailedEmail(1, 1, &wsID, 2)
-	state.seedFailedEmail(2, 1, &wsID, 3)
+	state.seedServer(&wsID, 1) // maxRetries = 1
+	state.seedFailedEmail(1, &wsID, 2)
+	state.seedFailedEmail(2, &wsID, 3)
 	// email 1 already used its one retry.
 	state.mu.Lock()
 	for _, row := range state.emails {
@@ -579,9 +579,9 @@ func TestRetrySweepExhaustedRetriesSkipped(t *testing.T) {
 func TestRetrySweepJitteredLoop(t *testing.T) {
 	state := newRBState()
 	var wsID uint = 7
-	state.seedServer(1, &wsID, 3)
-	state.seedFailedEmail(1, 1, &wsID, 1)
-	state.seedFailedEmail(2, 1, &wsID, 2)
+	state.seedServer(&wsID, 3)
+	state.seedFailedEmail(1, &wsID, 1)
+	state.seedFailedEmail(2, &wsID, 2)
 
 	eq := &rbEnqueuer{first: make(chan struct{})}
 	// Short interval so the ticker (not the test) drives the sweep.

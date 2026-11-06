@@ -318,7 +318,7 @@ func TestGormSendingStatsSenderDomainSQL(t *testing.T) {
 	}
 
 	// A foreign workspace sees nothing.
-	empty := uint(ws + 1)
+	empty := ws + 1
 	stats, err = (&gormSendingStats{db: db}).SendingStats(
 		repositories.ResourceScope{UserID: 1, WorkspaceID: &empty}, marker, time.Now().Add(-time.Hour))
 	if err != nil {

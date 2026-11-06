@@ -322,6 +322,50 @@ func (h *DomainSigningHandler) VerifyDNS(c *okapi.Context, req *SigningKeyAction
 	})
 }
 
+// Retire marks a Retiring key as Retired — the manual step between rotate and
+// delete (R-02): once the replacement key is published and verified and
+// receivers no longer see the old signature, the operator retires the old key,
+// which makes it deletable. An Active key must be rotated first; a Retired key
+// cannot retire twice.
+func (h *DomainSigningHandler) Retire(c *okapi.Context, req *SigningKeyActionRequest) error {
+	if err := requireEdit(c); err != nil {
+		return c.AbortForbidden("insufficient workspace permissions", err)
+	}
+	d, err := h.resolveDomain(c, req.ID)
+	if err != nil {
+		return c.AbortNotFound("domain not found")
+	}
+	k, err := h.keyRepo.FindByID(req.KeyID)
+	if err != nil || k.DomainID != d.ID {
+		return c.AbortNotFound("signing key not found")
+	}
+	if k.Status == models.DomainSigningStatusActive {
+		return c.AbortConflict("an active key cannot be retired; rotate it first")
+	}
+	if k.Status == models.DomainSigningStatusRetired {
+		return c.AbortConflict("signing key is already retired")
+	}
+
+	won, err := h.keyRepo.MarkRetired(k.ID)
+	if err != nil {
+		return c.AbortInternalServerError("failed to retire signing key")
+	}
+	if !won {
+		// The row changed between the read and the CAS (a concurrent retire or
+		// a lifecycle change): re-read and refuse rather than guess.
+		return c.AbortConflict("only a retiring key can be retired")
+	}
+	k.Status = models.DomainSigningStatusRetired
+
+	record, rerr := email.DnsTXTRecord(k.PrivateKeyPem, k.Algorithm)
+	if rerr != nil {
+		record = ""
+	}
+	h.auditLog(c, "domain.signing_key.retired",
+		fmt.Sprintf("DKIM signing key for %s retired (selector %s) — it can now be deleted", d.Domain, k.Selector))
+	return ok(c, signingKeyView(k, d.Domain, record))
+}
+
 // Delete removes a key. Only a Retired key is deletable: an Active key signs
 // mail, and a Retiring key is still verifying messages signed before rotation.
 func (h *DomainSigningHandler) Delete(c *okapi.Context, req *SigningKeyActionRequest) error {

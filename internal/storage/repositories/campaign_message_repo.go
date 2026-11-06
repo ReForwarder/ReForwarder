@@ -67,13 +67,27 @@ func (r *CampaignMessageRepository) FindByCampaign(campaignID uint, status strin
 	return items, total, nil
 }
 
+// FindPendingByCampaign fetches the next batch of pending messages for a
+// sending campaign (R-26). The SELECT runs in a short transaction with
+// FOR UPDATE SKIP LOCKED — the mechanism the tracker documents for batch
+// claims — so two workers racing on the same campaign take disjoint batches
+// instead of both reading the same rows and duplicating in-flight work (the
+// per-message ClaimForSend pending→queued CAS below remains the correctness
+// guarantee; this only keeps concurrent batches from even seeing the same
+// messages, matching the automation journey delay queue's claim pattern).
+// Deferred messages (A/B hold-back, timezone window) are fetched but not
+// claimed: they stay pending for a later tick.
 func (r *CampaignMessageRepository) FindPendingByCampaign(campaignID uint, batchSize int) ([]models.CampaignMessage, error) {
 	var items []models.CampaignMessage
-	if err := r.db.Preload("Subscriber").
-		Where("campaign_id = ? AND status = ?", campaignID, models.CampaignMsgPending).
-		Order("id ASC").
-		Limit(batchSize).
-		Find(&items).Error; err != nil {
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		return tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+			Preload("Subscriber").
+			Where("campaign_id = ? AND status = ?", campaignID, models.CampaignMsgPending).
+			Order("id ASC").
+			Limit(batchSize).
+			Find(&items).Error
+	})
+	if err != nil {
 		return nil, err
 	}
 	return items, nil

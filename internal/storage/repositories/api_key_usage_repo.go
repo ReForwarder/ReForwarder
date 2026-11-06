@@ -62,9 +62,10 @@ func (r *APIKeyUsageRepository) Bump(apiKeyID uint, requests, sends int) error {
 	}).Error
 }
 
-// List returns a key's daily usage for the trailing `days` days (UTC days,
-// newest first), zero-padded: days with no row still appear with zero counts
-// so the UI can draw a gap-free series.
+// List returns a key's daily usage for the trailing `days` days (UTC days, in
+// ascending chronological order: oldest first, today last), zero-padded: days
+// with no row still appear with zero counts so the UI can draw a gap-free
+// series.
 func (r *APIKeyUsageRepository) List(apiKeyID uint, days int) ([]models.APIKeyUsageDaily, error) {
 	if days <= 0 {
 		days = 30

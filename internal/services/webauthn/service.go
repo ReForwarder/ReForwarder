@@ -68,9 +68,9 @@ type Config struct {
 
 // Service wraps the library's WebAuthn instance with Posta persistence.
 type Service struct {
-	wa     *lib.WebAuthn
-	creds  CredentialStore
-	chall  ChallengeStore
+	wa    *lib.WebAuthn
+	creds CredentialStore
+	chall ChallengeStore
 }
 
 // New builds the service. An error means the configuration itself is invalid
@@ -95,7 +95,7 @@ func New(cfg Config, creds CredentialStore, chall ChallengeStore) (*Service, err
 // bytes: stable for the account's lifetime, so the authenticator keeps
 // binding assertions to the same handle it registered under.
 type webAuthnUser struct {
-	user *models.User
+	user  *models.User
 	creds []lib.Credential
 }
 

@@ -227,6 +227,9 @@ func (c *claimConn) QueryContext(_ context.Context, query string, args []driver.
 	case strings.Contains(lower, `from "smtp_servers"`):
 		// No SMTP server configured in the fixture.
 		return &claimRows{cols: []string{"id"}}, nil
+	case strings.Contains(lower, `from "subscribers"`):
+		// The FindPendingByCampaign preload: fixture rows carry no subscriber.
+		return &claimRows{cols: []string{"id"}}, nil
 	case strings.Contains(lower, `from "emails"`), strings.Contains(lower, `from "campaign_messages"`):
 		table := "emails"
 		if strings.Contains(lower, `from "campaign_messages"`) {
@@ -596,6 +599,52 @@ func TestClaimForSendAllowsExactlyOneClaim(t *testing.T) {
 	won, err = repo.ClaimForSend(31)
 	if err != nil || won {
 		t.Fatalf("second batch claim = (%v, %v), want (false, nil)", won, err)
+	}
+}
+
+// FindPendingByCampaign claims its batch with FOR UPDATE SKIP LOCKED (R-26):
+// the documented batch-claim mechanism. Two workers racing on one campaign
+// must take disjoint batches, and the returned rows are exactly the campaign's
+// still-pending messages in id order.
+func TestFindPendingByCampaignUsesSkipLockedBatchClaim(t *testing.T) {
+	state := newClaimState()
+	state.insert("campaign_messages", map[string]any{
+		"id": int64(61), "campaign_id": int64(9), "status": models.CampaignMsgPending,
+	})
+	state.insert("campaign_messages", map[string]any{
+		"id": int64(62), "campaign_id": int64(9), "status": models.CampaignMsgPending,
+	})
+	state.insert("campaign_messages", map[string]any{
+		"id": int64(63), "campaign_id": int64(9), "status": models.CampaignMsgQueued,
+	})
+	state.insert("campaign_messages", map[string]any{
+		"id": int64(64), "campaign_id": int64(8), "status": models.CampaignMsgPending,
+	})
+	repo := repositories.NewCampaignMessageRepository(claimGorm(t, state))
+
+	items, err := repo.FindPendingByCampaign(9, 50)
+	if err != nil {
+		t.Fatalf("FindPendingByCampaign: %v", err)
+	}
+	if len(items) != 2 || items[0].ID != 61 || items[1].ID != 62 {
+		t.Fatalf("batch = %+v, want pending ids [61 62]", items)
+	}
+
+	// The batch SELECT carried the locking clause — the mechanism the tracker
+	// documents ("FOR UPDATE SKIP LOCKED batch claims"), matching the
+	// automation journey delay queue's claim query.
+	var lockQuery string
+	state.mu.Lock()
+	for _, q := range state.calls {
+		lower := strings.Join(strings.Fields(strings.ToLower(q)), " ")
+		if strings.Contains(lower, `from "campaign_messages"`) && strings.Contains(lower, "select") {
+			lockQuery = lower
+			break
+		}
+	}
+	state.mu.Unlock()
+	if !strings.Contains(lockQuery, "for update skip locked") {
+		t.Fatalf("batch SELECT must carry FOR UPDATE SKIP LOCKED, got: %s", lockQuery)
 	}
 }
 

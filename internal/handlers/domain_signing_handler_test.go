@@ -615,6 +615,7 @@ func newSigningServer(t *testing.T) (*okapi.TestServer, *dskState) {
 	g.Post("/domains/{id:int}/signing-keys", okapi.H(h.Create))
 	g.Get("/domains/{id:int}/signing-keys", okapi.H(h.List))
 	g.Post("/domains/{id:int}/signing-keys/rotate", okapi.H(h.Rotate))
+	g.Post("/domains/{id:int}/signing-keys/{keyId:int}/retire", okapi.H(h.Retire))
 	g.Post("/domains/{id:int}/signing-keys/{keyId:int}/verify-dns", okapi.H(h.VerifyDNS))
 	g.Delete("/domains/{id:int}/signing-keys/{keyId:int}", okapi.H(h.Delete))
 	return o, state
@@ -870,6 +871,98 @@ func TestSigningKeyVerifyDNS(t *testing.T) {
 	}
 }
 
+// The full manual rotation tail (R-02): a retiring key is retired through the
+// retire endpoint once receivers no longer see its signatures, and a retired
+// key is then deletable — no step of the documented lifecycle requires
+// hand-editing a database row.
+func TestSigningKeyRetireLifecycle(t *testing.T) {
+	o, state := newSigningServer(t)
+	seedDomain(t, state, "example.com", wsID(3), 7)
+	enc, _ := postacrypto.Encrypt(dskTestRSAKey)
+	dskSeed(t, state, "domain_signing_keys", map[string]any{
+		"id": uint(505), "user_id": uint(7), "workspace_id": wsID(3), "domain_id": uint(10),
+		"selector": "posta", "algorithm": models.SigningAlgorithmRSA,
+		"private_key_pem": enc, "status": models.DomainSigningStatusRetiring,
+		"dns_state": models.DomainSigningDNSPublished,
+	})
+
+	rec := doSigningReq(t, o, http.MethodPost, "/workspaces/current/domains/10/signing-keys/505/retire", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("retire retiring key = %d: %s", rec.Code, rec.Body.String())
+	}
+	view, _ := decodeSigningResponse(t, rec)
+	if view.ID != 505 || view.Status != models.DomainSigningStatusRetired {
+		t.Fatalf("retire response wrong: %+v", view)
+	}
+	rows := state.rowsOf("domain_signing_keys")
+	if len(rows) != 1 || rows[0]["status"] != models.DomainSigningStatusRetired {
+		t.Fatalf("retire must persist status=retired: %+v", rows)
+	}
+
+	// A retired key can no longer retire (it is already done)…
+	if rec := doSigningReq(t, o, http.MethodPost, "/workspaces/current/domains/10/signing-keys/505/retire", ""); rec.Code != http.StatusConflict {
+		t.Fatalf("re-retire = %d, want 409", rec.Code)
+	}
+	// …but it is now deletable.
+	if rec := doSigningReq(t, o, http.MethodDelete, "/workspaces/current/domains/10/signing-keys/505", ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete retired key = %d, want 204", rec.Code)
+	}
+	if rows := state.rowsOf("domain_signing_keys"); len(rows) != 0 {
+		t.Fatalf("retired key must be gone: %+v", rows)
+	}
+	if got := state.eventTypes(); len(got) != 2 || got[0] != "domain.signing_key.deleted" || got[1] != "domain.signing_key.retired" {
+		t.Fatalf("retire+delete must write one audit event each, got %v", got)
+	}
+}
+
+// An Active key cannot be retired directly — the rotation endpoint is the only
+// path that demotes it, so a signing key can never be retired out from under
+// live mail.
+func TestSigningKeyRetireRejectsActiveKey(t *testing.T) {
+	o, state := newSigningServer(t)
+	seedDomain(t, state, "example.com", wsID(3), 7)
+	enc, _ := postacrypto.Encrypt(dskTestRSAKey)
+	dskSeed(t, state, "domain_signing_keys", map[string]any{
+		"id": uint(506), "user_id": uint(7), "workspace_id": wsID(3), "domain_id": uint(10),
+		"selector": "posta", "algorithm": models.SigningAlgorithmRSA,
+		"private_key_pem": enc, "status": models.DomainSigningStatusActive,
+		"dns_state": models.DomainSigningDNSPublished,
+	})
+
+	rec := doSigningReq(t, o, http.MethodPost, "/workspaces/current/domains/10/signing-keys/506/retire", "")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("retire active key = %d, want 409", rec.Code)
+	}
+	rows := state.rowsOf("domain_signing_keys")
+	if len(rows) != 1 || rows[0]["status"] != models.DomainSigningStatusActive {
+		t.Fatalf("active key must be untouched: %+v", rows)
+	}
+	if got := state.eventTypes(); len(got) != 0 {
+		t.Fatalf("refused retire must not write an audit event, got %v", got)
+	}
+}
+
+// A key of a foreign domain is not reachable through the retire endpoint.
+func TestSigningKeyRetireForeignDomainNotFound(t *testing.T) {
+	o, state := newSigningServer(t)
+	seedDomain(t, state, "example.com", wsID(99), 42)
+	enc, _ := postacrypto.Encrypt(dskTestRSAKey)
+	dskSeed(t, state, "domain_signing_keys", map[string]any{
+		"id": uint(507), "user_id": uint(42), "workspace_id": wsID(99), "domain_id": uint(10),
+		"selector": "posta", "algorithm": models.SigningAlgorithmRSA,
+		"private_key_pem": enc, "status": models.DomainSigningStatusRetiring,
+		"dns_state": models.DomainSigningDNSPublished,
+	})
+
+	rec := doSigningReq(t, o, http.MethodPost, "/workspaces/current/domains/10/signing-keys/507/retire", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("foreign retire = %d, want 404", rec.Code)
+	}
+	if got := state.eventTypes(); len(got) != 0 {
+		t.Fatalf("404 retire must not write an audit event, got %v", got)
+	}
+}
+
 func TestSigningKeyDeleteLifecycle(t *testing.T) {
 	o, state := newSigningServer(t)
 	seedDomain(t, state, "example.com", wsID(3), 7)
@@ -886,13 +979,11 @@ func TestSigningKeyDeleteLifecycle(t *testing.T) {
 		t.Fatalf("delete retiring key = %d, want 409", rec.Code)
 	}
 
-	// Mark retired (what the operator does from the UI once receivers no
-	// longer see the old signature) — now deletion succeeds.
-	state.mu.Lock()
-	for _, row := range state.tables["domain_signing_keys"].rows {
-		row[state.colIndex("domain_signing_keys", "status")] = models.DomainSigningStatusRetired
+	// Retire the key through the endpoint (what the operator does from the UI
+	// once receivers no longer see the old signature) — now deletion succeeds.
+	if rec := doSigningReq(t, o, http.MethodPost, "/workspaces/current/domains/10/signing-keys/503/retire", ""); rec.Code != http.StatusOK {
+		t.Fatalf("retire key = %d: %s", rec.Code, rec.Body.String())
 	}
-	state.mu.Unlock()
 
 	if rec := doSigningReq(t, o, http.MethodDelete, "/workspaces/current/domains/10/signing-keys/503", ""); rec.Code != http.StatusNoContent {
 		t.Fatalf("delete retired key = %d, want 204", rec.Code)
