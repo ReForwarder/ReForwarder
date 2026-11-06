@@ -284,6 +284,130 @@ server and its workers.
 
 ---
 
+## Project Roadmap
+
+Planning details live in `docs/project/`: [FEATURE_INVENTORY.md](docs/project/FEATURE_INVENTORY.md) is the detailed registry, [BACKLOG.md](docs/project/BACKLOG.md) the operational backlog, and the [ReForwarder Backlog](https://github.com/ReForwarder/ReForwarder/projects) board the task board.
+
+### To-dos
+
+- [ ] [RF-F006] two_factor_required policy setting
+- [ ] [RF-F023] DNS record guidance depth (SPF/DMARC parsing, MX records, drift re-verification)
+- [ ] [RF-F029] Custom tracking domain
+- [ ] [RF-F040] Per-domain inbound routing rules (alias/catch-all/forward targets)
+- [ ] [RF-F048] Transactional scheduled send (API send_at) — broken end-to-end
+- [ ] [RF-F056] Webhook test-fire endpoint
+- [ ] [RF-F057] Bounce classification analytics surface (classification counts)
+- [ ] [RF-F061] UTM auto-tagging of campaign links
+- [ ] [RF-F071] Automation workflow dry-run / test tooling
+- [ ] [RF-F073] Preference center (multi-list subscription management)
+- [ ] [RF-F074] Subscriber signup forms (form-to-subscriber capture)
+- [ ] [RF-F075] Double opt-in (DOI) confirmation flow
+- [ ] [RF-F076] Subscriber tags
+- [ ] [RF-F091] Security-events retention enforcement
+- [ ] [RF-F092] Admin-console IP allowlisting
+- [ ] [RF-F097] Error-monitoring hook
+- [ ] [RF-F099] Delivered-state analytics, email.delivered emission, and dead delivered UI paths
+- [ ] [RF-F100] Tracking toggle symmetry
+- [ ] [RF-F101] Contact Lists pages — dead end-to-end (handler never registered, views unrouted)
+- [ ] [RF-F102] Dead admin API client methods with no backend routes (listApiKeys / revokeApiKey / listEmails)
+- [ ] [RF-F103] Backend endpoints with no UI consumer / dead client functions (segments contacts, message analytics & assign, automation custom-event ingest, admin provider breakdown)
+- [ ] [RF-F104] Campaign duplication backend-only; campaigns cannot be edited from the UI
+
+### In Progress
+
+- [ ] [RF-F005] 2FA recovery codes
+- [ ] [RF-F014] Passkeys / WebAuthn
+- [ ] [RF-F015] Admin impersonation
+- [ ] [RF-F026] Domain deliverability health / diagnostics
+- [ ] [RF-F027] Domain-sending policy (strict verified-domain mode, R-23)
+- [ ] [RF-F028] DMARC aggregate report ingestion (rua)
+- [ ] [RF-F053] Legacy bounce webhook (/webhooks/bounce)
+- [ ] [RF-F081] System-info endpoint feature flags (Section-11 gate)
+- [ ] [RF-F082] API route contract gate (golden file + frontend spec)
+
+### In Review
+
+_None._
+
+### Done
+
+- [x] [RF-F001] Email + password registration and login
+- [x] [RF-F002] Per-IP login rate limiting
+- [x] [RF-F003] Session lifecycle (JWT sessions, revocation, device list)
+- [x] [RF-F004] Two-factor authentication (TOTP)
+- [x] [RF-F007] Workspace RBAC (owner/admin/editor/viewer)
+- [x] [RF-F008] Workspaces / tenants (CRUD, system workspace, personal provisioning, default workspace)
+- [x] [RF-F009] Workspace invitations
+- [x] [RF-F010] API keys (scopes, workspace binding, IP allowlist, expiry, quota)
+- [x] [RF-F011] Per-API-key rate limits
+- [x] [RF-F012] Per-API-key usage analytics
+- [x] [RF-F013] API-key credential transport restriction
+- [x] [RF-F016] Self-service password reset
+- [x] [RF-F017] Email verification
+- [x] [RF-F018] OAuth login, account linking, provider admin, workspace SSO
+- [x] [RF-F019] Account lifecycle (self-service deletion scheduling)
+- [x] [RF-F020] Admin user administration
+- [x] [RF-F021] Domain CRUD (workspace + admin)
+- [x] [RF-F022] Domain ownership + DNS verification (TXT token, SPF/DKIM/DMARC checks)
+- [x] [RF-F024] Managed DKIM signing on the send path
+- [x] [RF-F025] DKIM key lifecycle: generate / rotate / verify-dns / retire / delete
+- [x] [RF-F030] SMTP relay listener (:2526)
+- [x] [RF-F031] SMTP relay submission auth and relay-to-send pipeline
+- [x] [RF-F032] STARTTLS/TLS modes for both SMTP listeners
+- [x] [RF-F033] SMTP relay credentials (bcrypt, legacy-SHA-256 migration, IP allowlists, CRUD API+UI)
+- [x] [RF-F034] Inbound SMTP receiver (:2525)
+- [x] [RF-F035] Inbound webhook ingest (POST /api/v1/inbound/webhook)
+- [x] [RF-F036] Inbound SSE stream (GET /workspaces/current/inbound-stream)
+- [x] [RF-F037] Website form messages (public form ingest + inbox)
+- [x] [RF-F038] Form thread replies via inbound email (msg+token@ domain)
+- [x] [RF-F039] Messages SSE stream (GET /workspaces/current/message-stream)
+- [x] [RF-F041] Email send pipeline (API send → asynq enqueue → worker SMTP delivery)
+- [x] [RF-F042] Asynq queues + deterministic TaskIDs (transactional/bulk/low)
+- [x] [RF-F043] Retry layer 1 — asynq task retries + exhausted-error handler
+- [x] [RF-F044] Retry layer 2 — DB retry worker (bounded jittered sweep)
+- [x] [RF-F045] Manual retry (POST /emails/{id}/retry + dashboard retry button)
+- [x] [RF-F046] queue_reconcile — lost-task healing cron
+- [x] [RF-F047] Campaign scheduled sends (scheduled_at + campaign-scheduler cron)
+- [x] [RF-F049] Campaign pause / cancel / resume with send-time re-check
+- [x] [RF-F050] Queue administration (admin API, dashboard Jobs view, dead-letter gauge)
+- [x] [RF-F051] Bounce handling — 14-class failure classifier + SMTP-path hard-bounce chain
+- [x] [RF-F052] Provider events ingestion (SES/SNS, SendGrid, Postmark, Mailgun)
+- [x] [RF-F054] Suppression list (scoped CRUD, send-time filtering, auto-suppress chain)
+- [x] [RF-F055] Webhook delivery history and operator replay
+- [x] [RF-F058] Campaign lifecycle & fan-out sending engine
+- [x] [RF-F059] Campaign A/B testing with hold-back and winner selection
+- [x] [RF-F060] Timezone-aware sending
+- [x] [RF-F062] Segments — SegmentCondition SQL builder, preview and campaign targeting
+- [x] [RF-F063] Subscriber management (marketing audience CRUD, custom fields, bulk import)
+- [x] [RF-F064] Dual audience models: Contact (transactional) vs Subscriber (marketing)
+- [x] [RF-F065] Subscriber lists — static + dynamic filter-rule lists with subscribe/unsubscribe APIs
+- [x] [RF-F066] Templates — CRUD, preview, send-test, HTML import, JSON export/import
+- [x] [RF-F067] Template versions with activation
+- [x] [RF-F068] Template localizations (per-language content)
+- [x] [RF-F069] Automation execution engine (journeys, node executors, triggers, schedules)
+- [x] [RF-F070] Automation visual builder (vue-flow canvas, palette, config panel, execution drawer)
+- [x] [RF-F072] Unsubscribe — campaign list opt-out + RFC 8058 one-click transactional
+- [x] [RF-F077] Workspace data export/import (audience + settings JSON)
+- [x] [RF-F078] Admin platform core (users, workspaces, domains, plans, servers, events, metrics, announcements, updates)
+- [x] [RF-F079] Scheduled-jobs admin endpoint (GET /admin/jobs)
+- [x] [RF-F080] Platform settings engine (GET/PUT /admin/settings + seeded security rules)
+- [x] [RF-F083] Webhooks engine (scoped dispatch, HMAC signatures, bounded exponential retries, per-attempt history)
+- [x] [RF-F084] Webhook SSRF guard (static policy, resolve-and-reject, pinned dial, redirect block, sanitized errors)
+- [x] [RF-F085] Webhook egress proxy with destination pinning (http/https/socks5, double opt-in)
+- [x] [RF-F086] Open/click/unsubscribe tracking with HMAC-signed tokens
+- [x] [RF-F087] Analytics APIs (admin + workspace daily counts, status breakdown, dashboard trends, provider breakdown)
+- [x] [RF-F088] Security engine — ban service (tiered escalation, allowlist-wins, multi-replica propagation)
+- [x] [RF-F089] Fail2ban-style detectors (7 sliding-window signals, weighted scoring, instant-ban thresholds)
+- [x] [RF-F090] Security admin surface (overview, bans, events, tunable rules, allowlist, SSE streams)
+- [x] [RF-F093] Encryption at rest for credentials and signing keys (AES-256-GCM)
+- [x] [RF-F094] Retention cron and GDPR tooling (multi-store cleanup, blob purge, GDPR message erase, account cleanup, data export)
+- [x] [RF-F095] Database backups (pg_dump cron with retention and restore runbook, R-11)
+- [x] [RF-F096] Prometheus metrics and health probes
+- [x] [RF-F098] REST API response envelope and OpenAPI documentation
+- [x] [RF-F105] Core dashboard integration surface (verified end-to-end at contract level)
+
+---
+
 ## Requirements
 
 * Go 1.27+
@@ -374,7 +498,7 @@ The official Posta SDKs are compatible with ReForwarder's API:
 * PHP: [https://github.com/goposta/posta-php](https://github.com/goposta/posta-php)
 * Java: [https://github.com/goposta/posta-java](https://github.com/goposta/posta-java)
 * Node: [https://github.com/goposta/posta-node](https://github.com/goposta/posta-node)
-* .NET: [https://github.com/goposta/posta-node](https://github.com/goposta/posta-node)
+* .NET: [https://github.com/goposta/posta-dotnet](https://github.com/goposta/posta-dotnet)
 
 ### Go Example
 
