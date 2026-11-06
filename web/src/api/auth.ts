@@ -34,11 +34,21 @@ export const authApi = {
   setup2FA() {
     return api.post<ApiResponse<Setup2FAResponse>>('/users/me/2fa/setup')
   },
+  // Enabling 2FA also issues the one-time recovery codes (R-10): they ride the
+  // verify response and are shown exactly once.
   verify2FA(code: string) {
-    return api.post<ApiResponse<{ message: string }>>('/users/me/2fa/verify', { code })
+    return api.post<ApiResponse<{ message: string; recovery_codes?: string[] }>>('/users/me/2fa/verify', { code })
   },
   disable2FA(code: string) {
     return api.post<ApiResponse<{ message: string }>>('/users/me/2fa/disable', { code })
+  },
+  // Recovery codes (R-10): the remaining count backs the profile card; the
+  // regeneration issues a fresh single-use set (requires the current TOTP).
+  recoveryCodeCount() {
+    return api.get<ApiResponse<{ remaining: number }>>('/users/me/2fa/recovery-codes/count')
+  },
+  regenerateRecoveryCodes(code: string) {
+    return api.post<ApiResponse<{ codes: string[] }>>('/users/me/2fa/recovery-codes', { code })
   },
   requestAccountDeletion() {
     return api.post<ApiResponse<{ message: string; scheduled_deletion_at: string }>>('/users/me/delete')

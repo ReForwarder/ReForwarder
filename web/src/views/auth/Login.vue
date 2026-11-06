@@ -3,6 +3,7 @@ import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { authApi } from '../../api/auth'
 import { oauthApi } from '../../api/oauth'
+import { webauthnApi, passkeysSupported, serializeAssertion, type SerializedCredential } from '../../api/webauthn'
 import { useAuthStore } from '../../stores/auth'
 import { useNotificationStore } from '../../stores/notification'
 import AuthLayout from './AuthLayout.vue'
@@ -29,6 +30,13 @@ const passwordError = ref('')
 const codeError = ref('')
 const showPassword = ref(false)
 
+// R-19 passkey sign-in: offered whenever the browser can run WebAuthn. A
+// passkey that verifies but still owes the TOTP factor parks its pending
+// token here; the 2FA step then finishes the passkey login with the code.
+const passkeysHere = computed(() => passkeysSupported())
+const passkeyLoading = ref(false)
+const passkeyPendingToken = ref('')
+
 const emailInput = ref<HTMLInputElement | null>(null)
 const codeInput = ref<HTMLInputElement | null>(null)
 
@@ -44,7 +52,11 @@ const heading = computed(() => {
   return ssoMode.value ? 'Continue with SSO' : 'Sign in to your account'
 })
 const subheading = computed(() => {
-  if (requires2FA.value) return 'Enter the code from your authenticator app.'
+  if (requires2FA.value) {
+    return passkeyPendingToken.value
+      ? 'Your passkey was verified — enter your two-factor code to finish.'
+      : 'Enter the code from your authenticator app.'
+  }
   return ssoMode.value ? "We'll redirect you to your identity provider." : undefined
 })
 
@@ -132,10 +144,18 @@ async function handleLogin() {
   }
   loading.value = true
   try {
-    await auth.login(email.value, password.value, requires2FA.value ? twoFactorCode.value : undefined)
-    const redirect = route.query.redirect
-    const target = typeof redirect === 'string' && redirect.startsWith('/') ? redirect : '/'
-    router.push(target)
+    if (requires2FA.value && passkeyPendingToken.value) {
+      // Second factor for an already-verified passkey: finish the passkey
+      // login with the pending token instead of replaying the password.
+      await auth.passkeyLogin({
+        email: email.value.trim(),
+        pending_token: passkeyPendingToken.value,
+        two_factor_code: twoFactorCode.value,
+      })
+    } else {
+      await auth.login(email.value, password.value, requires2FA.value ? twoFactorCode.value : undefined)
+    }
+    goAfterLogin()
   } catch (err: any) {
     if (err?.requires2FA) {
       requires2FA.value = true
@@ -159,9 +179,63 @@ async function handleLogin() {
   }
 }
 
+function goAfterLogin() {
+  const redirect = route.query.redirect
+  const target = typeof redirect === 'string' && redirect.startsWith('/') ? redirect : '/'
+  router.push(target)
+}
+
+// R-19 passkey sign-in: begin → browser ceremony → finish, which issues the
+// same session as a password login. A 401 with requires_2fa means the passkey
+// verified but the account owes the TOTP factor — the pending token parks the
+// context so the code step finishes the same login.
+async function handlePasskeyLogin() {
+  emailError.value = ''
+  if (!email.value.trim()) {
+    emailError.value = 'Enter your email address.'
+    return
+  }
+  passkeyLoading.value = true
+  try {
+    const begin = await webauthnApi.beginLogin(email.value.trim())
+    const options = begin.data.data as unknown as PublicKeyCredentialRequestOptions
+    const credential = await navigator.credentials.get({ publicKey: options })
+    if (!credential) throw new Error('No passkey credential was returned')
+    await finishPasskeyLogin(serializeAssertion(credential as PublicKeyCredential))
+  } catch (err: any) {
+    if (err?.name === 'NotAllowedError') {
+      notification.error('Passkey sign-in was cancelled or timed out.')
+    } else if (err?.name === 'InvalidStateError') {
+      notification.error('No passkey for this account is available on this device.')
+    } else {
+      const message = err?.response?.data?.error?.message || err?.message || 'Passkey sign-in failed.'
+      notification.error(message)
+    }
+  } finally {
+    passkeyLoading.value = false
+  }
+}
+
+async function finishPasskeyLogin(assertion: SerializedCredential) {
+  try {
+    await auth.passkeyLogin({ email: email.value.trim(), assertion })
+    goAfterLogin()
+  } catch (err: any) {
+    if (err?.response?.status === 401 && err?.response?.data?.data?.requires_2fa) {
+      passkeyPendingToken.value = err.response.data.data.pending_token || ''
+      requires2FA.value = true
+      twoFactorCode.value = ''
+      notification.info('Passkey verified — enter your two-factor code to finish.')
+      return
+    }
+    throw err
+  }
+}
+
 function resetLogin() {
   requires2FA.value = false
   twoFactorCode.value = ''
+  passkeyPendingToken.value = ''
 }
 </script>
 
@@ -263,6 +337,19 @@ function resetLogin() {
       <button v-if="ssoMode" type="submit" class="btn btn-primary auth-btn" :disabled="ssoChecking">
         <span v-if="ssoChecking" class="spinner"></span>
         {{ ssoChecking ? 'Checking...' : 'Continue' }}
+      </button>
+      <!-- R-19 passkey sign-in: offered whenever the browser supports WebAuthn.
+           The email scopes the ceremony to the account's credentials. -->
+      <button
+        v-if="passkeysHere && !ssoMode"
+        type="button"
+        class="btn btn-secondary auth-btn"
+        style="margin-top: 8px"
+        :disabled="loading || passkeyLoading"
+        @click="handlePasskeyLogin"
+      >
+        <span v-if="passkeyLoading" class="spinner"></span>
+        {{ passkeyLoading ? 'Waiting for your passkey…' : 'Sign in with a passkey' }}
       </button>
       <button v-if="!requires2FA && !ssoMode && ssoAvailable" type="button" class="btn btn-secondary auth-btn" style="margin-top: 8px" @click="enterSSOMode">
         Continue with SSO

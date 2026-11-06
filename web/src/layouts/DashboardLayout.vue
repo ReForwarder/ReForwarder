@@ -9,6 +9,7 @@ import { adminApi } from '../api/admin'
 import NotificationBell from '../components/NotificationBell.vue'
 import type { UpdateInfo } from '../api/types'
 import EmailVerificationBanner from '../components/EmailVerificationBanner.vue'
+import ImpersonationBanner from '../components/ImpersonationBanner.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -714,6 +715,9 @@ function getIcon(name: string): string {
       </header>
       <main class="main-content">
         <EmailVerificationBanner />
+        <!-- R-20: "Viewing as …" banner with the exit action while an admin
+             impersonates this session. -->
+        <ImpersonationBanner />
         <!-- A newer ReForwarder release exists (platform admins). Links to the release
              notes; it never upgrades anything on its own. -->
         <div v-if="showUpdateBanner" class="app-banner app-banner--success">

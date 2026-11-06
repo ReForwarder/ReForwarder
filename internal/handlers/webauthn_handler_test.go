@@ -118,9 +118,15 @@ func waCborMap(pairs ...[]byte) []byte {
 
 // waCoseEC2Key encodes the public key as a COSE EC2 key (ES256/P-256), the
 // algorithm the default credential parameters advertise.
-func waCoseEC2Key(pub *ecdsa.PublicKey) []byte {
-	x := pub.X.FillBytes(make([]byte, 32))
-	y := pub.Y.FillBytes(make([]byte, 32))
+func waCoseEC2Key(t *testing.T, pub *ecdsa.PublicKey) []byte {
+	t.Helper()
+	// pub.Bytes() is the uncompressed SEC1 point (0x04 || X || Y, 65 bytes
+	// for P-256); raw-coordinate access on ecdsa.PublicKey is deprecated.
+	point, err := pub.Bytes()
+	if err != nil {
+		t.Fatalf("encode authenticator public key: %v", err)
+	}
+	x, y := point[1:33], point[33:65]
 	return waCborMap(
 		append(waCborUint(1), waCborUint(2)...),  // kty: EC2
 		append(waCborUint(3), waCborInt(-7)...),  // alg: ES256
@@ -180,7 +186,7 @@ func (a *waTestAuthenticator) registrationResponse(challenge string) []byte {
 	authData = append(authData, make([]byte, 16)...) // zero AAGUID
 	authData = append(authData, byte(len(a.credID)>>8), byte(len(a.credID)))
 	authData = append(authData, a.credID...)
-	authData = append(authData, waCoseEC2Key(&a.key.PublicKey)...)
+	authData = append(authData, waCoseEC2Key(a.t, &a.key.PublicKey)...)
 
 	attObj := waCborMap(
 		append(waCborText("fmt"), waCborText("none")...),
@@ -247,8 +253,8 @@ func (a *waTestAuthenticator) assertionResponse(challenge string, userHandle []b
 
 // waLoginBody wraps a bare assertion in the login finish envelope the handler
 // binds (webauthnLoginFinishBody).
-func waLoginBody(email string, assertion []byte) []byte {
-	return []byte(`{"email":"` + email + `","assertion":` + string(assertion) + `}`)
+func waLoginBody(assertion []byte) []byte {
+	return []byte(`{"email":"` + waUserMail + `","assertion":` + string(assertion) + `}`)
 }
 
 // waSwapClientData rewrites a fragment of the attestation's clientDataJSON:
@@ -351,10 +357,10 @@ func (s *waFakeCreds) Delete(userID uint, credentialID string) error {
 	return nil
 }
 
-func (s *waFakeCreds) all(userID uint) []*models.WebAuthnCredential {
+func (s *waFakeCreds) all() []*models.WebAuthnCredential {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]*models.WebAuthnCredential{}, s.creds[userID]...)
+	return append([]*models.WebAuthnCredential{}, s.creds[waUserID]...)
 }
 
 // ---------- the fake users database ----------
@@ -386,20 +392,6 @@ func (s *waHState) colIndex(col string) int {
 		}
 	}
 	return -1
-}
-
-func (s *waHState) rowMaps() []map[string]driver.Value {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var out []map[string]driver.Value
-	for _, row := range s.rows {
-		m := make(map[string]driver.Value, len(waHColumns))
-		for i, c := range waHColumns {
-			m[c] = row[i]
-		}
-		out = append(out, m)
-	}
-	return out
 }
 
 func waHVal(v any) driver.Value {
@@ -810,7 +802,7 @@ func (h *waHarness) waRegister(t *testing.T, auth *waTestAuthenticator) *models.
 	if data["attestation_type"] != "none" {
 		t.Fatalf("attestation_type = %v, want none", data["attestation_type"])
 	}
-	creds := h.creds.all(waUserID)
+	creds := h.creds.all()
 	if len(creds) != 1 {
 		t.Fatalf("stored credentials = %d, want 1", len(creds))
 	}
@@ -903,7 +895,7 @@ func TestWebAuthnRegistrationCeremony(t *testing.T) {
 	if finish.Code != http.StatusCreated {
 		t.Fatalf("finish status = %d, want 201 (body %s)", finish.Code, finish.Body.String())
 	}
-	stored := h.creds.all(waUserID)
+	stored := h.creds.all()
 	if len(stored) != 1 {
 		t.Fatalf("stored credentials = %d, want 1", len(stored))
 	}
@@ -938,7 +930,7 @@ func TestWebAuthnRegistrationCeremony(t *testing.T) {
 		t.Fatalf("replay body %q missing the single-use message", replay.Body.String())
 	}
 	// And the refusal stored nothing.
-	if n := len(h.creds.all(waUserID)); n != 1 {
+	if n := len(h.creds.all()); n != 1 {
 		t.Fatalf("stored credentials after replay = %d, want 1", n)
 	}
 }
@@ -956,11 +948,11 @@ func TestWebAuthnRegistrationRejectsForeignCeremony(t *testing.T) {
 	// registration response whose clientData carries another ceremony's
 	// challenge.
 	body := waSwapClientData(t, auth.registrationResponse(challenge), challenge, "a-different-ceremonys-challenge")
-	finish := h.do(t, http.MethodPost, "/auth/webauthn/register/finish", token, []byte(body))
+	finish := h.do(t, http.MethodPost, "/auth/webauthn/register/finish", token, body)
 	if finish.Code != http.StatusBadRequest {
 		t.Fatalf("cross-ceremony finish status = %d, want 400 (body %s)", finish.Code, finish.Body.String())
 	}
-	if n := len(h.creds.all(waUserID)); n != 0 {
+	if n := len(h.creds.all()); n != 0 {
 		t.Fatalf("stored credentials = %d, want 0", n)
 	}
 }
@@ -1018,7 +1010,7 @@ func TestWebAuthnLoginCeremony(t *testing.T) {
 
 	// Finish login: the assertion verifies and a session is issued like a
 	// password login.
-	finish := h.do(t, http.MethodPost, "/auth/webauthn/login/finish", "", waLoginBody(waUserMail, auth.assertionResponse(challenge, waUserHandle())))
+	finish := h.do(t, http.MethodPost, "/auth/webauthn/login/finish", "", waLoginBody(auth.assertionResponse(challenge, waUserHandle())))
 	if finish.Code != http.StatusOK {
 		t.Fatalf("login finish status = %d, want 200 (body %s)", finish.Code, finish.Body.String())
 	}
@@ -1042,7 +1034,7 @@ func TestWebAuthnLoginCeremony(t *testing.T) {
 	}
 
 	// The authenticator's counter advance and last-used stamp are persisted.
-	stored := h.creds.all(waUserID)
+	stored := h.creds.all()
 	if len(stored) != 1 || stored[0].SignCount == 0 {
 		t.Fatalf("stored credential after login = %+v, want the counter advanced", stored)
 	}
@@ -1051,7 +1043,7 @@ func TestWebAuthnLoginCeremony(t *testing.T) {
 	}
 
 	// The challenge is consumed: replaying the assertion fails.
-	replay := h.do(t, http.MethodPost, "/auth/webauthn/login/finish", "", waLoginBody(waUserMail, auth.assertionResponse(challenge, waUserHandle())))
+	replay := h.do(t, http.MethodPost, "/auth/webauthn/login/finish", "", waLoginBody(auth.assertionResponse(challenge, waUserHandle())))
 	if replay.Code != http.StatusUnauthorized {
 		t.Fatalf("replayed assertion status = %d, want 401 (body %s)", replay.Code, replay.Body.String())
 	}
@@ -1060,7 +1052,7 @@ func TestWebAuthnLoginCeremony(t *testing.T) {
 	begin2 := h.do(t, http.MethodPost, "/auth/webauthn/login/begin", "", []byte(`{"email":"`+waUserMail+`"}`))
 	challenge2 := waDataMap(t, begin2)["challenge"].(string)
 	tampered := strings.Replace(string(auth.assertionResponse(challenge2, waUserHandle())), `"signature":"`, `"signature":"AAAA`, 1)
-	bad := h.do(t, http.MethodPost, "/auth/webauthn/login/finish", "", waLoginBody(waUserMail, []byte(tampered)))
+	bad := h.do(t, http.MethodPost, "/auth/webauthn/login/finish", "", waLoginBody([]byte(tampered)))
 	if bad.Code != http.StatusUnauthorized {
 		t.Fatalf("tampered assertion status = %d, want 401 (body %s)", bad.Code, bad.Body.String())
 	}
@@ -1104,7 +1096,7 @@ func TestWebAuthnLoginSecondFactor(t *testing.T) {
 	// requires_2fa 401 with a one-shot pending token.
 	begin := h.do(t, http.MethodPost, "/auth/webauthn/login/begin", "", []byte(`{"email":"`+waUserMail+`"}`))
 	challenge := waDataMap(t, begin)["challenge"].(string)
-	first := h.do(t, http.MethodPost, "/auth/webauthn/login/finish", "", waLoginBody(waUserMail, auth.assertionResponse(challenge, waUserHandle())))
+	first := h.do(t, http.MethodPost, "/auth/webauthn/login/finish", "", waLoginBody(auth.assertionResponse(challenge, waUserHandle())))
 	if first.Code != http.StatusUnauthorized {
 		t.Fatalf("2FA login status = %d, want 401 (body %s)", first.Code, first.Body.String())
 	}
@@ -1157,7 +1149,7 @@ func TestWebAuthnLoginSecondFactorRejectsBadCodeAndTokens(t *testing.T) {
 
 	begin := h.do(t, http.MethodPost, "/auth/webauthn/login/begin", "", []byte(`{"email":"`+waUserMail+`"}`))
 	challenge := waDataMap(t, begin)["challenge"].(string)
-	first := h.do(t, http.MethodPost, "/auth/webauthn/login/finish", "", waLoginBody(waUserMail, auth.assertionResponse(challenge, waUserHandle())))
+	first := h.do(t, http.MethodPost, "/auth/webauthn/login/finish", "", waLoginBody(auth.assertionResponse(challenge, waUserHandle())))
 	pending := waDataMap(t, first)["pending_token"].(string)
 
 	// Unknown pending token.
@@ -1194,8 +1186,8 @@ func TestWebAuthnCredentialManagement(t *testing.T) {
 	if rename.Code != http.StatusOK {
 		t.Fatalf("rename status = %d, want 200 (body %s)", rename.Code, rename.Body.String())
 	}
-	if h.creds.all(waUserID)[0].Name != "MacBook Touch ID" {
-		t.Fatalf("credential name = %q, want the new label", h.creds.all(waUserID)[0].Name)
+	if h.creds.all()[0].Name != "MacBook Touch ID" {
+		t.Fatalf("credential name = %q, want the new label", h.creds.all()[0].Name)
 	}
 
 	// Rename an unknown credential.
@@ -1209,7 +1201,7 @@ func TestWebAuthnCredentialManagement(t *testing.T) {
 	if del.Code != http.StatusNoContent {
 		t.Fatalf("delete status = %d, want 204 (body %s)", del.Code, del.Body.String())
 	}
-	if n := len(h.creds.all(waUserID)); n != 0 {
+	if n := len(h.creds.all()); n != 0 {
 		t.Fatalf("credentials after delete = %d, want 0", n)
 	}
 

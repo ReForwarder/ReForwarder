@@ -50,6 +50,9 @@ vi.mock('../components/NotificationBell.vue', () => ({
 vi.mock('../components/EmailVerificationBanner.vue', () => ({
   default: { name: 'EmailVerificationBanner', template: '<div />' },
 }))
+vi.mock('../components/ImpersonationBanner.vue', () => ({
+  default: { name: 'ImpersonationBanner', template: '<div />' },
+}))
 
 vi.mock('vue-router', () => ({
   useRoute: () => ({ path: '/', query: {}, params: {} }),

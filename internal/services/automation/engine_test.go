@@ -68,6 +68,7 @@ var engColumns = map[string][]string{
 	"subscriber_lists":             {"id", "user_id", "workspace_id", "name", "description", "type", "filter_rules", "created_at", "updated_at"},
 	"subscriber_list_members":      {"id", "list_id", "subscriber_id", "created_at"},
 	"subscriber_list_unsubscribes": {"id", "list_id", "subscriber_id", "reason", "unsubscribed_at"},
+	"segments":                     {"id", "user_id", "workspace_id", "name", "description", "condition", "created_at", "updated_at"},
 }
 
 // Composite unique keys consulted for ON CONFLICT DO NOTHING inserts.
@@ -321,6 +322,11 @@ func (c *engConn) QueryContext(_ context.Context, query string, args []driver.Na
 	if strings.Contains(compact, "from automation_journeys aj") {
 		return c.s.handleClaimQuery(args)
 	}
+	// The list-membership join (SubscriberListRepository.ListMembers): the
+	// schedule trigger's list audience resolves through it.
+	if strings.Contains(compact, `from "subscribers" join subscriber_list_members`) {
+		return c.s.handleListMembersQuery(args)
+	}
 	table := matchEngTable(compact)
 	if table == "" {
 		return nil, fmt.Errorf("engState: cannot route query: %s", query)
@@ -364,8 +370,49 @@ func (c *engConn) ExecContext(_ context.Context, query string, args []driver.Nam
 
 // matchEngTable finds the table a SELECT/UPDATE/DELETE touches by its quoted
 // name.
+// handleListMembersQuery answers SubscriberListRepository.ListMembers: the
+// subscriber rows joined through subscriber_list_members for one list,
+// newest-subscriber first (ORDER BY subscribers.created_at DESC).
+func (s *engState) handleListMembersQuery(args []driver.NamedValue) (driver.Rows, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(args) < 1 {
+		return nil, fmt.Errorf("engState: list members query without a list id")
+	}
+	listID := args[0].Value
+	memIdx := s.colIndex("subscriber_list_members", "list_id")
+	subIdx := s.colIndex("subscriber_list_members", "subscriber_id")
+
+	var subs [][]driver.Value
+	for _, m := range s.tables["subscriber_list_members"].rows {
+		if !driverValueEqual(m[memIdx], listID) {
+			continue
+		}
+		row := s.rowMapLocked("subscribers", "id", m[subIdx])
+		if row == nil {
+			continue
+		}
+		full := make([]driver.Value, len(engColumns["subscribers"]))
+		for i, col := range engColumns["subscribers"] {
+			full[i] = row[col]
+		}
+		subs = append(subs, full)
+	}
+	createdIdx := s.colIndex("subscribers", "created_at")
+	idIdx := s.colIndex("subscribers", "id")
+	sort.SliceStable(subs, func(a, b int) bool {
+		ta, _ := subs[a][createdIdx].(time.Time)
+		tb, _ := subs[b][createdIdx].(time.Time)
+		if !ta.Equal(tb) {
+			return ta.After(tb)
+		}
+		return subs[a][idIdx].(int64) > subs[b][idIdx].(int64)
+	})
+	return &engRows{cols: engColumns["subscribers"], rows: subs}, nil
+}
+
 func matchEngTable(lowerQuery string) string {
-	for _, name := range []string{"automation_node_runs", "automation_trigger_log", "automation_journeys", "subscriber_list_members", "subscriber_list_unsubscribes", "subscriber_lists", "automations", "subscribers"} {
+	for _, name := range []string{"automation_node_runs", "automation_trigger_log", "automation_journeys", "subscriber_list_members", "subscriber_list_unsubscribes", "subscriber_lists", "segments", "automations", "subscribers"} {
 		for _, pat := range []string{`from "` + name + `"`, `update "` + name + `"`, `update ` + name + ` `, `delete from "` + name + `"`, `delete from ` + name + ` `, `into "` + name + `"`, `into ` + name + ` `} {
 			if strings.Contains(lowerQuery, pat) {
 				return name
@@ -865,8 +912,10 @@ func (s *engState) handleDelete(compact string, args []driver.NamedValue) (drive
 }
 
 // engStatRe extracts the stat key from the jsonb_set UPDATE; the plain '{}'
-// default in COALESCE(stats, '{}'::jsonb) must not match ([a-z]+ is non-empty).
-var engStatRe = regexp.MustCompile(`'\{([a-z]+)\}'`)
+// default in COALESCE(stats, '{}'::jsonb) must not match ([a-z_]+ is
+// non-empty). Underscores appear in the R-13 checkpoint path key
+// (last_fired_at).
+var engStatRe = regexp.MustCompile(`'\{([a-z_]+)\}'`)
 
 // handleIncrementStat emulates the atomic jsonb_set stat UPDATE.
 func (s *engState) handleIncrementStat(compact string, args []driver.NamedValue) (driver.Result, error) {
@@ -891,6 +940,17 @@ func (s *engState) handleIncrementStat(compact string, args []driver.NamedValue)
 			stats.Exited++
 		case "failed":
 			stats.Failed++
+		case "last_fired_at":
+			// The schedule checkpoint (R-13): to_jsonb($1::text) binds the
+			// RFC3339 timestamp as the FIRST argument (the id is second).
+			if len(args) < 1 {
+				return nil, fmt.Errorf("engState: checkpoint update without a timestamp: %s", compact)
+			}
+			ts, err := time.Parse(time.RFC3339Nano, fmt.Sprint(args[0].Value))
+			if err != nil {
+				return nil, fmt.Errorf("engState: bad checkpoint timestamp %v: %w", args[0].Value, err)
+			}
+			stats.LastFiredAt = &ts
 		default:
 			return nil, fmt.Errorf("engState: unknown stat %q", stat)
 		}
