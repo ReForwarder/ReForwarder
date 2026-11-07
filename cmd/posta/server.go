@@ -22,6 +22,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	"github.com/goposta/posta/internal/config"
 	cronpkg "github.com/goposta/posta/internal/cron"
 	"github.com/goposta/posta/internal/cron/jobs"
+	"github.com/goposta/posta/internal/logging"
 	"github.com/goposta/posta/internal/metrics"
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/routes"
@@ -40,6 +42,7 @@ import (
 	"github.com/goposta/posta/internal/services/eventbus"
 	"github.com/goposta/posta/internal/services/inbound"
 	"github.com/goposta/posta/internal/services/messages"
+	"github.com/goposta/posta/internal/services/mta"
 	"github.com/goposta/posta/internal/services/notification"
 	"github.com/goposta/posta/internal/services/ratelimit"
 	"github.com/goposta/posta/internal/services/realtime"
@@ -68,22 +71,34 @@ import (
 )
 
 type serverResources struct {
-	producer    *worker.Producer
-	cronManager *cronpkg.Manager
-	blobStore   blob.Store
-	db          *gorm.DB
-	redis       *redis.Client
-	smtpInbound *smtp.Server
-	smtpRelay   *smtp.Server
+	producer       *worker.Producer
+	cronManager    *cronpkg.Manager
+	blobStore      blob.Store
+	db             *gorm.DB
+	redis          *redis.Client
+	smtpInbound    *smtp.Server
+	smtpRelay      *smtp.Server
+	smtpSubmission *smtp.Server
+	// logSinks releases the SF-94 file sink (nil when stdout-only).
+	logSinks io.Closer
 }
 
 func runServer(cli *okapicli.CLI) {
 	cfg := config.New()
+	// ---- P3-3 (SF-94): multi-sink logging (POSTA_LOG_SINKS / POSTA_LOG_FILE).
+	// Must run BEFORE cfg.Initialize(app): the structured logger's handler
+	// captures os.Stdout at construction, so the file tee has to be in place
+	// first. Fail-open: a sink error must not keep the server from starting.
+	logSinks, err := logging.Init()
+	if err != nil {
+		logger.Error("log sink setup failed, logging to stdout only", "error", err)
+		logSinks = nil
+	}
 	app := cli.Okapi()
 	if err := cfg.Initialize(app); err != nil {
 		logger.Fatal("Failed to initialize Posta", "error", err)
 	}
-	res := &serverResources{}
+	res := &serverResources{logSinks: logSinks}
 	if err := cli.RunServer(&okapicli.RunOptions{
 		ShutdownTimeout: 30 * time.Second,
 		OnStart: func() {
@@ -230,6 +245,17 @@ func runServer(cli *okapicli.CLI) {
 				}
 			}
 
+			// Submission listener (SF-03, gated; ADR-001 §10): MSA on port
+			// 587 feeding accepted messages into the same pipeline as API
+			// sends. Off by default (POSTA_SUBMISSION_ENABLED).
+			if cfg.SubmissionEnabled && !cfg.DevMode {
+				if srv, err := startSubmissionServer(res.db, cfg, emailSvc, secEng); err != nil {
+					logger.Error("failed to start submission server", "error", err)
+				} else {
+					res.smtpSubmission = srv
+				}
+			}
+
 			if res.cronManager != nil {
 				res.cronManager.Start(context.Background())
 			}
@@ -308,6 +334,7 @@ func newWebhookDispatcher(db *gorm.DB, cfg *config.Config) *webhook.Dispatcher {
 	dispatcher.OnDeliverySuccess(func() { metrics.IncrementWebhookDelivery("success") })
 	dispatcher.OnDeliveryFailed(func() { metrics.IncrementWebhookDelivery("failed") })
 	dispatcher.OnDeliveryDone(metrics.ObserveWebhookDeliveryDuration)
+	dispatcher.OnEventsDropped(metrics.IncrementWebhookEventsDropped)
 	return dispatcher
 }
 
@@ -377,6 +404,7 @@ func newInboundServiceForWorker(db *gorm.DB,
 	}
 	attachThreadRouter(svc, db, cfg, producer)
 	attachDMARC(svc, db)
+	attachVerification(svc, db, cfg)
 	return svc
 }
 
@@ -403,6 +431,14 @@ func attachThreadRouter(svc *inbound.Service, db *gorm.DB, cfg *config.Config, p
 // never fail because DMARC parsing did.
 func attachDMARC(svc *inbound.Service, db *gorm.DB) {
 	svc.EnableDMARC(db)
+}
+
+// attachVerification wires message-level SPF/DKIM/DMARC verification
+// (SF-22/23/24, ADR-002 Phase-3 slice) into every inbound service that parses
+// mail. Gated by POSTA_INBOUND_VERIFY (default true); verdicts persist
+// asynchronously into inbound_auth_results and never block delivery.
+func attachVerification(svc *inbound.Service, db *gorm.DB, cfg *config.Config) {
+	svc.EnableVerification(db, cfg.InboundHostname)
 }
 
 // startInboundSMTPServer configures and launches the built-in SMTP receiver.
@@ -440,6 +476,7 @@ func startInboundSMTPServer(
 	svc.OnBytes(metrics.AddInboundBytes)
 	svc.OnIngestDuration(metrics.ObserveInboundIngestDuration)
 	attachDMARC(svc, db)
+	attachVerification(svc, db, cfg)
 
 	backend := inbound.NewBackend(svc, domainRepo, cfg.InboundMaxMessageSize)
 	if cfg.InboundSMTPRateLimit > 0 {
@@ -528,6 +565,72 @@ func startSMTPRelayServer(
 	return srv, nil
 }
 
+// newMTAExecutor builds the outbound MTA executor (OB-1, ADR-001): system-DNS
+// MX resolver with a 30s cache, a sliding-hour per-domain budget, and the
+// durable attempt-record repository. The EHLO name comes from
+// POSTA_MTA_EHLO_NAME (guidance: point it at the hostname whose PTR matches
+// the outbound bind IP). Domains left in the default 'relay' mode never touch
+// the executor.
+func newMTAExecutor(db *gorm.DB, cfg *config.Config) *mta.Executor {
+	executor := mta.NewExecutor(mta.NewResolver(), mta.NewBudgetKeeper(time.Hour), repositories.NewMTADeliveryAttemptRepository(db))
+	executor.SetHeloDomain(cfg.MTAEhloName)
+	return executor
+}
+
+// startSubmissionServer launches the gated SMTP submission listener (SF-03,
+// ADR-001 §10): AUTH against SMTP relay credentials, tenant-verified sender
+// domains, validated recipients — no open relay. Accepted messages enter the
+// same pipeline as API sends through the email service.
+func startSubmissionServer(
+	db *gorm.DB, cfg *config.Config, emailSvc *email.Service, secEng *security.Engine,
+) (*smtp.Server, error) {
+	verifier := mta.NewRelayCredentialVerifier(
+		repositories.NewSMTPCredentialRepository(db),
+		repositories.NewUserRepository(db),
+	)
+	domains := mta.NewDomainSenderChecker(repositories.NewDomainRepository(db))
+	sink := &mta.EmailServiceSink{Service: emailSvc}
+	backend, err := mta.NewSubmissionBackend(verifier, domains, sink, cfg.SubmissionMaxMessageSize)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.SubmissionRateLimit > 0 {
+		window := time.Duration(cfg.SubmissionRateWindow) * time.Second
+		backend.SetRateLimiter(inbound.NewIPRateLimiter(cfg.SubmissionRateLimit, window))
+	}
+	backend.SetSecurity(secEng)
+	srv, err := mta.NewSubmissionServer(backend, mta.SubmissionConfig{
+		Host:           cfg.SubmissionHost,
+		Port:           cfg.SubmissionPort,
+		Hostname:       cfg.SubmissionHostname,
+		MaxMessageSize: cfg.SubmissionMaxMessageSize,
+		TLSMode:        cfg.SubmissionTLSMode,
+		TLSCertFile:    cfg.SubmissionTLSCertFile,
+		TLSKeyFile:     cfg.SubmissionTLSKeyFile,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	go func() {
+		logger.Info("submission server listening", "addr", srv.Addr, "tls_mode", cfg.SubmissionTLSMode)
+		// Same security-wrapped listener arrangement as the relay: the
+		// CountingListener enforces the ban snapshot at TCP accept and records
+		// connect/abort signals; TLS (when enabled) is STARTTLS in-band.
+		l, err := net.Listen("tcp", srv.Addr)
+		if err != nil {
+			logger.Error("submission server error", "error", err)
+			return
+		}
+		listener := security.NewCountingListener(l, secEng, cfg.SubmissionPort, "smtp")
+		err = srv.Serve(listener)
+		if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, smtp.ErrServerClosed) {
+			logger.Error("submission server error", "error", err)
+		}
+	}()
+	return srv, nil
+}
+
 // startEmbeddedWorker starts an in-process asynq worker for email delivery.
 // The bus argument is used by the inbound parse handler to publish
 // email.inbound.received events; it may be nil when inbound is disabled.
@@ -555,6 +658,9 @@ func startEmbeddedWorker(db *gorm.DB,
 	handler.SetBounceRepo(repositories.NewBounceRepository(db))
 	handler.SetAutoSuppress(cfg.AutoSuppressOnReject)
 	handler.SetStamper(email.NewStamper("Posta", config.Version, []byte(cfg.JWTSecret)))
+	// Outbound MTA executor (OB-1): domains configured 'direct' deliver
+	// direct-to-MX; everything else keeps today's relay path (ADR-001).
+	handler.SetMTAExecutor(newMTAExecutor(db, cfg))
 	// Message-history events (sent, failed, bounced, …) recorded by the worker
 	// path — the HTTP send path records through the routes wiring. One recorder
 	// instance backs both the send handler and the exhausted-task handler.
@@ -720,6 +826,10 @@ func initCronManager(
 	retentionJob.SetEmailEventRepo(repositories.NewEmailEventRepository(db))
 	retentionJob.SetIncomingWebhookEventRepo(repositories.NewIncomingWebhookEventRepository(db))
 	retentionJob.SetWebhookDeliveryAttemptRepo(repositories.NewWebhookDeliveryAttemptRepository(db))
+	// P3-3 (GAP-13): give SecurityEventRepository.DeleteOlderThan its first
+	// caller — security events purge under security_events_retention_days
+	// alongside the other retention families in the same job.
+	retentionJob.SetSecurityEventRepo(repositories.NewSecurityEventRepository(db))
 	if cfg.InboundEnabled {
 		retentionJob.SetInboundEmailRepo(repositories.NewInboundEmailRepository(db))
 	}
@@ -796,6 +906,15 @@ func initCronManager(
 			cfg.AppWebURL,
 		))
 	}
+
+	// ---- P3-3 (SF-104): scheduled DKIM retire-after-grace task. Flips a
+	// `retiring` signing key to `retired` once its grace period
+	// (dkim_retire_grace_days, default 14) has elapsed AND the replacement
+	// key's DNS record is verified published. Rotation itself stays
+	// API-driven; this only automates the retire step, making old keys
+	// deletable without operator follow-up.
+	manager.Register(jobs.NewDKIMRetireJob(db, settingsProvider))
+
 	return manager
 }
 
@@ -835,6 +954,13 @@ func shutdownServer(res *serverResources) {
 		}
 		cancel()
 	}
+	if res.smtpSubmission != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := res.smtpSubmission.Shutdown(ctx); err != nil {
+			logger.Error("failed to shut down submission server", "error", err)
+		}
+		cancel()
+	}
 	if res.cronManager != nil {
 		res.cronManager.Stop()
 	}
@@ -846,6 +972,12 @@ func shutdownServer(res *serverResources) {
 	if res.redis != nil {
 		if err := res.redis.Close(); err != nil {
 			logger.Error("failed to close Redis", "error", err)
+		}
+	}
+	// P3-3 (SF-94): release the file sink last so shutdown logs still tee.
+	if res.logSinks != nil {
+		if err := res.logSinks.Close(); err != nil {
+			logger.Error("failed to close log file sink", "error", err)
 		}
 	}
 	if res.db != nil {
@@ -864,5 +996,12 @@ func webhookConfig(cfg *config.Config) webhook.Config {
 		Timeout:        time.Duration(cfg.WebhookTimeoutSecs) * time.Second,
 		ProxyURL:       cfg.WebhookProxyURL,
 		ProxyAckPolicy: cfg.WebhookProxyAckPolicy,
+
+		// SF-90: batch delivery is off unless POSTA_WEBHOOK_BATCH_ENABLED
+		// is set; the pending cap is inert in per-event mode.
+		BatchEnabled:       cfg.WebhookBatchEnabled,
+		BatchMaxEvents:     cfg.WebhookBatchMaxEvents,
+		BatchFlushInterval: time.Duration(cfg.WebhookBatchFlushSecs) * time.Second,
+		MaxPendingEvents:   cfg.WebhookMaxPendingEvents,
 	}
 }

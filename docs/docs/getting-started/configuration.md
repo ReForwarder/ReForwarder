@@ -90,8 +90,23 @@ New-user registration is toggled at runtime from **Admin → Settings** (the `re
 | `POSTA_WEBHOOK_TIMEOUT_SECS` | `10` | Webhook HTTP request timeout (seconds) |
 | `POSTA_WEBHOOK_PROXY_URL` | — | Optional HTTP/HTTPS/SOCKS5 proxy for outbound webhook delivery. Only takes effect together with `POSTA_WEBHOOK_PROXY_ACK_POLICY=enforced` |
 | `POSTA_WEBHOOK_PROXY_ACK_POLICY` | — | Required value: `enforced`. Proxy mode is refused unless this variable is set to exactly `enforced` |
+| `POSTA_WEBHOOK_BATCH_ENABLED` | `false` | Group events per endpoint into batch deliveries instead of one request per event (SF-90). When on, a batch flushes at `POSTA_WEBHOOK_BATCH_MAX_EVENTS` events or after `POSTA_WEBHOOK_BATCH_FLUSH_SECS`, whichever first. The batch body is a JSON array of the per-event payloads; the HMAC `X-Posta-Signature` covers the batch bytes. One delivery row (`event=batch`) is recorded per flush |
+| `POSTA_WEBHOOK_BATCH_MAX_EVENTS` | `25` | Batch size that triggers an immediate flush |
+| `POSTA_WEBHOOK_BATCH_FLUSH_SECS` | `5` | Maximum time events wait in the batch buffer before flushing |
+| `POSTA_WEBHOOK_MAX_PENDING_EVENTS` | `1000` | Per-endpoint cap on events waiting in the batch buffer. When reached, the oldest queued event is dropped (warning logged, `posta_webhook_events_dropped_total` metric incremented). Inert while batching is off |
 
 In proxy mode every proxied connection is pinned to the pre-validated public IP of the webhook destination: the proxy is asked to connect to the IP, never to the hostname, so the DNS-rebinding window between validation and connection is closed (TLS stays hostname-based via SNI and certificate verification). Setting `POSTA_WEBHOOK_PROXY_ACK_POLICY=enforced` asserts that you, the operator, accept the residual proxy-side assumptions: the proxy's own egress ACL behavior, split-horizon DNS reachability (the proxy must be able to reach the pinned public IP — DNS-isolated setups fail closed), rare proxies that refuse IP-form targets, and — for plain-HTTP (non-TLS) destinations — that the endpoint receives an IP-form `Host` header (a forwarding proxy cannot carry the request-line authority and the Host header independently). Without the acknowledgement the proxy is ignored and delivery stays in guarded direct mode.
+
+## Browser Push Notifications
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `POSTA_WEB_PUSH_ENABLED` | `false` | Enable browser Web Push (RFC 8030/8291/8292) for dashboard realtime events (SF-89). When off, the Profile card hides and the subscription endpoints refuse writes |
+| `POSTA_WEB_PUSH_VAPID_PUBLIC_KEY` | — | VAPID public key, base64url (65-byte uncompressed P-256 point). Generate a pair once (e.g. with the `webpush.GenerateKeys` helper shape: matching public/private values) and keep the private key secret |
+| `POSTA_WEB_PUSH_VAPID_PRIVATE_KEY` | — | VAPID private key, base64url (32-byte P-256 scalar). Required when push is enabled; the public key is re-derived from it and must match `POSTA_WEB_PUSH_VAPID_PUBLIC_KEY` when both are set |
+| `POSTA_WEB_PUSH_SUBJECT` | — | Operator contact carried in the VAPID JWT (`sub` claim) — a `mailto:` or `https:` URL. Push services use it to reach you about malformed traffic |
+
+When enabled, message events published to a workspace's realtime stream are also pushed to the registered browsers of that workspace's members. Delivery is best effort: a push is a hint to refetch, the database stays the source of truth, and a subscription the push service reports gone (404/410) is removed automatically.
 
 ## Delivery
 

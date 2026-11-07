@@ -35,6 +35,7 @@ const canSend = computed(() => campaign.value?.status === 'draft')
 const canPause = computed(() => campaign.value?.status === 'sending')
 const canResume = computed(() => campaign.value?.status === 'paused')
 const canCancel = computed(() => ['sending', 'paused', 'scheduled'].includes(campaign.value?.status ?? ''))
+const canDuplicate = computed(() => campaign.value ? campaign.value.status !== 'sending' : false)
 const canDelete = computed(() => campaign.value ? campaign.value.status !== 'sending' : false)
 const showAnalyticsTab = computed(() => ['sending', 'sent', 'paused', 'cancelled'].includes(campaign.value?.status ?? ''))
 
@@ -168,6 +169,27 @@ async function cancelCampaign() {
   await runAction(() => campaignsApi.cancel(campaignId), 'Campaign cancelled', 'Failed to cancel campaign')
 }
 
+// CA-02: wires the backend POST /campaigns/{id}/duplicate route, which until
+// now had no frontend caller (RF-F103). The backend returns the new draft
+// campaign; we jump straight into it.
+async function duplicateCampaign() {
+  actionLoading.value = true
+  try {
+    const resp = await campaignsApi.duplicate(campaignId)
+    notify.success('Campaign duplicated')
+    const created = resp.data.data
+    if (created?.id) {
+      router.push(`/campaigns/${created.id}`)
+    } else {
+      await loadCampaign()
+    }
+  } catch (e: any) {
+    notify.error(e?.response?.data?.error?.message || 'Failed to duplicate campaign')
+  } finally {
+    actionLoading.value = false
+  }
+}
+
 async function deleteCampaign() {
   const status = campaign.value?.status
   const warnLossOfData = status === 'sent' || status === 'sending' || status === 'paused'
@@ -264,6 +286,7 @@ onMounted(async () => {
         <button v-if="wsStore.canEdit && canPause" class="btn btn-warning" :disabled="actionLoading" @click="pauseCampaign">Pause</button>
         <button v-if="wsStore.canEdit && canResume" class="btn btn-primary" :disabled="actionLoading" @click="resumeCampaign">Resume</button>
         <button v-if="wsStore.canEdit && canCancel" class="btn btn-danger" :disabled="actionLoading" @click="cancelCampaign">Cancel</button>
+        <button v-if="wsStore.canEdit && canDuplicate" class="btn btn-secondary" :disabled="actionLoading" @click="duplicateCampaign">Duplicate</button>
         <button v-if="wsStore.canEdit && canDelete" class="btn btn-danger" @click="deleteCampaign">Delete</button>
       </div>
     </div>

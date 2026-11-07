@@ -74,6 +74,16 @@ func (p *Provider) ensureFresh() {
 	}
 }
 
+// Invalidate drops the cached values so the next read reloads from the
+// database instead of waiting out the TTL. Settings writes call this (SF-100)
+// so admin changes reach every consumer — rate limiter, retention job, plan
+// service — without a 30-second lag or a restart.
+func (p *Provider) Invalidate() {
+	p.mu.Lock()
+	p.loadedAt = time.Time{}
+	p.mu.Unlock()
+}
+
 // GetString returns a string setting or the fallback if not found.
 func (p *Provider) GetString(key, fallback string) string {
 	p.ensureFresh()
@@ -153,6 +163,21 @@ func (p *Provider) EmailEventsRetentionDays() int {
 }
 func (p *Provider) TrackingEventRetentionDays() int {
 	return p.GetInt("tracking_event_retention_days", 90)
+}
+
+// SecurityEventsRetentionDays is how long security-engine events are kept
+// (GAP-13). 0 keeps them forever; the default is 90 days.
+func (p *Provider) SecurityEventsRetentionDays() int {
+	return p.GetInt("security_events_retention_days", 90)
+}
+
+// DKIMRetireGraceDays is how long a DKIM key stays in the `retiring` state
+// after rotation before the scheduled retire task (SF-104) may flip it to
+// `retired` — and only once the replacement key's DNS record is verified.
+// A negative value disables the auto-retire pass entirely; 0 retires an
+// eligible key on the next run.
+func (p *Provider) DKIMRetireGraceDays() int {
+	return p.GetInt("dkim_retire_grace_days", 14)
 }
 func (p *Provider) LoginRateLimitCount() int {
 	return p.GetInt("login_rate_limit_count", 10)

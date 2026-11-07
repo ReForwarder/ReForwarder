@@ -21,6 +21,7 @@ package email
 
 import (
 	"bytes"
+	"os"
 	"crypto/ed25519"
 	"crypto/rsa"
 	"crypto/x509"
@@ -37,6 +38,14 @@ import (
 	"net"
 	"time"
 )
+
+// The crypto service (SF-78 hardening) refuses to store secrets when no
+// encryption key is configured; these tests exercise key storage, so they
+// configure a fixed test key up front.
+func TestMain(m *testing.M) {
+	postacrypto.Init("dkim-signer-test-key")
+	os.Exit(m.Run())
+}
 
 // Fixed, TEST-ONLY keys. Embedding them pins the golden-message contract: the
 // same message signed with the same key must always verify. These keys are

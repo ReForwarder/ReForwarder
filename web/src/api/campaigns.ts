@@ -91,6 +91,11 @@ export const campaignsApi = {
   cancel(id: number) {
     return api.post<ApiResponse<Campaign>>(`/workspaces/current/campaigns/${id}/cancel`)
   },
+  // CA-02: wires the backend POST /campaigns/{id}/duplicate route, which until
+  // now had no frontend caller (RF-F103).
+  duplicate(id: number) {
+    return api.post<ApiResponse<Campaign>>(`/workspaces/current/campaigns/${id}/duplicate`)
+  },
   listMessages(id: number, page = 0, size = 20, status?: string) {
     return api.get<PaginatedResponse<CampaignMessage>>(`/workspaces/current/campaigns/${id}/messages`, { params: { page, size, status } })
   },

@@ -186,6 +186,34 @@ func (s *stubQueueInspector) ArchiveTask(queue, id string) error {
 	s.record("ArchiveTask:" + queue + "/" + id)
 	return s.fail("ArchiveTask", id)
 }
+func (s *stubQueueInspector) PauseQueue(queue string) error {
+	s.record("PauseQueue:" + queue)
+	return s.fail("PauseQueue", queue)
+}
+func (s *stubQueueInspector) UnpauseQueue(queue string) error {
+	s.record("UnpauseQueue:" + queue)
+	return s.fail("UnpauseQueue", queue)
+}
+func (s *stubQueueInspector) GetTaskInfo(queue, id string) (*asynq.TaskInfo, error) {
+	s.record("GetTaskInfo:" + queue + "/" + id)
+	if err := s.fail("GetTaskInfo", id); err != nil {
+		return nil, err
+	}
+	return &asynq.TaskInfo{ID: id, Queue: queue, Type: queues.EmailSendTaskType, State: asynq.TaskStatePending}, nil
+}
+
+// stubSendProducer is the jobs.SendEnqueuer stub behind requeue_stuck.
+type stubSendProducer struct {
+	mu       sync.Mutex
+	enqueued []uint
+}
+
+func (p *stubSendProducer) EnqueueEmailSend(emailID uint, _ string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.enqueued = append(p.enqueued, emailID)
+	return nil
+}
 
 func queueTaskFixture(id string, retried int, lastErr string) *asynq.TaskInfo {
 	t := &asynq.TaskInfo{
@@ -379,7 +407,20 @@ func newQueueAdminServer(t *testing.T) (*okapi.TestServer, *stubQueueInspector, 
 
 	h := &AdminHandler{inspector: nil}
 	h.queueInspector = stub
-	h.audit = audit.NewLogger(eventbus.New(repositories.NewEventRepository(qEvtGorm(t, evtState))))
+	auditLogger := audit.NewLogger(eventbus.New(repositories.NewEventRepository(qEvtGorm(t, evtState))))
+	h.audit = auditLogger
+
+	// The SF-59 operational actions handler over the same stub, with a fake
+	// database for the reconcile sweep (the logs fake answers any unknown
+	// SELECT with an empty set, so the sweep finds no stuck email) and a
+	// recording producer.
+	ops := &QueueOpsHandler{
+		db:             fakeGorm(t, newFakeState()),
+		producer:       &stubSendProducer{},
+		inspector:      stub,
+		queueInspector: stub,
+	}
+	ops.SetAuditLogger(auditLogger)
 
 	o := okapi.NewTestServer(t)
 	adminAuth := middlewares.JWTAdminAuth(&config.Config{JWTSecret: logsTestJWTSecret})
@@ -389,6 +430,10 @@ func newQueueAdminServer(t *testing.T) (*okapi.TestServer, *stubQueueInspector, 
 	g.Post("/queues/{queue}/tasks/{task_id}/cancel", okapi.H(h.CancelQueueTask))
 	g.Post("/queues/{queue}/tasks/{task_id}/run", okapi.H(h.RunQueueTask))
 	g.Post("/queues/{queue}/tasks/{task_id}/archive", okapi.H(h.ArchiveQueueTask))
+	g.Delete("/queues/{queue}/tasks/{task_id}", okapi.H(h.DestroyQueueTask))
+	g.Post("/queue/pause", h.PauseQueues)
+	g.Post("/queue/resume", h.ResumeQueues)
+	g.Post("/queue/actions/{action}", okapi.H(ops.RunAction))
 	return o, stub, evtState
 }
 
@@ -594,12 +639,20 @@ func TestAdminQueueTaskActions(t *testing.T) {
 // A non-admin session must not reach the queue admin API.
 func TestAdminQueuesRequireAdminRole(t *testing.T) {
 	o, _, _ := newQueueAdminServer(t)
-	req := httptest.NewRequest(http.MethodGet, "/admin/queues", nil)
-	req.Header.Set("Authorization", "Bearer "+logsTestJWT(t, "user"))
-	rec := httptest.NewRecorder()
-	o.ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("non-admin GET /admin/queues = %d, want 403", rec.Code)
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/admin/queues"},
+		{http.MethodPost, "/admin/queue/pause"},
+		{http.MethodPost, "/admin/queue/resume"},
+		{http.MethodPost, "/admin/queue/actions/requeue_stuck"},
+		{http.MethodDelete, "/admin/queues/transactional/tasks/x"},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		req.Header.Set("Authorization", "Bearer "+logsTestJWT(t, "user"))
+		rec := httptest.NewRecorder()
+		o.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("non-admin %s %s = %d, want 403", tc.method, tc.path, rec.Code)
+		}
 	}
 }
 
@@ -621,4 +674,264 @@ func TestAdminQueuesUnavailableWithoutInspector(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("no-inspector GET /admin/queues = %d, want 503", rec.Code)
 	}
+}
+
+// ---------- SF-52: destroy ----------
+
+// DELETE deletes the task outright and writes the admin.queue.task_destroyed
+// audit event; not-found and unknown-queue surface precisely.
+func TestAdminQueueDestroyTask(t *testing.T) {
+	o, stub, evt := newQueueAdminServer(t)
+
+	rec := doQueueAdminReq(t, o, http.MethodDelete, "/admin/queues/transactional/tasks/email%3Asend%3A42")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("destroy = %d: %s", rec.Code, rec.Body.String())
+	}
+	if stub.callCount("DeleteTask:transactional/") != 1 {
+		t.Fatalf("destroy must call DeleteTask, calls: %v", stub.calls)
+	}
+	events := evt.events()
+	if len(events) != 1 {
+		t.Fatalf("destroy must write one audit event, got %d", len(events))
+	}
+	if events[0]["type"] != "admin.queue.task_destroyed" {
+		t.Fatalf("audit event type = %v, want admin.queue.task_destroyed", events[0]["type"])
+	}
+	if got, _ := events[0]["message"].(string); !strings.Contains(got, "email:send:42") {
+		t.Fatalf("audit event message should name the task: %v", got)
+	}
+
+	// A task asynq cannot delete (active) is a conflict; a missing task or
+	// queue is a 404.
+	stub.errOn["DeleteTask:live"] = fmt.Errorf("task is active: %w", errors.New("state active"))
+	stub.errOn["DeleteTask:missing"] = asynq.ErrTaskNotFound
+	if rec := doQueueAdminReq(t, o, http.MethodDelete, "/admin/queues/bulk/tasks/live"); rec.Code != http.StatusConflict {
+		t.Fatalf("active task destroy = %d, want 409", rec.Code)
+	}
+	if rec := doQueueAdminReq(t, o, http.MethodDelete, "/admin/queues/transactional/tasks/missing"); rec.Code != http.StatusNotFound {
+		t.Fatalf("missing task destroy = %d, want 404", rec.Code)
+	}
+	if rec := doQueueAdminReq(t, o, http.MethodDelete, "/admin/queues/nope/tasks/x"); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown queue destroy = %d, want 404", rec.Code)
+	}
+}
+
+// ---------- SF-54: global pause / resume ----------
+
+// Pausing flips every managed queue, is audited, and is idempotent: a second
+// pause reports the queues unchanged instead of failing. Resume mirrors it.
+func TestAdminQueuePauseResume(t *testing.T) {
+	o, stub, evt := newQueueAdminServer(t)
+
+	rec := doQueueAdminReq(t, o, http.MethodPost, "/admin/queue/pause")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pause = %d: %s", rec.Code, rec.Body.String())
+	}
+	for _, q := range adminQueues {
+		if stub.callCount("PauseQueue:"+q) != 1 {
+			t.Fatalf("pause must call PauseQueue for %s, calls: %v", q, stub.calls)
+		}
+	}
+	var res struct {
+		Data QueuePauseResult `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !res.Data.Paused || len(res.Data.Queues) != len(adminQueues) {
+		t.Fatalf("pause result wrong: %+v", res.Data)
+	}
+	for _, qs := range res.Data.Queues {
+		if !qs.Paused || !qs.Changed {
+			t.Fatalf("queue %s should be paused+changed: %+v", qs.Queue, qs)
+		}
+	}
+	events := evt.events()
+	if len(events) != 1 || events[0]["type"] != "admin.queue.paused" {
+		t.Fatalf("pause must write one admin.queue.paused audit event, got %+v", events)
+	}
+
+	// Now the stub's queue info reflects the paused state: a second pause is a
+	// no-op with changed=false, and asynq is never called again.
+	for _, q := range adminQueues {
+		stub.setQueue(q, &asynq.QueueInfo{Queue: q, Paused: true})
+	}
+	rec = doQueueAdminReq(t, o, http.MethodPost, "/admin/queue/pause")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second pause = %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, qs := range res.Data.Queues {
+		if qs.Changed {
+			t.Fatalf("already-paused queue %s must report changed=false", qs.Queue)
+		}
+	}
+	if stub.callCount("PauseQueue:") != len(adminQueues) {
+		t.Fatal("second pause must not touch asynq again")
+	}
+
+	// Resume unpauses everything and audits the mirror event.
+	rec = doQueueAdminReq(t, o, http.MethodPost, "/admin/queue/resume")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resume = %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if res.Data.Paused {
+		t.Fatal("resume must report paused=false")
+	}
+	for _, qs := range res.Data.Queues {
+		if qs.Paused || !qs.Changed {
+			t.Fatalf("queue %s should be resumed+changed: %+v", qs.Queue, qs)
+		}
+	}
+	// The no-op pause was still an operator action and is audited too — three
+	// events so far: paused, paused (idempotent), resumed.
+	events = evt.events()
+	if len(events) != 3 || events[len(events)-1]["type"] != "admin.queue.resumed" {
+		t.Fatalf("resume must append an admin.queue.resumed audit event, got %+v", events)
+	}
+
+	// A queue refusing to flip is a 409 naming it, not a silent partial.
+	stub.errOn["UnpauseQueue:"+queues.Bulk] = errors.New("redis: bulk locked")
+	if rec := doQueueAdminReq(t, o, http.MethodPost, "/admin/queue/resume"); rec.Code != http.StatusConflict {
+		t.Fatalf("failing resume = %d, want 409", rec.Code)
+	}
+}
+
+// The overview carries the paused flag so the dashboard can badge it.
+func TestAdminQueuesOverviewReportsPaused(t *testing.T) {
+	o, stub, _ := newQueueAdminServer(t)
+	stub.setQueue(queues.Transactional, &asynq.QueueInfo{
+		Queue: queues.Transactional, Pending: 3, Paused: true,
+	})
+
+	rec := doQueueAdminReq(t, o, http.MethodGet, "/admin/queues")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/queues = %d: %s", rec.Code, rec.Body.String())
+	}
+	var res struct {
+		Data struct {
+			Queues []QueueStats `json:"queues"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	byName := map[string]QueueStats{}
+	for _, q := range res.Data.Queues {
+		byName[q.Queue] = q
+	}
+	if !byName[queues.Transactional].Paused {
+		t.Fatal("transactional should report paused=true")
+	}
+	if byName[queues.Bulk].Paused {
+		t.Fatal("bulk should report paused=false")
+	}
+}
+
+// ---------- SF-59: operational actions ----------
+
+// purge_archived_before deletes dead-lettered tasks whose archive timestamp is
+// at or before the cutoff, reports the count, and is audited. Tasks that
+// failed after the cutoff and unknown actions are refused.
+func TestAdminQueueActionPurgeArchivedBefore(t *testing.T) {
+	o, stub, evt := newQueueAdminServer(t)
+
+	oldTask := queueTaskFixture("task-old", 3, "dial tcp: i/o timeout") // failed a minute ago
+	manualTask := queueTaskFixture("task-manual", 0, "")                // parked without a failure: zero timestamp
+	freshTask := queueTaskFixture("task-fresh", 1, "conn refused")      // failed a minute ago too...
+	freshTask.LastFailedAt = time.Now().Add(time.Hour).Truncate(time.Second) // ...but push it after the cutoff
+	stub.setTasks("archived", []*asynq.TaskInfo{oldTask, manualTask, freshTask})
+
+	body := strings.NewReader(`{}`)
+	req := httptest.NewRequest(http.MethodPost, "/admin/queue/actions/purge_archived_before", body)
+	req.Header.Set("Authorization", "Bearer "+logsTestJWT(t, "admin"))
+	rec := httptest.NewRecorder()
+	o.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("purge = %d: %s", rec.Code, rec.Body.String())
+	}
+	var res struct {
+		Data QueueActionResponse `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// The stub serves the same archived set for every queue, so each of the
+	// three managed queues purges its two eligible tasks.
+	if res.Data.Action != "purge_archived_before" || res.Data.Purged != 6 {
+		t.Fatalf("purge result wrong: %+v", res.Data)
+	}
+	if stub.callCount("DeleteTask:") < 6 {
+		t.Fatalf("purge must delete the eligible tasks, calls: %v", stub.calls)
+	}
+	events := evt.events()
+	if len(events) != 1 || events[0]["type"] != "admin.queue.action_run" {
+		t.Fatalf("purge must write one admin.queue.action_run audit event, got %+v", events)
+	}
+
+	// A malformed cutoff is a 400, and so is an unknown action.
+	resp := doQueueAdminJSON(t, o, http.MethodPost, "/admin/queue/actions/purge_archived_before", `{"before":"not-a-date"}`)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("malformed before = %d, want 400", resp.Code)
+	}
+	resp = doQueueAdminJSON(t, o, http.MethodPost, "/admin/queue/actions/bogus", `{}`)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("unknown action = %d, want 400", resp.Code)
+	}
+}
+
+// requeue_stuck runs the reconcile sweep. With the fake database the sweep
+// finds no stuck email and reports zero; an unconfigured handler (no worker)
+// answers 503.
+func TestAdminQueueActionRequeueStuck(t *testing.T) {
+	o, _, evt := newQueueAdminServer(t)
+
+	resp := doQueueAdminJSON(t, o, http.MethodPost, "/admin/queue/actions/requeue_stuck", `{}`)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("requeue_stuck = %d: %s", resp.Code, resp.Body.String())
+	}
+	var res struct {
+		Data QueueActionResponse `json:"data"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if res.Data.Action != "requeue_stuck" || res.Data.Requeued != 0 {
+		t.Fatalf("requeue result wrong: %+v", res.Data)
+	}
+	events := evt.events()
+	if len(events) != 1 || events[0]["type"] != "admin.queue.action_run" {
+		t.Fatalf("requeue must write one admin.queue.action_run audit event, got %+v", events)
+	}
+
+	// Without a producer (no worker configured) the action is unavailable.
+	h := &QueueOpsHandler{db: fakeGorm(t, newFakeState())}
+	o2 := okapi.NewTestServer(t)
+	adminAuth := middlewares.JWTAdminAuth(&config.Config{JWTSecret: logsTestJWTSecret})
+	g := o2.Group("/admin", adminAuth.Middleware)
+	g.Post("/queue/actions/{action}", okapi.H(h.RunAction))
+	req := httptest.NewRequest(http.MethodPost, "/admin/queue/actions/requeue_stuck", nil)
+	req.Header.Set("Authorization", "Bearer "+logsTestJWT(t, "admin"))
+	rec := httptest.NewRecorder()
+	o2.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unconfigured requeue_stuck = %d, want 503", rec.Code)
+	}
+}
+
+// doQueueAdminJSON performs one request with a JSON body against the queue
+// admin test server.
+func doQueueAdminJSON(t *testing.T, o *okapi.TestServer, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+logsTestJWT(t, "admin"))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	o.ServeHTTP(rec, req)
+	return rec
 }

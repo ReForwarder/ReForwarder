@@ -30,6 +30,7 @@ import (
 	"github.com/goposta/posta/internal/dto"
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/audit"
+	"github.com/goposta/posta/internal/services/auth"
 	"github.com/goposta/posta/internal/services/clientinfo"
 	"github.com/goposta/posta/internal/services/emailverify"
 	"github.com/goposta/posta/internal/services/eventbus"
@@ -61,6 +62,13 @@ type UserHandler struct {
 	migrator      *workspaceprovision.Service
 	audit         *audit.Logger
 	recovery      *RecoveryCodeStore
+	// refresh issues the CA-03 rotating refresh tokens. nil when
+	// POSTA_REFRESH_TOKENS_ENABLED=false — logins then behave exactly as
+	// before this wave.
+	refresh *auth.RefreshTokenService
+	// appPasswords backs the SF-35/SF-67 app-password management surface.
+	// nil in bare test constructions.
+	appPasswords *repositories.UserAppPasswordRepository
 }
 
 func NewUserHandler(repo *repositories.UserRepository, jwtSecret string, seeder *seeder.Seeder, bus *eventbus.EventBus) *UserHandler {
@@ -81,6 +89,48 @@ func (h *UserHandler) SetMigrator(db *gorm.DB, m *workspaceprovision.Service) {
 // SetAuditLogger wires the audit trail so recovery-code logins are recorded.
 func (h *UserHandler) SetAuditLogger(a *audit.Logger) {
 	h.audit = a
+}
+
+// SetRefreshTokens wires the CA-03 refresh-token service. Pass nil (or don't
+// call this) to run without refresh tokens: logins then return no
+// refresh_token and POST /auth/refresh is not registered.
+func (h *UserHandler) SetRefreshTokens(s *auth.RefreshTokenService) {
+	h.refresh = s
+}
+
+// SetAppPasswordRepo wires the SF-35/SF-67 app-password store.
+func (h *UserHandler) SetAppPasswordRepo(r *repositories.UserAppPasswordRepository) {
+	h.appPasswords = r
+}
+
+// AppPasswordActiveHashes returns the still-active bcrypt digests of one
+// user's app passwords — the verification seam the ADR-004 mail-client auth
+// backends (IMAP/POP3/submission) call with credentials presented on the wire.
+func (h *UserHandler) AppPasswordActiveHashes(userID uint) ([]string, error) {
+	if h.appPasswords == nil {
+		return nil, fmt.Errorf("app passwords are not wired")
+	}
+	rows, err := h.appPasswords.FindActiveByUserID(userID)
+	if err != nil {
+		return nil, err
+	}
+	hashes := make([]string, 0, len(rows))
+	for _, r := range rows {
+		hashes = append(hashes, r.PasswordHash)
+	}
+	return hashes, nil
+}
+
+// twoFactorEnrollmentRequired implements the GAP-12 policy check: the
+// two_factor_required platform setting demands every account — admins
+// included — to have 2FA configured before it can complete a sign-in. There is
+// deliberately no admin exemption: the whole point of the policy is that an
+// administrator account without a second factor is the highest-value target.
+func (h *UserHandler) twoFactorEnrollmentRequired(user *models.User) bool {
+	if h.settings == nil || !h.settings.TwoFactorRequired() {
+		return false
+	}
+	return !user.TwoFactorEnabled
 }
 
 // recoveryCodes returns the recovery-code store, or nil when the handler was
@@ -138,14 +188,25 @@ type LoginRequest struct {
 	} `json:"body"`
 }
 
+// AuthUser is the public shape of the authenticated account in login payloads.
+type AuthUser struct {
+	ID    uint            `json:"id"`
+	Name  string          `json:"name"`
+	Email string          `json:"email"`
+	Role  models.UserRole `json:"role"`
+}
+
 type AuthResponse struct {
-	Token string `json:"token"`
-	User  struct {
-		ID    uint            `json:"id"`
-		Name  string          `json:"name"`
-		Email string          `json:"email"`
-		Role  models.UserRole `json:"role"`
-	} `json:"user"`
+	Token string   `json:"token"`
+	User  AuthUser `json:"user"`
+	// RefreshToken is the CA-03 single-use rotation token (POST /auth/refresh
+	// redeems it for a fresh pair). Empty when refresh tokens are disabled.
+	RefreshToken string `json:"refresh_token,omitempty"`
+	// TwoFactorEnrollmentRequired is the GAP-12 forced-enrollment marker: the
+	// two_factor_required policy applies and this account has no second factor
+	// yet. The dashboard must land the user on the 2FA setup card before
+	// anything else; see the Login handler's documentation for the full flow.
+	TwoFactorEnrollmentRequired bool `json:"two_factor_enrollment_required,omitempty"`
 }
 
 type UserProfile struct {
@@ -154,6 +215,7 @@ type UserProfile struct {
 	Email                     string          `json:"email"`
 	Role                      models.UserRole `json:"role"`
 	TwoFactorEnabled          bool            `json:"two_factor_enabled"`
+	TwoFactorEnrollmentRequired bool          `json:"two_factor_enrollment_required"`
 	RequireVerifiedDomain     bool            `json:"require_verified_domain"`
 	ScheduledDeletionAt       *time.Time      `json:"scheduled_deletion_at"`
 	EmailVerifiedAt           *time.Time      `json:"email_verified_at"`
@@ -280,22 +342,15 @@ func (h *UserHandler) Register(c *okapi.Context, req *RegisterRequest) error {
 		}
 	}
 
-	// Auto-login: generate JWT token
-	token, _, err := h.generateTokenWithSession(c, user)
+	// Auto-login: generate JWT token (and the CA-03 refresh token). A fresh
+	// account has no second factor, so with the GAP-12 policy on the response
+	// carries the enrollment marker just like a password login would.
+	resp, err := h.authResponse(c, user, h.twoFactorEnrollmentRequired(user))
 	if err != nil {
 		return c.AbortInternalServerError("failed to generate token", err)
 	}
-	session.SetCookie(c, token, jwtTokenTTL)
 
-	return created(c, AuthResponse{
-		Token: token,
-		User: struct {
-			ID    uint            `json:"id"`
-			Name  string          `json:"name"`
-			Email string          `json:"email"`
-			Role  models.UserRole `json:"role"`
-		}{ID: user.ID, Name: user.Name, Email: user.Email, Role: user.Role},
-	})
+	return created(c, resp)
 }
 
 func (h *UserHandler) RegistrationStatus(c *okapi.Context) error {
@@ -464,6 +519,14 @@ func (h *UserHandler) ChangePassword(c *okapi.Context, req *ChangePasswordReques
 		return c.AbortInternalServerError("failed to update password")
 	}
 
+	// CA-03 hygiene: a password change revokes every live refresh token, so a
+	// stolen long-lived credential cannot outlive the new password.
+	if h.refresh != nil {
+		if err := h.refresh.RevokeAllForUser(user.ID); err != nil {
+			logger.Error("failed to revoke refresh tokens after password change", "user_id", user.ID, "err", err)
+		}
+	}
+
 	// Send password change notification (best-effort)
 	if h.notifier != nil {
 		go func() {
@@ -485,6 +548,27 @@ func (h *UserHandler) publishLoginFailed(actorID *uint, email, ip, reason string
 		map[string]any{"reason": reason})
 }
 
+// Login authenticates with email + password (+ TOTP when enrolled).
+//
+// GAP-12 forced-enrollment flow: when the two_factor_required policy is on and
+// the account has no second factor configured, the login DOES complete — the
+// account holder has proven their password — but the response carries the
+// forced-enrollment marker `two_factor_enrollment_required` and the dashboard
+// is required to land the user on the 2FA setup card (Login.vue redirects to
+// /profile?setup=2fa) before any other screen. The policy has no admin
+// exemption: an administrator without a second factor is exactly the account
+// the setting exists to protect.
+//
+// Users WITH 2FA keep the unchanged flow: a missing code answers the
+// requires_2fa pending marker, and the code (or a single-use R-10 recovery
+// code) completes the sign-in.
+//
+// Documented limitation (residual of this wave): the enforcement point is the
+// login response and the dashboard redirect; the middleware layer does not yet
+// refuse API calls from a session whose account owes enrollment (the
+// middleware package was out of scope here), and the profile endpoint exposes
+// `two_factor_enrollment_required` so the dashboard can keep the banner up
+// until 2FA is enabled.
 func (h *UserHandler) Login(c *okapi.Context, req *LoginRequest) error {
 	user, err := h.repo.FindByEmail(req.Body.Email)
 	if err != nil {
@@ -501,6 +585,12 @@ func (h *UserHandler) Login(c *okapi.Context, req *LoginRequest) error {
 		h.publishLoginFailed(&user.ID, user.Email, c.RealIP(), "inactive")
 		return c.AbortForbidden("account is disabled")
 	}
+
+	// GAP-12: the enrollment policy is evaluated on the verified account —
+	// admins included — before the second factor is consulted. An un-enrolled
+	// account skips the TOTP step entirely (there is nothing to type yet) and
+	// the completion below stamps the marker on the response.
+	enrollmentRequired := h.twoFactorEnrollmentRequired(user)
 
 	// Check 2FA
 	if user.TwoFactorEnabled {
@@ -545,28 +635,55 @@ func (h *UserHandler) Login(c *okapi.Context, req *LoginRequest) error {
 	ua := c.Header("User-Agent")
 	newDevice := h.isNewDevice(user.ID, ua)
 
-	token, _, err := h.generateTokenWithSession(c, user)
+	resp, err := h.authResponse(c, user, enrollmentRequired)
 	if err != nil {
 		return c.AbortInternalServerError("failed to generate token", err)
+	}
+
+	if newDevice {
+		h.sendLoginAlert(user.ID, ua, c.RealIP())
+	}
+
+	return ok(c, resp)
+}
+
+// authResponse mints the access JWT (unchanged semantics: same claims, session
+// row, and cookie), issues the CA-03 refresh token when the service is wired,
+// and stamps the GAP-12 enrollment marker. Shared by the password login, the
+// registration auto-login, and the passkey login.
+func (h *UserHandler) authResponse(c *okapi.Context, user *models.User, enrollmentRequired bool) (AuthResponse, error) {
+	token, _, err := h.generateTokenWithSession(c, user)
+	if err != nil {
+		return AuthResponse{}, err
 	}
 
 	// Browser clients ride the HttpOnly cookie; the body's token remains for
 	// CLI/SDK clients, which send it back as a Bearer header.
 	session.SetCookie(c, token, jwtTokenTTL)
 
-	if newDevice {
-		h.sendLoginAlert(user.ID, ua, c.RealIP())
+	refreshToken := ""
+	if h.refresh != nil {
+		rt, rerr := h.refresh.Issue(user.ID)
+		if rerr != nil {
+			// The session is valid without the refresh token; failing the whole
+			// login over the long-lived credential would be the wrong trade.
+			logger.Error("failed to issue refresh token", "user_id", user.ID, "err", rerr)
+		} else {
+			refreshToken = rt
+		}
 	}
 
-	return ok(c, AuthResponse{
-		Token: token,
-		User: struct {
-			ID    uint            `json:"id"`
-			Name  string          `json:"name"`
-			Email string          `json:"email"`
-			Role  models.UserRole `json:"role"`
-		}{ID: user.ID, Name: user.Name, Email: user.Email, Role: user.Role},
-	})
+	return AuthResponse{
+		Token:                       token,
+		RefreshToken:                refreshToken,
+		TwoFactorEnrollmentRequired: enrollmentRequired,
+		User: AuthUser{
+			ID:    user.ID,
+			Name:  user.Name,
+			Email: user.Email,
+			Role:  user.Role,
+		},
+	}, nil
 }
 
 // consumeRecoveryCode burns a single-use 2FA recovery code (R-10). A handler
@@ -592,18 +709,19 @@ func (h *UserHandler) Me(c *okapi.Context) error {
 func (h *UserHandler) buildProfile(c *okapi.Context, user *models.User) UserProfile {
 	required := h.emailVerifier != nil && h.emailVerifier.Required()
 	profile := UserProfile{
-		ID:                        user.ID,
-		Name:                      user.Name,
-		Email:                     user.Email,
-		Role:                      user.Role,
-		TwoFactorEnabled:          user.TwoFactorEnabled,
-		RequireVerifiedDomain:     user.RequireVerifiedDomain,
-		ScheduledDeletionAt:       user.ScheduledDeletionAt,
-		EmailVerifiedAt:           user.EmailVerifiedAt,
-		EmailVerificationRequired: required,
-		DefaultWorkspaceID:        user.DefaultWorkspaceID,
-		PersonalWorkspaceID:       user.DefaultWorkspaceID,
-		CreatedAt:                 user.CreatedAt,
+		ID:                          user.ID,
+		Name:                        user.Name,
+		Email:                       user.Email,
+		Role:                        user.Role,
+		TwoFactorEnabled:            user.TwoFactorEnabled,
+		TwoFactorEnrollmentRequired: h.twoFactorEnrollmentRequired(user),
+		RequireVerifiedDomain:       user.RequireVerifiedDomain,
+		ScheduledDeletionAt:         user.ScheduledDeletionAt,
+		EmailVerifiedAt:             user.EmailVerifiedAt,
+		EmailVerificationRequired:   required,
+		DefaultWorkspaceID:          user.DefaultWorkspaceID,
+		PersonalWorkspaceID:         user.DefaultWorkspaceID,
+		CreatedAt:                   user.CreatedAt,
 	}
 	// R-20: an impersonation session surfaces who is acting, so the dashboard
 	// can banner "Viewing as …" instead of silently operating as someone else.
@@ -830,7 +948,8 @@ func (h *UserHandler) IssueSession(c *okapi.Context, user *models.User, extraCla
 // CompletePasskeyLogin finishes a successful passkey authentication exactly
 // like the password login completes: workspace provisioning, last-login
 // bookkeeping, the login event, new-device alerting, and the JWT + session
-// issue (R-19). Called by the WebAuthn handler once the assertion has verified.
+// issue (R-19) — plus the GAP-12 enrollment marker and the CA-03 refresh
+// token. Called by the WebAuthn handler once the assertion has verified.
 func (h *UserHandler) CompletePasskeyLogin(c *okapi.Context, user *models.User) (AuthResponse, error) {
 	h.ensurePersonalWorkspace(user.ID)
 
@@ -849,28 +968,16 @@ func (h *UserHandler) CompletePasskeyLogin(c *okapi.Context, user *models.User) 
 	ua := c.Header("User-Agent")
 	newDevice := h.isNewDevice(user.ID, ua)
 
-	token, _, err := h.IssueSession(c, user, nil)
+	resp, err := h.authResponse(c, user, h.twoFactorEnrollmentRequired(user))
 	if err != nil {
 		return AuthResponse{}, c.AbortInternalServerError("failed to generate token", err)
 	}
-
-	// Browser clients ride the HttpOnly cookie; the body's token remains for
-	// CLI/SDK clients, which send it back as a Bearer header.
-	session.SetCookie(c, token, jwtTokenTTL)
 
 	if newDevice {
 		h.sendLoginAlert(user.ID, ua, c.RealIP())
 	}
 
-	return AuthResponse{
-		Token: token,
-		User: struct {
-			ID    uint            `json:"id"`
-			Name  string          `json:"name"`
-			Email string          `json:"email"`
-			Role  models.UserRole `json:"role"`
-		}{ID: user.ID, Name: user.Name, Email: user.Email, Role: user.Role},
-	}, nil
+	return resp, nil
 }
 
 // validateSecondFactor checks a second-factor code for a passkey login: the
@@ -881,6 +988,60 @@ func (h *UserHandler) validateSecondFactor(user *models.User, code string) bool 
 		return true
 	}
 	return h.consumeRecoveryCode(user.ID, code)
+}
+
+// RefreshRequest is the CA-03 redemption body for POST /auth/refresh.
+type RefreshRequest struct {
+	Body struct {
+		RefreshToken string `json:"refresh_token" required:"true"`
+	} `json:"body"`
+}
+
+// Refresh rotates a refresh token (CA-03): the presented single-use token is
+// consumed atomically and replaced by a successor in the same rotation family,
+// and a fresh access JWT — same claims, session row, and JTI semantics as a
+// login-issued one — is minted for the token's owner.
+//
+// Reuse detection: presenting a token that was already rotated revokes the
+// entire family before the 401 is returned, so a stolen token chain cannot be
+// ridden in parallel with its legitimate owner. All failures read as one
+// generic 401 — no oracle for which tokens exist.
+func (h *UserHandler) Refresh(c *okapi.Context, req *RefreshRequest) error {
+	if h.refresh == nil {
+		return c.AbortBadRequest("refresh tokens are not enabled")
+	}
+
+	newToken, userID, err := h.refresh.Rotate(req.Body.RefreshToken)
+	if err != nil {
+		_ = err // reuse vs invalid reads identically on the wire
+		return c.AbortUnauthorized("invalid or expired refresh token")
+	}
+
+	user, err := h.repo.FindByID(userID)
+	if err != nil || user == nil {
+		return c.AbortUnauthorized("invalid or expired refresh token")
+	}
+	if !user.Active {
+		// A disabled account cannot keep refreshing; kill the family too.
+		_ = h.refresh.RevokeAllForUser(userID)
+		return c.AbortForbidden("account is disabled")
+	}
+
+	token, _, err := h.IssueSession(c, user, nil)
+	if err != nil {
+		return c.AbortInternalServerError("failed to generate token", err)
+	}
+
+	return ok(c, AuthResponse{
+		Token:        token,
+		RefreshToken: newToken,
+		User: AuthUser{
+			ID:    user.ID,
+			Name:  user.Name,
+			Email: user.Email,
+			Role:  user.Role,
+		},
+	})
 }
 
 // claimToUint normalizes a JWT claim value (a float64 once decoded from JSON)

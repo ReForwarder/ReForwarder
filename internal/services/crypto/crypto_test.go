@@ -20,6 +20,7 @@
 package crypto
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -50,20 +51,44 @@ func TestEncryptDecryptWithKey(t *testing.T) {
 func TestEncryptWithoutKey(t *testing.T) {
 	Init("")
 
+	// SF-78: without a configured key Encrypt must REFUSE, not fall back to
+	// base64-obfuscated plaintext.
 	encoded, err := Encrypt("my-password")
-	if err != nil {
-		t.Fatalf("Encrypt failed: %v", err)
+	if err == nil {
+		t.Fatal("Encrypt without a key must fail, got success")
 	}
-	if strings.HasPrefix(encoded, "enc:") {
-		t.Fatal("without key, should use base64 not enc: prefix")
+	if !errors.Is(err, ErrEncryptionDisabled) {
+		t.Fatalf("error = %v, want ErrEncryptionDisabled", err)
 	}
+	if encoded != "" {
+		t.Fatalf("refused encryption returned data: %q", encoded)
+	}
+}
 
-	decoded, err := Decrypt(encoded)
+// The migration path: rows written by the old base64 fallback must keep
+// decrypting, both with and without a key configured.
+func TestDecryptLegacyBase64WithoutKey(t *testing.T) {
+	Init("")
+
+	decoded, err := Decrypt("bXktcGFzc3dvcmQ=")
 	if err != nil {
-		t.Fatalf("Decrypt failed: %v", err)
+		t.Fatalf("Decrypt legacy without key failed: %v", err)
 	}
 	if decoded != "my-password" {
 		t.Fatalf("got %q, want %q", decoded, "my-password")
+	}
+}
+
+// An "enc:" row cannot be opened without the key — that stays a hard error.
+func TestDecryptEncryptedWithoutKeyFails(t *testing.T) {
+	Init("some-key")
+	enc, err := Encrypt("secret-material")
+	if err != nil {
+		t.Fatalf("Encrypt failed: %v", err)
+	}
+	Init("") // "lost" the key
+	if _, err := Decrypt(enc); err == nil {
+		t.Fatal("Decrypt of an enc: row without a key must fail")
 	}
 }
 

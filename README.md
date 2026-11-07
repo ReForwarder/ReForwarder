@@ -290,7 +290,6 @@ Planning details live in `docs/project/`: [FEATURE_INVENTORY.md](docs/project/FE
 
 ### To-dos
 
-- [ ] [RF-F006] two_factor_required policy setting
 - [ ] [RF-F023] DNS record guidance depth (SPF/DMARC parsing, MX records, drift re-verification)
 - [ ] [RF-F029] Custom tracking domain
 - [ ] [RF-F040] Per-domain inbound routing rules (alias/catch-all/forward targets)
@@ -309,12 +308,11 @@ Planning details live in `docs/project/`: [FEATURE_INVENTORY.md](docs/project/FE
 - [ ] [RF-F099] Delivered-state analytics, email.delivered emission, and dead delivered UI paths
 - [ ] [RF-F100] Tracking toggle symmetry
 - [ ] [RF-F101] Contact Lists pages — dead end-to-end (handler never registered, views unrouted)
-- [ ] [RF-F102] Dead admin API client methods with no backend routes (listApiKeys / revokeApiKey / listEmails)
 - [ ] [RF-F103] Backend endpoints with no UI consumer / dead client functions (segments contacts, message analytics & assign, automation custom-event ingest, admin provider breakdown)
-- [ ] [RF-F104] Campaign duplication backend-only; campaigns cannot be edited from the UI
 
 ### In Progress
 
+- [ ] [RF-F104] Campaign duplication UI wired (2026-11-07); residual: campaign-level failed-recipient retry
 - [ ] [RF-F005] 2FA recovery codes
 - [ ] [RF-F014] Passkeys / WebAuthn
 - [ ] [RF-F015] Admin impersonation
@@ -335,6 +333,7 @@ _None._
 - [x] [RF-F002] Per-IP login rate limiting
 - [x] [RF-F003] Session lifecycle (JWT sessions, revocation, device list)
 - [x] [RF-F004] Two-factor authentication (TOTP)
+- [x] [RF-F006] two_factor_required policy enforcement (GAP-12) — marker + forced-enrollment redirect; admins not exempt (2026-11-07)
 - [x] [RF-F007] Workspace RBAC (owner/admin/editor/viewer)
 - [x] [RF-F008] Workspaces / tenants (CRUD, system workspace, personal provisioning, default workspace)
 - [x] [RF-F009] Workspace invitations
@@ -405,6 +404,7 @@ _None._
 - [x] [RF-F096] Prometheus metrics and health probes
 - [x] [RF-F098] REST API response envelope and OpenAPI documentation
 - [x] [RF-F105] Core dashboard integration surface (verified end-to-end at contract level)
+- [x] [RF-F102] Dead admin API client methods removed (listApiKeys / revokeApiKey / listEmails — CA-02, 2026-11-07)
 
 ---
 

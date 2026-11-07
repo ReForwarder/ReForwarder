@@ -20,6 +20,7 @@
 package handlers
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"database/sql/driver"
@@ -29,6 +30,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -37,6 +40,7 @@ import (
 	"github.com/goposta/posta/internal/config"
 	"github.com/goposta/posta/internal/middlewares"
 	"github.com/goposta/posta/internal/services/emailhistory"
+	"github.com/goposta/posta/internal/services/provider_events"
 	"github.com/goposta/posta/internal/services/settings"
 	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/jkaninda/okapi"
@@ -183,6 +187,11 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		return c.handleInsert(query, args)
 	}
 	if tbl, ok := c.matchTable(lower); ok {
+		// The classification aggregate groups by the (possibly quoted)
+		// "classification" alias — match the alias, not the exact spelling.
+		if strings.Contains(lower, "group by") && strings.Contains(lower, "classification") {
+			return c.classificationAggregate(tbl, args)
+		}
 		if strings.Contains(lower, "count(") {
 			return &fakeRows{columns: []string{"count"}, rows: [][]driver.Value{{int64(len(tbl.rows))}}}, nil
 		}
@@ -191,6 +200,104 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 	}
 	// Unknown statements answer with an empty set.
 	return &fakeRows{columns: []string{"x"}}, nil
+}
+
+// classificationAggregate answers the provider_events classification query
+// (COUNT(*) … GROUP BY classification over email_events.metadata): each
+// seeded row's metadata JSON is parsed for the classification the real query
+// extracts with metadata->>'classification', and the bound workspace /
+// occurred-at filters are applied — time args in bind order are the window's
+// from (inclusive) and to (exclusive).
+func (c *fakeConn) classificationAggregate(tbl fakeTable, args []driver.NamedValue) (driver.Rows, error) {
+	c.state.mu.Lock()
+	defer c.state.mu.Unlock()
+
+	var wsFilter *int64
+	var timeBounds []*time.Time
+	for _, a := range args {
+		switch v := a.Value.(type) {
+		case int64:
+			x := v
+			wsFilter = &x
+		case uint64:
+			x := int64(v)
+			wsFilter = &x
+		case float64:
+			x := int64(v)
+			wsFilter = &x
+		case time.Time:
+			t := v
+			timeBounds = append(timeBounds, &t)
+		}
+	}
+	var from, to *time.Time
+	if len(timeBounds) > 0 {
+		from = timeBounds[0]
+	}
+	if len(timeBounds) > 1 {
+		to = timeBounds[1]
+	}
+
+	col := func(name string) int {
+		for i, c := range tbl.columns {
+			if c == name {
+				return i
+			}
+		}
+		return -1
+	}
+	wsCol, tsCol, metaCol := col("workspace_id"), col("occurred_at"), col("metadata")
+
+	counts := map[string]int64{}
+	for _, row := range tbl.rows {
+		if wsCol >= 0 {
+			if wsFilter == nil {
+				continue // the query is always workspace-pinned
+			}
+			switch v := row[wsCol].(type) {
+			case int64:
+				if v != *wsFilter {
+					continue
+				}
+			case uint64:
+				if int64(v) != *wsFilter {
+					continue
+				}
+			default:
+				continue // NULL workspace never matches a workspace filter
+			}
+		}
+		if tsCol >= 0 {
+			ts, _ := row[tsCol].(time.Time)
+			if from != nil && ts.Before(*from) {
+				continue
+			}
+			if to != nil && !ts.Before(*to) {
+				continue
+			}
+		}
+		var meta map[string]any
+		raw, _ := row[metaCol].(string)
+		if raw == "" || json.Unmarshal([]byte(raw), &meta) != nil {
+			continue
+		}
+		cls, _ := meta["classification"].(string)
+		if cls == "" {
+			continue // metadata->>'classification' IS NOT NULL
+		}
+		counts[cls]++
+	}
+
+	keys := make([]string, 0, len(counts))
+	for k := range counts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	rows := make([][]driver.Value, 0, len(keys))
+	for _, k := range keys {
+		rows = append(rows, []driver.Value{k, counts[k]})
+	}
+	return &fakeRows{columns: []string{"classification", "count"}, rows: rows}, nil
 }
 
 // selectedColumns honors the query's SELECT list: like a real database, only
@@ -350,9 +457,14 @@ var testWorkspaceBinding okapi.Middleware = func(c *okapi.Context) error {
 
 // newLogsServer registers the logs routes with the real authentication
 // middleware (nil API-key collaborators are safe: only JWTs are presented).
-func newLogsServer(t *testing.T, db *gorm.DB, sp *settings.Provider) *okapi.TestServer {
+// Optional opts decorate the handler before routing (used to wire test
+// doubles for the newer endpoints).
+func newLogsServer(t *testing.T, db *gorm.DB, sp *settings.Provider, opts ...func(*LogsHandler)) *okapi.TestServer {
 	t.Helper()
 	h := NewLogsHandler(db, emailhistory.NewRecorder(nil), sp)
+	for _, opt := range opts {
+		opt(h)
+	}
 	o := okapi.NewTestServer(t)
 	g := o.Group("/workspaces/current",
 		middlewares.Authenticate(middlewares.JWTAuth(&config.Config{JWTSecret: logsTestJWTSecret}), nil, nil, nil),
@@ -365,6 +477,8 @@ func newLogsServer(t *testing.T, db *gorm.DB, sp *settings.Provider) *okapi.Test
 	g.Get("/logs/incoming-webhooks/{id:int}", okapi.H(h.GetIncomingWebhook))
 	g.Get("/logs/audit", okapi.H(h.ListAudit))
 	g.Get("/logs/audit/export", h.ExportAudit)
+	g.Get("/logs/classifications", okapi.H(h.ListClassifications))
+	g.Get("/logs/{uuid}/events/stream", okapi.H(h.StreamMessageEvents))
 	return o
 }
 
@@ -797,5 +911,216 @@ func TestLogsAuditExport(t *testing.T) {
 	rec = doLogsReq(o, "/workspaces/current/logs/audit/export?scope=deployment", userToken, "3")
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("export deployment scope as user = %d, want 403", rec.Code)
+	}
+}
+
+// ---------- Classifications (SF-53) ----------
+
+// seedClassificationEvents loads a timeline with classified rows for two
+// workspaces plus unclassified rows, so the breakdown's counting, window and
+// workspace scoping are all observable.
+func seedClassificationEvents(state *fakeState) {
+	state.tables["email_events"] = fakeTable{
+		columns: []string{
+			"id", "email_uuid", "workspace_id", "type", "occurred_at", "provider",
+			"provider_event_id", "recipient", "ip", "user_agent", "url", "error",
+			"metadata", "created_at",
+		},
+		rows: [][]driver.Value{
+			{int64(1), "em-1", int64(3), "bounced", logsTestTime, "postmark", "", "a@x.y", "", "", "", "", `{"classification":"bad_domain"}`, logsTestTime},
+			{int64(2), "em-2", int64(3), "bounced", logsTestTime.Add(-time.Hour), "ses", "", "b@x.y", "", "", "", "", `{"classification":"mailbox_not_found"}`, logsTestTime},
+			{int64(3), "em-3", int64(3), "failed", logsTestTime.Add(2 * time.Hour), "ses", "", "c@x.y", "", "", "", "", `{"classification":"bad_domain"}`, logsTestTime},
+			// Another workspace's row must never leak into workspace 3's counts.
+			{int64(4), "em-4", int64(5), "bounced", logsTestTime, "postmark", "", "d@x.y", "", "", "", "", `{"classification":"bad_domain"}`, logsTestTime},
+			// Unclassified rows are excluded by the query's metadata predicate.
+			{int64(5), "em-5", int64(3), "sent", logsTestTime, "", "", "e@x.y", "", "", "", "", `{}`, logsTestTime},
+		},
+	}
+}
+
+// The classifications endpoint serves the ingestion service's workspace-scoped
+// aggregate over the fake database: happy path, time window, and 400s on
+// malformed bounds.
+func TestLogsClassifications(t *testing.T) {
+	state := newFakeState()
+	seedClassificationEvents(state)
+	db := fakeGorm(t, state)
+	// The real provider_events service runs its real query through the fake
+	// driver — the handler is exercised against the genuine aggregate.
+	svc := provider_events.NewIngestionService(nil, nil)
+	svc.SetDB(db)
+	o := newLogsServer(t, db, settingsProvider(t, state), func(h *LogsHandler) {
+		h.SetClassificationCounter(svc)
+	})
+
+	rec := doLogsReq(o, "/workspaces/current/logs/classifications", logsTestJWT(t, "admin"), "3")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("classifications = %d: %s", rec.Code, rec.Body.String())
+	}
+	var res struct {
+		Data struct {
+			Counts map[string]int64 `json:"counts"`
+			Total  int64            `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if res.Data.Counts["bad_domain"] != 2 || res.Data.Counts["mailbox_not_found"] != 1 {
+		t.Fatalf("counts wrong: %+v", res.Data.Counts)
+	}
+	if res.Data.Total != 3 {
+		t.Fatalf("total = %d, want 3", res.Data.Total)
+	}
+
+	// The time window bounds the aggregate: rows 2 (-1h) and 3 (+2h) fall
+	// outside [-30m, +30m], leaving only row 1.
+	rec = doLogsReq(o,
+		"/workspaces/current/logs/classifications?from="+url.QueryEscape(logsTestTime.Add(-30*time.Minute).Format(time.RFC3339))+
+			"&to="+url.QueryEscape(logsTestTime.Add(30*time.Minute).Format(time.RFC3339)),
+		logsTestJWT(t, "admin"), "3")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("windowed classifications = %d: %s", rec.Code, rec.Body.String())
+	}
+	var windowed struct {
+		Data struct {
+			Counts map[string]int64 `json:"counts"`
+			Total  int64            `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &windowed); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if windowed.Data.Counts["bad_domain"] != 1 || windowed.Data.Total != 1 {
+		t.Fatalf("windowed counts wrong: %+v", windowed.Data)
+	}
+
+	// Malformed bounds are client errors.
+	if rec := doLogsReq(o, "/workspaces/current/logs/classifications?from=bogus", logsTestJWT(t, "admin"), "3"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad from = %d, want 400", rec.Code)
+	}
+	if rec := doLogsReq(o, "/workspaces/current/logs/classifications?to=bogus", logsTestJWT(t, "admin"), "3"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad to = %d, want 400", rec.Code)
+	}
+}
+
+// Without the counter wired (no ingestion service in this deployment) the
+// endpoint degrades to 503 instead of reporting an empty breakdown.
+func TestLogsClassificationsUnavailableWithoutCounter(t *testing.T) {
+	state := newFakeState()
+	seedClassificationEvents(state)
+	db := fakeGorm(t, state)
+	o := newLogsServer(t, db, settingsProvider(t, state))
+
+	rec := doLogsReq(o, "/workspaces/current/logs/classifications", logsTestJWT(t, "admin"), "3")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("no-counter classifications = %d, want 503", rec.Code)
+	}
+}
+
+// ---------- Message events live stream (SF-56) ----------
+
+// The per-message SSE stream completes the handshake, opens at the newest
+// existing event, and delivers rows recorded after the client connected as
+// email.event frames within one poll tick.
+func TestLogsMessageEventsStream(t *testing.T) {
+	state := newFakeState()
+	seedEmails(state) // em-1, workspace 3, newest event id=5
+	db := fakeGorm(t, state)
+	o := newLogsServer(t, db, settingsProvider(t, state))
+	srv := httptest.NewServer(o)
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		srv.URL+"/workspaces/current/logs/em-1/events/stream", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+logsTestJWT(t, "admin"))
+	req.Header.Set("X-Test-Workspace", "3")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("stream request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stream status = %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Fatalf("content-type = %q, want text/event-stream", ct)
+	}
+
+	// Record a new timeline row once the stream is definitively past its
+	// initial snapshot: the handshake flush makes the client's Do return
+	// before the handler has necessarily computed its lastID watermark, so
+	// appending immediately could race the row into the "history" side. Half
+	// a second is far beyond that window and still well under one tick.
+	time.Sleep(500 * time.Millisecond)
+	state.mu.Lock()
+	tbl := state.tables["email_events"]
+	tbl.rows = append(tbl.rows, []driver.Value{
+		int64(6), "em-1", int64(3), "delivered", logsTestTime.Add(time.Minute), "postmark",
+		"", "a@x.y", "", "", "", "", `{"classification":"delivered"}`, logsTestTime,
+	})
+	state.tables["email_events"] = tbl
+	state.mu.Unlock()
+
+	scanner := bufio.NewScanner(resp.Body)
+	foundEvent := false
+	var payload string
+	var seen []string
+	for scanner.Scan() {
+		line := scanner.Text()
+		seen = append(seen, line)
+		if line == "event: email.event" {
+			foundEvent = true
+			continue
+		}
+		if foundEvent && strings.HasPrefix(line, "data:") {
+			payload = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			break
+		}
+	}
+	cancel()
+	if !foundEvent {
+		t.Fatalf("no email.event frame within the deadline; lines read: %q (scan err: %v)", seen, scanner.Err())
+	}
+	var evt struct {
+		ID    uint   `json:"id"`
+		Type  string `json:"type"`
+		Email string `json:"email_uuid"`
+	}
+	if err := json.Unmarshal([]byte(payload), &evt); err != nil {
+		t.Fatalf("decode frame %q: %v", payload, err)
+	}
+	if evt.ID != 6 || evt.Type != "delivered" || evt.Email != "em-1" {
+		t.Fatalf("streamed event wrong: %+v", evt)
+	}
+}
+
+// The stream is scoped like every message endpoint: a message outside the
+// caller's workspace answers 404 and an unauthenticated request is rejected by
+// the middleware. (The fake driver answers every uuid lookup with the seeded
+// row — it does not emulate WHERE — so the unknown-message 404 is not
+// exercisable at this layer; the repository tests cover the lookup itself.)
+func TestLogsMessageEventsStreamAuthz(t *testing.T) {
+	state := newFakeState()
+	seedEmails(state)
+	db := fakeGorm(t, state)
+	o := newLogsServer(t, db, settingsProvider(t, state))
+
+	// Another workspace's message.
+	rec := doLogsReq(o, "/workspaces/current/logs/em-1/events/stream", logsTestJWT(t, "admin"), "4")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("foreign message stream = %d, want 404", rec.Code)
+	}
+	// No session.
+	req := httptest.NewRequest(http.MethodGet, "/workspaces/current/logs/em-1/events/stream", nil)
+	rec2 := httptest.NewRecorder()
+	o.ServeHTTP(rec2, req)
+	if rec2.Code == http.StatusOK {
+		t.Fatalf("unauthenticated stream = %d, want 401/403", rec2.Code)
 	}
 }

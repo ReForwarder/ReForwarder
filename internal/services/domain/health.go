@@ -21,6 +21,7 @@ package domain
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -44,15 +45,33 @@ type HealthService struct {
 	// stats reads the sending numbers; a field so tests inject a fake instead
 	// of a database.
 	stats SendingStatsReader
+	// lookupPTR resolves reverse-DNS names for the outbound bind IP
+	// (OB-1 PTR guidance slice, ADR-001 §7); a field so tests inject a fake.
+	lookupPTR func(ip string) ([]string, error)
+	// ehloDomain is the process EHLO name (POSTA_MTA_EHLO_NAME); the PTR
+	// match check targets it, falling back to the sending domain.
+	ehloDomain string
 }
 
 func NewHealthService(db *gorm.DB, keyRepo *repositories.DomainSigningKeyRepository) *HealthService {
 	return &HealthService{
-		db:      db,
-		keyRepo: keyRepo,
-		verify:  Verify,
-		now:     time.Now,
-		stats:   &gormSendingStats{db: db},
+		db:        db,
+		keyRepo:   keyRepo,
+		verify:    Verify,
+		now:       time.Now,
+		stats:     &gormSendingStats{db: db},
+		lookupPTR: net.LookupAddr,
+	}
+}
+
+// SetEhloDomain sets the process EHLO name the PTR match check compares
+// against (guidance only — never enforced at delivery time).
+func (s *HealthService) SetEhloDomain(d string) { s.ehloDomain = d }
+
+// SetPTRLookup overrides the reverse-DNS resolver (tests).
+func (s *HealthService) SetPTRLookup(fn func(ip string) ([]string, error)) {
+	if fn != nil {
+		s.lookupPTR = fn
 	}
 }
 
@@ -114,7 +133,30 @@ type HealthReport struct {
 	Signing           SigningStatus `json:"signing"`
 	Sending           SendingHealth `json:"sending"`
 	Records           *DNSRecords   `json:"records,omitempty"`
-	CheckedAt         time.Time     `json:"checked_at"`
+	// PTR surfaces reverse-DNS guidance for the outbound bind IP (OB-1,
+	// ADR-001 §7 — guidance only, never enforced at delivery). nil when the
+	// domain is not in direct mode.
+	PTR       *PTRGuidance `json:"ptr,omitempty"`
+	CheckedAt time.Time    `json:"checked_at"`
+}
+
+// PTR match verdicts for PTRGuidance.Match.
+const (
+	PTRMatchUnbound  = "unbound"  // direct mode but no outbound bind IP configured
+	PTRMatchMissing  = "missing"  // the bound IP resolves to no PTR name
+	PTRMatchMatch    = "match"    // PTR name matches the EHLO/sending identity
+	PTRMatchMismatch = "mismatch" // PTR name differs from the EHLO identity
+)
+
+// PTRGuidance surfaces reverse-DNS guidance for the domain's outbound bind
+// IP (SF-32 partial slice): the PTR name the IP resolves to, whether it
+// matches the EHLO/sending domain, and the operator instruction when it
+// doesn't. Guidance text only in this phase.
+type PTRGuidance struct {
+	BoundIP  string `json:"bound_ip,omitempty"`
+	PTRName  string `json:"ptr_name,omitempty"`
+	Match    string `json:"match"`
+	Guidance string `json:"guidance,omitempty"`
 }
 
 // Report assembles the health view from stored state — no DNS traffic. The
@@ -163,6 +205,7 @@ func (s *HealthService) report(d *models.Domain, window time.Duration, live *Ver
 		DKIM:    checkResult(dkimOK, dkimRecord, dkimGuidance(d, records.DKIM, records.Verification)),
 		DMARC:   checkResult(dmarcOK, dmarcRecord, dmarcGuidance(records.DMARC)),
 		Signing: s.signingStatus(d),
+		PTR:     s.ptrGuidance(d),
 	}
 
 	if s.stats != nil && ownership {
@@ -241,6 +284,66 @@ func dmarcGuidance(rec DNSRecord) string {
 func dkimSigningGuidance(d *models.Domain) string {
 	return fmt.Sprintf("No managed signing key for %s yet — create one to sign outbound mail, or keep the CNAME at posta._domainkey.%s pointing at an upstream signer.", d.Domain, d.Domain)
 }
+
+// ptrGuidance builds the reverse-DNS view for the domain's outbound bind IP
+// (OB-1, ADR-001 §7). Present only for direct-mode domains; guidance text
+// only — the delivery path never enforces a PTR match in this phase.
+func (s *HealthService) ptrGuidance(d *models.Domain) *PTRGuidance {
+	if d.DeliveryMode != models.DeliveryModeDirect {
+		return nil
+	}
+	bindIP := strings.TrimSpace(d.OutboundBindIP)
+	target := s.ehloTarget(d)
+	if bindIP == "" {
+		return &PTRGuidance{
+			Match: PTRMatchUnbound,
+			Guidance: fmt.Sprintf("Direct delivery for %s has no outbound bind IP set. Configure one and publish a PTR (reverse DNS) record pointing that IP at your EHLO hostname (%s); major receivers weigh the PTR/forward-confirmation heavily for direct senders.", d.Domain, target),
+		}
+	}
+	names, err := s.lookupPTR(bindIP)
+	if err != nil || len(names) == 0 {
+		return &PTRGuidance{
+			BoundIP: bindIP,
+			Match:   PTRMatchMissing,
+			Guidance: fmt.Sprintf("The outbound bind IP %s resolves to no PTR (reverse DNS) record. Publish one pointing at your EHLO hostname (%s); without it, direct mail from %s is likely to be deferred or rejected by major receivers.", bindIP, target, d.Domain),
+		}
+	}
+	ptr := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(names[0])), ".")
+	g := &PTRGuidance{BoundIP: bindIP, PTRName: ptr}
+	if s.ptrMatches(ptr, d) {
+		g.Match = PTRMatchMatch
+		g.Guidance = fmt.Sprintf("PTR %s matches the EHLO identity — direct mail from %s presents a consistent sending source.", ptr, d.Domain)
+		return g
+	}
+	g.Match = PTRMatchMismatch
+	g.Guidance = fmt.Sprintf("PTR %s does not match the EHLO identity (%s). Point the PTR record at the EHLO hostname, or align POSTA_MTA_EHLO_NAME with it — a mismatch is a common reason direct deliveries land in spam.", ptr, target)
+	return g
+}
+
+// ehloTarget is the identity the PTR check compares against: the configured
+// process EHLO name when set, otherwise the sending domain itself.
+func (s *HealthService) ehloTarget(d *models.Domain) string {
+	if name := strings.ToLower(strings.TrimSpace(s.ehloDomain)); name != "" && name != DefaultHealthEhloDomain {
+		return name
+	}
+	return strings.ToLower(d.Domain)
+}
+
+// ptrMatches reports whether the PTR name equals the sending domain or the
+// configured EHLO name (case-insensitive, trailing dot stripped).
+func (s *HealthService) ptrMatches(ptr string, d *models.Domain) bool {
+	if ptr == strings.ToLower(d.Domain) {
+		return true
+	}
+	if name := strings.ToLower(strings.TrimSpace(s.ehloDomain)); name != "" && ptr == name {
+		return true
+	}
+	return false
+}
+
+// DefaultHealthEhloDomain mirrors mta.DefaultHeloDomain without importing the
+// MTA package (health stays a leaf service).
+const DefaultHealthEhloDomain = "posta.local"
 
 // rateOf returns percent with one decimal; a zero denominator yields 0.
 func rateOf(part, total int64) float64 {

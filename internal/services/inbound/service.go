@@ -80,7 +80,11 @@ type Service struct {
 	// dmarc ingests RFC 7489 aggregate reports from the inbound pipeline
 	// (R-17); nil until EnableDMARC, and ingestion then behaves exactly as
 	// before.
-	dmarc         *dmarcProcessor
+	dmarc *dmarcProcessor
+	// verifier runs message-level SPF/DKIM/DMARC verification after durable
+	// ingest (SF-22/23/24); nil until EnableVerification, and ingestion then
+	// behaves exactly as before.
+	verifier      *verifyProcessor
 	maxMsgSize    int64
 	maxAttachSize int64
 	onReceived    func(source models.InboundSource)
@@ -303,6 +307,13 @@ func (s *Service) Ingest(ctx context.Context, p *ParsedEmail, source models.Inbo
 	// (a no-op unless EnableDMARC wired one). Never fails the ingestion.
 	s.processDMARC(ctx, rec)
 
+	// SF-22/23/24: verify SPF/DKIM/DMARC asynchronously — durable ingest
+	// already happened, so delivery never waits on DNS. The webhook path has
+	// no connecting-IP knowledge (the TCP peer is the forwarding provider,
+	// not the mail source), so SPF honestly evaluates to none there; DKIM
+	// and DMARC still run over the raw message.
+	s.processVerification(rec, p.Raw, p.From, "")
+
 	if s.producer != nil && !routed {
 		if err := s.producer.EnqueueInboundProcess(rec.ID); err != nil {
 			logger.Error("failed to enqueue inbound:process", "inbound_id", rec.ID, "error", err)
@@ -339,7 +350,11 @@ func (s *Service) Ingest(ctx context.Context, p *ParsedEmail, source models.Inbo
 	return rec, nil
 }
 
-func (s *Service) IngestRaw(ctx context.Context, raw []byte, envelopeFrom string, envelopeTo []string, source models.InboundSource) (*models.InboundEmail, error) {
+// IngestRaw is the SMTP receiver's store-first path: only envelope facts and
+// the raw bytes are known here (parsing happens asynchronously on the parse
+// worker). clientIP is the connecting client's address for SPF (SF-22);
+// empty means unknown.
+func (s *Service) IngestRaw(ctx context.Context, raw []byte, envelopeFrom string, envelopeTo []string, source models.InboundSource, clientIP string) (*models.InboundEmail, error) {
 	start := time.Now()
 	defer func() {
 		if s.onIngestMs != nil {
@@ -403,6 +418,11 @@ func (s *Service) IngestRaw(ctx context.Context, raw []byte, envelopeFrom string
 		}
 	}
 
+	// SF-22/23/24: verify asynchronously after durable ingest — the SMTP
+	// caller gets its 250 without waiting on DNS. The connecting IP is known
+	// here, so SPF evaluates against the real client.
+	s.processVerification(rec, raw, envelopeFrom, clientIP)
+
 	if s.onReceived != nil {
 		s.onReceived(source)
 	}
@@ -444,7 +464,17 @@ func (s *Service) ApplyParsed(ctx context.Context, rec *models.InboundEmail, p *
 		}
 	}
 
-	headersJSON, _ := json.Marshal(p.Headers)
+	// SF-49 slice: merge the persisted Authentication-Results header into the
+	// parsed-headers view when the async verification already recorded a
+	// verdict for this message. Existing A-R headers (an upstream MTA's) are
+	// never touched; the verdict row stays authoritative.
+	headers := p.Headers
+	if s.verifier != nil && rec != nil {
+		if ar := s.verifier.storedHeader(rec.ID); ar != "" {
+			headers = withHeader(headers, "Authentication-Results", ar)
+		}
+	}
+	headersJSON, _ := json.Marshal(headers)
 
 	rec.MessageID = p.MessageID
 	rec.DedupHash = dedupHash

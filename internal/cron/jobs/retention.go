@@ -47,6 +47,7 @@ type RetentionCleanupJob struct {
 	notificationRepo      *repositories.NotificationRepository
 	emailEventRepo        *repositories.EmailEventRepository
 	incomingWebhookRepo   *repositories.IncomingWebhookEventRepository
+	securityEventRepo     *repositories.SecurityEventRepository
 	blobStore             blob.Store
 	settings              *settings.Provider
 }
@@ -104,6 +105,13 @@ func (j *RetentionCleanupJob) SetIncomingWebhookEventRepo(r *repositories.Incomi
 // outgoing webhook deliveries. Attempts share the delivery retention window.
 func (j *RetentionCleanupJob) SetWebhookDeliveryAttemptRepo(r *repositories.WebhookDeliveryAttemptRepository) {
 	j.whDeliveryAttemptRepo = r
+}
+
+// SetSecurityEventRepo enables pruning of security-engine events (GAP-13:
+// SecurityEventRepository.DeleteOlderThan had no caller before this). The
+// window is the security_events_retention_days setting; 0 keeps events forever.
+func (j *RetentionCleanupJob) SetSecurityEventRepo(r *repositories.SecurityEventRepository) {
+	j.securityEventRepo = r
 }
 
 // SetBlobStore configures the blob store so retention cleanup can also purge
@@ -406,6 +414,21 @@ func (j *RetentionCleanupJob) Run(_ context.Context, _ *asynq.Client) error {
 			logger.Error("retention cleanup: failed to delete old tracking events", "error", err)
 		} else if deleted > 0 {
 			logger.Info("retention cleanup: deleted old tracking events", "count", deleted, "older_than_days", trackingRetention)
+		}
+	}
+
+	// Clean up security-engine events (GAP-13). Security events are their own
+	// lifecycle record — the audit window above covers the human event log,
+	// not the security engine's detection feed — so they carry their own
+	// window (security_events_retention_days, default 90; 0 keeps forever).
+	securityRetention := j.settings.SecurityEventsRetentionDays()
+	if securityRetention > 0 && j.securityEventRepo != nil {
+		before := time.Now().AddDate(0, 0, -securityRetention)
+		deleted, err := j.securityEventRepo.DeleteOlderThan(before)
+		if err != nil {
+			logger.Error("retention cleanup: failed to delete old security events", "error", err)
+		} else if deleted > 0 {
+			logger.Info("retention cleanup: deleted old security events", "count", deleted, "older_than_days", securityRetention)
 		}
 	}
 

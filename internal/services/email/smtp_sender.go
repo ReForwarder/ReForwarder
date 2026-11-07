@@ -127,6 +127,41 @@ func overallDeadline() time.Duration {
 	return DialTimeout() * commandBudgetFactor
 }
 
+// SessionBudget exposes the R-22 overall session budget (dial timeout ×
+// command budget factor) to the outbound MTA package, which extends this dial
+// path for direct-to-MX delivery and keeps the same budget discipline.
+func SessionBudget() time.Duration {
+	return overallDeadline()
+}
+
+// DialSMTPWithBind opens a plain SMTP connection with the R-22 dial timeout
+// and overall session budget, optionally bound to a source IP (per-domain
+// outbound bind, ADR-001 §7). Exported for the outbound MTA package, which
+// upgrades in-band with STARTTLS when the remote server offers it; the relay
+// dial path (dialSMTP) is unchanged.
+func DialSMTPWithBind(addr, host string, bind net.IP) (net.Conn, *smtp.Client, error) {
+	d := net.Dialer{Timeout: DialTimeout()}
+	if bind != nil {
+		d.LocalAddr = &net.TCPAddr{IP: bind}
+	}
+	conn, err := d.Dial("tcp", addr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("SMTP dial failed: %w", err)
+	}
+	// Overall session budget, same discipline as dialSMTP: everything after
+	// the dial must finish within it unless the caller extends the deadline.
+	if err := conn.SetDeadline(time.Now().Add(overallDeadline())); err != nil {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("failed to set connection deadline: %w", err)
+	}
+	client, err := smtp.NewClient(conn, host)
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("SMTP client creation failed: %w", err)
+	}
+	return conn, client, nil
+}
+
 // dialNet opens a plain TCP connection with the configured dial timeout.
 func dialNet(addr string) (net.Conn, error) {
 	d := net.Dialer{Timeout: DialTimeout()}
@@ -162,6 +197,13 @@ func currentDkimSigner() DkimSigner {
 	dkimMu.RLock()
 	defer dkimMu.RUnlock()
 	return defaultDkimSign
+}
+
+// CurrentDkimSigner exposes the process-wide DKIM signer (SetDkimSigner) so
+// the outbound MTA package signs direct deliveries for the same domains the
+// relay path signs. nil means signing is disabled (CNAME mode).
+func CurrentDkimSigner() DkimSigner {
+	return currentDkimSigner()
 }
 
 type SMTPSender struct {
@@ -345,6 +387,13 @@ func envelopeAddress(from string) string {
 	return addr.Address
 }
 
+// EnvelopeAddress is the exported form of envelopeAddress: the bare address
+// used for the SMTP envelope (MAIL FROM / RCPT TO). Exported for the outbound
+// MTA package, which builds its own envelope.
+func EnvelopeAddress(from string) string {
+	return envelopeAddress(from)
+}
+
 // senderDomainOf returns the lowercased domain of a bare email address, or ""
 // when the address has no domain.
 func senderDomainOf(bare string) string {
@@ -399,6 +448,13 @@ func sendViaClient(client *smtp.Client, conn net.Conn, auth smtp.Auth, from stri
 func wrapSendError(stage, recipient string, err error) error {
 	code, msg := smtpReply(err)
 	return &SendError{Stage: stage, Recipient: recipient, Code: code, Msg: msg, Err: err}
+}
+
+// WrapSendError is the exported form of wrapSendError, used by the outbound
+// MTA package so direct-to-MX failures carry exactly the same *SendError
+// shape the worker's R-05 classification chain already consumes.
+func WrapSendError(stage, recipient string, err error) error {
+	return wrapSendError(stage, recipient, err)
 }
 
 const (
@@ -529,6 +585,14 @@ func newBoundary() string {
 		return "posta-" + uuid.NewString()
 	}
 	return "posta-" + hex.EncodeToString(token[:])
+}
+
+// BuildMessage is the exported form of buildMessage: the RFC 5322 message the
+// relay path puts on the wire. Exported for the outbound MTA package, which
+// must present the identical message bytes (DKIM-signed after building) to
+// the remote MX.
+func BuildMessage(from string, to []string, subject, htmlBody, textBody string, attachments []models.Attachment, headers map[string]string, listUnsubscribeURL, listUnsubscribeMailto string, listUnsubscribePost bool) []byte {
+	return buildMessage(from, to, subject, htmlBody, textBody, attachments, headers, listUnsubscribeURL, listUnsubscribeMailto, listUnsubscribePost)
 }
 
 func buildMessage(from string, to []string, subject, htmlBody, textBody string, attachments []models.Attachment, headers map[string]string, listUnsubscribeURL, listUnsubscribeMailto string, listUnsubscribePost bool) []byte {
