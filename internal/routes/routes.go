@@ -26,6 +26,7 @@ import (
 
 	"github.com/goposta/posta/internal/config"
 	cronpkg "github.com/goposta/posta/internal/cron"
+	"github.com/goposta/posta/internal/cron/jobs"
 	"github.com/goposta/posta/internal/handlers"
 	"github.com/goposta/posta/internal/metrics"
 	"github.com/goposta/posta/internal/middlewares"
@@ -103,70 +104,72 @@ type routerMiddleware struct {
 }
 
 type routerHandlers struct {
-	health           *handlers.HealthHandler
-	update           *handlers.UpdateHandler
-	user             *handlers.UserHandler
-	email            *handlers.EmailHandler
-	apiKey           *handlers.APIKeyHandler
-	apiKeyUsage      *handlers.APIKeyUsageHandler
-	template         *handlers.TemplateHandler
-	version          *handlers.TemplateVersionHandler
-	localization     *handlers.TemplateLocalizationHandler
-	language         *handlers.LanguageHandler
-	stylesheet       *handlers.StyleSheetHandler
-	smtp             *handlers.SMTPHandler
-	webhook          *handlers.WebhookHandler
-	webhookDelivery  *handlers.WebhookDeliveryHandler
-	webhookReplay    *handlers.WebhookReplayHandler
-	dashboard        *handlers.DashboardHandler
-	domain           *handlers.DomainHandler
-	domainSigning    *handlers.DomainSigningHandler
-	domainHealth     *handlers.DomainHealthHandler
-	dmarc            *handlers.DMARCReportHandler
-	bounce           *handlers.BounceHandler
-	suppression      *handlers.SuppressionHandler
-	unsubscribeList  *handlers.UnsubscribeListHandler
-	contact          *handlers.ContactHandler
-	admin            *handlers.AdminHandler
-	workspace        *handlers.WorkspaceHandler
-	server           *handlers.ServerHandler
-	event            *handlers.EventHandler
-	analytics        *handlers.AnalyticsHandler
-	adminDomain      *handlers.AdminDomainHandler
-	adminWorkspace   *handlers.AdminWorkspaceHandler
-	notification     *handlers.NotificationHandler
-	announcement     *handlers.AdminAnnouncementHandler
-	setting          *handlers.SettingHandler
-	userSetting      *handlers.UserSettingHandler
-	workspaceSetting *handlers.WorkspaceSettingHandler
-	security         *handlers.SecurityHandler
-	session          *handlers.SessionHandler
-	appPassword      *handlers.AppPasswordHandler
-	webauthn         *handlers.WebAuthnHandler
-	impersonation    *handlers.ImpersonationHandler
-	cron             *handlers.CronHandler
-	oauth            *handlers.OAuthHandler
-	oauthAdmin       *handlers.OAuthAdminHandler
-	subscriber       *handlers.SubscriberHandler
-	subscriberList   *handlers.SubscriberListHandler
-	segment          *handlers.SegmentHandler
-	automation       *handlers.AutomationHandler
-	campaign         *handlers.CampaignHandler
-	tracking         *handlers.TrackingHandler
-	bounceWebhook    *handlers.BounceWebhookHandler
-	providerEvent    *handlers.ProviderEventHandler
-	workspaceData    *handlers.WorkspaceDataHandler
-	plan             *handlers.PlanHandler
-	inbound          *handlers.InboundHandler
-	smtpCredential   *handlers.SMTPCredentialHandler
-	verify           *handlers.VerifyHandler
-	form             *handlers.FormHandler
-	message          *handlers.MessageHandler
-	messageFilter    *handlers.MessageFilterHandler
-	formIngest       *handlers.FormIngestHandler
-	logs             *handlers.LogsHandler
-	queueOps         *handlers.QueueOpsHandler
-	webpush          *handlers.WebPushHandler
+	health               *handlers.HealthHandler
+	update               *handlers.UpdateHandler
+	user                 *handlers.UserHandler
+	email                *handlers.EmailHandler
+	apiKey               *handlers.APIKeyHandler
+	apiKeyUsage          *handlers.APIKeyUsageHandler
+	template             *handlers.TemplateHandler
+	version              *handlers.TemplateVersionHandler
+	localization         *handlers.TemplateLocalizationHandler
+	language             *handlers.LanguageHandler
+	stylesheet           *handlers.StyleSheetHandler
+	smtp                 *handlers.SMTPHandler
+	webhook              *handlers.WebhookHandler
+	webhookDelivery      *handlers.WebhookDeliveryHandler
+	webhookReplay        *handlers.WebhookReplayHandler
+	dashboard            *handlers.DashboardHandler
+	domain               *handlers.DomainHandler
+	domainSigning        *handlers.DomainSigningHandler
+	domainHealth         *handlers.DomainHealthHandler
+	dmarc                *handlers.DMARCReportHandler
+	bounce               *handlers.BounceHandler
+	suppression          *handlers.SuppressionHandler
+	unsubscribeList      *handlers.UnsubscribeListHandler
+	contact              *handlers.ContactHandler
+	admin                *handlers.AdminHandler
+	workspace            *handlers.WorkspaceHandler
+	server               *handlers.ServerHandler
+	event                *handlers.EventHandler
+	analytics            *handlers.AnalyticsHandler
+	adminDomain          *handlers.AdminDomainHandler
+	adminWorkspace       *handlers.AdminWorkspaceHandler
+	notification         *handlers.NotificationHandler
+	announcement         *handlers.AdminAnnouncementHandler
+	setting              *handlers.SettingHandler
+	userSetting          *handlers.UserSettingHandler
+	workspaceSetting     *handlers.WorkspaceSettingHandler
+	security             *handlers.SecurityHandler
+	session              *handlers.SessionHandler
+	appPassword          *handlers.AppPasswordHandler
+	webauthn             *handlers.WebAuthnHandler
+	impersonation        *handlers.ImpersonationHandler
+	cron                 *handlers.CronHandler
+	oauth                *handlers.OAuthHandler
+	oauthAdmin           *handlers.OAuthAdminHandler
+	subscriber           *handlers.SubscriberHandler
+	subscriberList       *handlers.SubscriberListHandler
+	segment              *handlers.SegmentHandler
+	automation           *handlers.AutomationHandler
+	campaign             *handlers.CampaignHandler
+	tracking             *handlers.TrackingHandler
+	bounceWebhook        *handlers.BounceWebhookHandler
+	providerEvent        *handlers.ProviderEventHandler
+	workspaceData        *handlers.WorkspaceDataHandler
+	plan                 *handlers.PlanHandler
+	inbound              *handlers.InboundHandler
+	inboundQuarantine    *handlers.InboundQuarantineHandler
+	inboundForwardTarget *handlers.InboundForwardTargetHandler
+	smtpCredential       *handlers.SMTPCredentialHandler
+	verify               *handlers.VerifyHandler
+	form                 *handlers.FormHandler
+	message              *handlers.MessageHandler
+	messageFilter        *handlers.MessageFilterHandler
+	formIngest           *handlers.FormIngestHandler
+	logs                 *handlers.LogsHandler
+	queueOps             *handlers.QueueOpsHandler
+	webpush              *handlers.WebPushHandler
 }
 
 func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *config.Config, eng *security.Engine, producer *worker.Producer, cronManager *cronpkg.Manager, blobStore blob.Store, ctx context.Context, notifier ...*notification.Service) *email.Service {
@@ -643,6 +646,67 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 			inboundSvc.SetEnqueuer(producer)
 		}
 		inboundSvc.SetEventBus(bus)
+		// OB-2 (ADR-002): route webhook-ingested mail through the same
+		// routing rules as the SMTP receiver (additive wiring).
+		inboundSvc.SetRouter(inbound.NewRouter(repositories.NewInboundRouteRepository(db)))
+		inboundSvc.SetForwardQueue(repositories.NewInboundForwardTaskRepository(db))
+		inboundSvc.SetWebhookDispatcher(dispatcher)
+		// OB-2 (ADR-002 decision 3): quarantine holds persist through the
+		// quarantine store; the review surface releases/deletes via HTTP.
+		quarantineSvc := inbound.NewQuarantineService(
+			repositories.NewInboundQuarantineRepository(db),
+			inboundEmailRepo,
+			domainRepo,
+			inboundSvc,
+		)
+		inboundSvc.SetQuarantineStore(quarantineSvc)
+		r.h.inboundQuarantine = handlers.NewInboundQuarantineHandler(quarantineSvc)
+		// OB-2 (ADR-002 decision 2): the forwarding executor consumes the
+		// durable inbound_forward_tasks rows (queued above) and re-sends the
+		// stored originals as system_forward copies through the email
+		// service's system path; confirmed targets gate every forward. The
+		// mailer seam adapts inbound's request shape onto the email service
+		// (a direct import would close a test-only cycle).
+		forwardTargetRepo := repositories.NewInboundForwardTargetRepository(db)
+		forwardTargetSvc := inbound.NewForwardTargetService(forwardTargetRepo)
+		systemMailer := inbound.SystemMailerFunc(func(ctx context.Context, req *inbound.ForwardSendRequest) (*inbound.ForwardSendResponse, error) {
+			resp, err := emailService.SendSystemForward(ctx, &email.SystemForwardRequest{
+				UserID:      req.UserID,
+				WorkspaceID: req.WorkspaceID,
+				From:        req.From,
+				To:          req.To,
+				Subject:     req.Subject,
+				Text:        req.Text,
+				HTML:        req.HTML,
+				Headers:     req.Headers,
+				Attachments: req.Attachments,
+				Metadata:    req.Metadata,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return &inbound.ForwardSendResponse{EmailUUID: resp.ID, Status: resp.Status}, nil
+		})
+		forwarder := inbound.NewForwarder(
+			repositories.NewInboundForwardTaskRepository(db),
+			inboundEmailRepo,
+			inboundSvc,
+			domainRepo,
+			systemMailer,
+		)
+		forwarder.SetTargetStore(forwardTargetRepo)
+		if redisClient != nil {
+			forwarder.SetTargetLimiter(inbound.NewRedisTargetLimiter(redisClient,
+				inbound.DefaultForwardTargetHourly, inbound.DefaultForwardTargetDaily))
+		}
+		forwarder.SetEventBus(bus)
+		r.h.inboundForwardTarget = handlers.NewInboundForwardTargetHandler(forwardTargetSvc, cfg.ApiBaseURL)
+		// One-minute executor cadence: the task rows carry their own
+		// retry/backoff state, so a periodic claim sweep is all the driving
+		// the durable queue needs (dev mode has no cron manager by design).
+		if cronManager != nil {
+			cronManager.Register(jobs.NewInboundForwardQueueJob(forwarder))
+		}
 		if cfg.MessagesEnabled && cfg.MessagesInboundDomain != "" {
 			router := messages.NewThreadRouter(repositories.NewMessageRepository(db), cfg.MessagesInboundDomain)
 			router.SetRealtime(realtime.NewRedis(redisClient))
@@ -850,6 +914,13 @@ func (r *Router) registerRoutes() {
 	if r.cfg.InboundEnabled && r.h.inbound != nil {
 		r.app.Register(r.inboundWebhookRoutes()...)
 		r.app.Register(r.inboundWorkspaceRoutes()...)
+		if r.h.inboundQuarantine != nil {
+			r.app.Register(r.inboundQuarantineRoutes()...)
+		}
+		if r.h.inboundForwardTarget != nil {
+			r.app.Register(r.inboundForwardTargetRoutes()...)
+			r.app.Register(r.inboundForwardConfirmRoutes()...)
+		}
 	}
 	if r.cfg.MessagesEnabled && r.h.formIngest != nil {
 		r.app.Register(r.formIngestRoutes()...)

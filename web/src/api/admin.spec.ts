@@ -63,6 +63,21 @@ const KNOWN_DRIFT: Array<{ path: string; why: string }> = [
     path: '/users/me/contact-lists/{}/members',
     why: 'contactListsApi listMembers/addMember/removeMember (contactLists.ts) — same unregistered ContactListHandler',
   },
+  // OB-2 / ADR-002 decision 1 (2026-11-07): the inbound routing-rules CRUD
+  // client (inboundRoutes.ts) landed against the workspace resource
+  // convention while the rules handler/registration is landing in a parallel
+  // wave. Forward-target and quarantine endpoints used by the same view ARE
+  // registered (internal/routes/inbound_forward_routes.go,
+  // inbound_quarantine_routes.go). Delete these entries when the rules CRUD
+  // routes appear in the golden dump.
+  {
+    path: '/workspaces/current/inbound-routes',
+    why: 'inboundRoutesApi list/create (inboundRoutes.ts) — rules CRUD handler not yet registered; landing in a parallel OB-2 wave',
+  },
+  {
+    path: '/workspaces/current/inbound-routes/{}',
+    why: 'inboundRoutesApi update/delete (inboundRoutes.ts) — same unregistered rules CRUD handler',
+  },
 ]
 
 /** api.<verb>(<first argument>) — the endpoint string as written in the module. */

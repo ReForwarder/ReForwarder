@@ -67,8 +67,9 @@ func (f *fakeDNS) withTXT(name string, records ...string) *fakeDNS {
 	return f
 }
 
-func (f *fakeDNS) withIP(name string, addrs ...net.IP) {
+func (f *fakeDNS) withIP(name string, addrs ...net.IP) *fakeDNS {
 	f.ip[name] = addrs
+	return f
 }
 
 func (f *fakeDNS) withMX(name string, hosts ...string) {
@@ -77,8 +78,9 @@ func (f *fakeDNS) withMX(name string, hosts ...string) {
 	}
 }
 
-func (f *fakeDNS) withPTR(addr string, names ...string) {
+func (f *fakeDNS) withPTR(addr string, names ...string) *fakeDNS {
 	f.ptr[addr] = names
+	return f
 }
 
 func (f *fakeDNS) LookupTXT(_ context.Context, name string) ([]string, error) {

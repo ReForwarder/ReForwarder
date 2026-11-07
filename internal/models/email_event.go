@@ -31,6 +31,12 @@ const (
 	EmailEventBounced      = "bounced"
 	EmailEventComplained   = "complained"
 	EmailEventUnsubscribed = "unsubscribed"
+	// EmailEventForwarded stamps the moment the inbound forwarding executor
+	// enqueued a system_forward copy (OB-2, ADR-002 decision 2). It has no
+	// write-once timestamp column — the copy's sent/failed events carry the
+	// delivery truth; this event marks the forwarding provenance on the
+	// message-history timeline.
+	EmailEventForwarded = "forwarded"
 )
 
 // EmailEvent records one lifecycle event on the message-history timeline of an
@@ -45,7 +51,7 @@ type EmailEvent struct {
 	EmailUUID   string `json:"email_uuid" gorm:"type:uuid;not null;index:idx_email_events_email;index:idx_email_events_dedup,unique"`
 	WorkspaceID *uint  `json:"workspace_id,omitempty" gorm:"index"`
 	Type        string `json:"type" gorm:"size:20;not null;index:idx_email_events_type_created,priority:1;index:idx_email_events_dedup,unique"`
-	// sent|delivered|failed|opened|clicked|bounced|complained|unsubscribed
+	// sent|delivered|failed|forwarded|opened|clicked|bounced|complained|unsubscribed
 	OccurredAt      time.Time `json:"occurred_at" gorm:"not null;index:idx_email_events_type_created,priority:2"`
 	Provider        string    `json:"provider" gorm:"size:32;not null;default:''"`
 	ProviderEventID string    `json:"provider_event_id,omitempty" gorm:"size:120;index:idx_email_events_dedup,unique"`

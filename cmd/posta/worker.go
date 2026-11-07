@@ -128,6 +128,13 @@ func runWorker() error {
 	// Outbound MTA executor (OB-1, ADR-001): domains configured 'direct'
 	// deliver direct-to-MX; everything else keeps today's relay path.
 	handler.SetMTAExecutor(newMTAExecutor(db, cfg))
+	// OB-2 (ADR-002 decision 4): direct-mode MAIL FROM becomes the VERP
+	// bounce address when the return-path feature is configured (off unless
+	// POSTA_RETURN_PATH_SUBDOMAIN + POSTA_RETURN_PATH_SECRET are set).
+	handler.SetVerp(inbound.NewVerp(inbound.VerpConfig{
+		Subdomain: cfg.ReturnPathSubdomain,
+		Secret:    cfg.ReturnPathSecret,
+	}))
 	handler.OnSent(func() {
 		metrics.IncrementEmailSent()
 		metrics.DecrementEmailQueued()
@@ -242,6 +249,13 @@ func runWorker() error {
 			parseSvc,
 			parseProducer,
 		)
+		// OB-2 (ADR-006): spam/malware filtering on both worker stages — the
+		// parse worker covers SMTP-ingested mail, the process handler covers
+		// webhook-ingested mail. One shared step instance; nil (disabled)
+		// keeps the pre-filter behavior on both.
+		inboundFilter := newInboundFilter(db, cfg, parseSvc, blobStore, newWebhookDispatcher(db, cfg))
+		inboundHandler.SetFilter(inboundFilter)
+		parseHandler.SetFilter(inboundFilter)
 		mux.HandleFunc(worker.TypeInboundParse, parseHandler.ProcessTask)
 	}
 

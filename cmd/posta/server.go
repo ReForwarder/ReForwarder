@@ -51,6 +51,7 @@ import (
 	"github.com/goposta/posta/internal/services/seeder"
 	"github.com/goposta/posta/internal/services/settings"
 	"github.com/goposta/posta/internal/services/smtprelay"
+	"github.com/goposta/posta/internal/services/spamfilter"
 	"github.com/goposta/posta/internal/services/tracking"
 	"github.com/goposta/posta/internal/services/updatecheck"
 	"github.com/goposta/posta/internal/services/webhook"
@@ -441,6 +442,47 @@ func attachVerification(svc *inbound.Service, db *gorm.DB, cfg *config.Config) {
 	svc.EnableVerification(db, cfg.InboundHostname)
 }
 
+// newInboundFilter builds the spam/malware step (OB-2, ADR-006): the rules
+// baseline scorer over the persisted auth verdicts + allowlisted DNSBL zones
+// (POSTA_SPAM_DNSBL_ZONES) + email_events sender reputation, the clamd
+// malware client (POSTA_CLAMAV_*, disabled without POSTA_CLAMAV_HOST), and
+// the optional synchronous external filter consult
+// (POSTA_SPAM_EXTERNAL_FILTER_*). Score thresholds come from the admin
+// platform settings (spam_score_quarantine / spam_score_reject). Returns nil
+// when POSTA_SPAM_FILTER_ENABLED=false — every handler then keeps the
+// pre-filter behavior.
+func newInboundFilter(db *gorm.DB, cfg *config.Config, svc *inbound.Service, blobStore blob.Store, dispatcher *webhook.Dispatcher) *worker.InboundFilter {
+	if !cfg.SpamFilterEnabled {
+		return nil
+	}
+	thresholds := settings.NewProvider(repositories.NewSettingRepository(db))
+	scorer := spamfilter.NewRulesScorer(
+		thresholds,
+		spamfilter.NewDNSBLChecker(cfg.SpamDNSBLZones, nil),
+		spamfilter.NewEventReputationSource(db),
+	)
+	scanner := spamfilter.NewClamdClient(spamfilter.ClamdConfig{
+		Host:     cfg.ClamAVHost,
+		Port:     cfg.ClamAVPort,
+		Timeout:  cfg.ClamAVTimeout,
+		FailMode: spamfilter.ClamFailModeFromEnv(cfg.ClamAVFailMode),
+	})
+	return worker.NewInboundFilter(
+		repositories.NewInboundEmailRepository(db),
+		svc,
+		blobStore,
+		scorer,
+		scanner,
+		dispatcher,
+		worker.InboundFilterOptions{
+			Enabled:             true,
+			ExternalHook:        cfg.SpamExternalFilter,
+			ExternalHookEvent:   cfg.SpamExternalFilterEvent,
+			ExternalHookTimeout: cfg.SpamExternalFilterTO,
+		},
+	)
+}
+
 // startInboundSMTPServer configures and launches the built-in SMTP receiver.
 // Returns the server so it can be gracefully shut down on exit.
 func startInboundSMTPServer(
@@ -478,7 +520,37 @@ func startInboundSMTPServer(
 	attachDMARC(svc, db)
 	attachVerification(svc, db, cfg)
 
+	// OB-2 (ADR-002): routing rules resolve at RCPT/DATA and their actions
+	// run after durable ingest. The same engine instance backs the SMTP
+	// backend's recipient validation and the service's ingest-time re-check.
+	routeRouter := inbound.NewRouter(repositories.NewInboundRouteRepository(db))
+	svc.SetRouter(routeRouter)
+	svc.SetForwardQueue(repositories.NewInboundForwardTaskRepository(db))
+	svc.SetWebhookDispatcher(newWebhookDispatcher(db, cfg))
+	// OB-2 (ADR-002 decision 3): quarantine holds persist through the
+	// quarantine store on the SMTP path too.
+	svc.SetQuarantineStore(inbound.NewQuarantineService(
+		repositories.NewInboundQuarantineRepository(db),
+		inboundRepo,
+		domainRepo,
+		svc,
+	))
+
+	// OB-2 (ADR-002 decision 4): the VERP return-path feature — bounce
+	// addresses are accepted through a dedicated RCPT allowlist, DSN bounces
+	// are durably ingested as system messages, and RFC 3464 reports are
+	// matched back to the original message. Off entirely unless
+	// POSTA_RETURN_PATH_SUBDOMAIN and POSTA_RETURN_PATH_SECRET are set.
+	verp := inbound.NewVerp(inbound.VerpConfig{
+		Subdomain: cfg.ReturnPathSubdomain,
+		Secret:    cfg.ReturnPathSecret,
+	})
+	svc.SetVerp(verp)
+	svc.EnableDSN(db)
+
 	backend := inbound.NewBackend(svc, domainRepo, cfg.InboundMaxMessageSize)
+	backend.SetRouter(routeRouter)
+	backend.SetVerp(verp)
 	if cfg.InboundSMTPRateLimit > 0 {
 		window := time.Duration(cfg.InboundSMTPRateWindow) * time.Second
 		backend.SetRateLimiter(inbound.NewIPRateLimiter(cfg.InboundSMTPRateLimit, window))
@@ -661,6 +733,14 @@ func startEmbeddedWorker(db *gorm.DB,
 	// Outbound MTA executor (OB-1): domains configured 'direct' deliver
 	// direct-to-MX; everything else keeps today's relay path (ADR-001).
 	handler.SetMTAExecutor(newMTAExecutor(db, cfg))
+	// OB-2 (ADR-002 decision 4): direct-mode MAIL FROM becomes the VERP
+	// bounce address when the return-path feature is configured; relay mode
+	// keeps the upstream provider's envelope. Off unless
+	// POSTA_RETURN_PATH_SUBDOMAIN + POSTA_RETURN_PATH_SECRET are set.
+	handler.SetVerp(inbound.NewVerp(inbound.VerpConfig{
+		Subdomain: cfg.ReturnPathSubdomain,
+		Secret:    cfg.ReturnPathSecret,
+	}))
 	// Message-history events (sent, failed, bounced, …) recorded by the worker
 	// path — the HTTP send path records through the routes wiring. One recorder
 	// instance backs both the send handler and the exhausted-task handler.
@@ -757,6 +837,13 @@ func startEmbeddedWorker(db *gorm.DB,
 			parseSvc,
 			parseProducer,
 		)
+		// OB-2 (ADR-006): spam/malware filtering on both worker stages — the
+		// parse worker covers SMTP-ingested mail, the process handler covers
+		// webhook-ingested mail. One shared step instance; nil (disabled)
+		// keeps the pre-filter behavior on both.
+		inboundFilter := newInboundFilter(db, cfg, parseSvc, blobStore, newWebhookDispatcher(db, cfg))
+		inboundHandler.SetFilter(inboundFilter)
+		parseHandler.SetFilter(inboundFilter)
 		mux.HandleFunc(worker.TypeInboundParse, parseHandler.ProcessTask)
 	}
 
@@ -832,6 +919,9 @@ func initCronManager(
 	retentionJob.SetSecurityEventRepo(repositories.NewSecurityEventRepository(db))
 	if cfg.InboundEnabled {
 		retentionJob.SetInboundEmailRepo(repositories.NewInboundEmailRepository(db))
+		// OB-2 (ADR-002 §3): quarantine records + still-held messages purge
+		// under inbound_quarantine_retention_days.
+		retentionJob.SetInboundQuarantineRepo(repositories.NewInboundQuarantineRepository(db))
 	}
 	if blobStore != nil {
 		retentionJob.SetBlobStore(blobStore)

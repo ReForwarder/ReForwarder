@@ -21,6 +21,7 @@ package verify
 
 import (
 	"context"
+	"net"
 	"strings"
 	"testing"
 )
@@ -182,5 +183,115 @@ func TestParseIP(t *testing.T) {
 	}
 	if parseIP("").IsValid() {
 		t.Fatal("parseIP accepted empty")
+	}
+}
+
+// ---------- ARC / iprev annotation shapes (ADR-002 decision 6) ----------
+
+// ARC and iprev verdicts annotate the header with their own method groups.
+func TestAuthenticationResultsARCAndIPRevAnnotations(t *testing.T) {
+	r := Results{
+		SPF:   SPFVerdict{Result: SPFPass, Domain: "example.test"},
+		DKIM:  DKIMVerdict{Result: DKIMNone},
+		DMARC: DMARCVerdict{Result: DMARCPass},
+		ARC:   &ARCVerdict{Result: ARCPass, Domain: "forwarder.test"},
+		IPRev: &IPRevVerdict{Result: IPRevPass, PTR: "mail.sender.test"},
+	}
+	got := AuthenticationResults("posta.local", r)
+	for _, want := range []string{
+		"arc=pass header.d=forwarder.test",
+		"iprev=pass policy.iprev.ptr=mail.sender.test",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("A-R value %q does not contain %q", got, want)
+		}
+	}
+	if strings.ContainsAny(got, "\r\n") {
+		t.Fatalf("A-R value must stay single-line: %q", got)
+	}
+	// Five method groups now: spf, dkim, dmarc, arc, iprev.
+	if n := strings.Count(got, ";"); n != 5 {
+		t.Fatalf("A-R value has %d semicolons, want 5: %q", n, got)
+	}
+}
+
+// Failed chains carry the reason quoted; the arc result vocabulary is
+// exactly none|pass|fail (RFC 8617 §5.2.1 — no temperror).
+func TestAuthenticationResultsARCFailShape(t *testing.T) {
+	r := Results{
+		ARC: &ARCVerdict{Result: ARCFail, Domain: "bad.test", Reason: "i=2 cv=none, want pass"},
+	}
+	got := AuthenticationResults("posta.local", r)
+	if !strings.Contains(got, "arc=fail header.d=bad.test") {
+		t.Fatalf("A-R value missing the fail shape: %q", got)
+	}
+	if !strings.Contains(got, `reason="i=2 cv=none, want pass"`) {
+		t.Fatalf("A-R value missing the quoted reason: %q", got)
+	}
+	// iprev not evaluated → no iprev field.
+	if strings.Contains(got, "iprev=") {
+		t.Fatalf("A-R value carries iprev without a verdict: %q", got)
+	}
+}
+
+// Feature-off = zero change: nil ARC/IPRev verdicts produce exactly the
+// pre-feature three-method header.
+func TestAuthenticationResultsWithoutOptionalEngines(t *testing.T) {
+	r := Results{
+		SPF:                SPFVerdict{Result: SPFPass, Domain: "example.test"},
+		DKIM:               DKIMVerdict{Result: DKIMNone},
+		DMARC:              DMARCVerdict{Result: DMARCNone},
+		EnvelopeFromDomain: "example.test",
+	}
+	got := AuthenticationResults("posta.local", r)
+	if strings.Contains(got, "; arc=") || strings.Contains(got, "; iprev=") {
+		t.Fatalf("disabled engines must not annotate: %q", got)
+	}
+	if n := strings.Count(got, ";"); n != 3 {
+		t.Fatalf("A-R value has %d semicolons, want the pre-feature 3: %q", n, got)
+	}
+}
+
+// Evaluate gating: flags off → nil verdicts; flags on → evaluated, and a
+// chain-free message honestly reports arc=none.
+func TestEvaluateARCIPRevGating(t *testing.T) {
+	dns := newFakeDNS().
+		withTXT("example.test", "v=spf1 ip4:192.0.2.10 -all").
+		withTXT("_dmarc.example.test", "v=DMARC1; p=none").
+		withPTR("192.0.2.10", "mail.example.test.").
+		withIP("mail.example.test.", net.ParseIP("192.0.2.10"))
+	raw := []byte("From: Alice <alice@example.test>\r\nSubject: gating\r\n\r\nHi\r\n")
+
+	off := Evaluate(context.Background(), dns, Input{
+		ClientIP:     "192.0.2.10",
+		EnvelopeFrom: "alice@example.test",
+		Raw:          raw,
+	})
+	if off.ARC != nil || off.IPRev != nil {
+		t.Fatalf("engines ran while disabled: arc=%v iprev=%v", off.ARC, off.IPRev)
+	}
+	header := AuthenticationResults("posta.local", off)
+	if strings.Contains(header, "; arc=") || strings.Contains(header, "; iprev=") {
+		t.Fatalf("disabled engines annotated the header: %q", header)
+	}
+
+	on := Evaluate(context.Background(), dns, Input{
+		ClientIP:     "192.0.2.10",
+		EnvelopeFrom: "alice@example.test",
+		Raw:          raw,
+		ARCEnabled:   true,
+		IPRevEnabled: true,
+	})
+	if on.ARC == nil || on.ARC.Result != ARCNone {
+		t.Fatalf("enabled ARC on chain-free message = %+v, want none", on.ARC)
+	}
+	if on.IPRev == nil || on.IPRev.Result != IPRevPass || on.IPRev.PTR != "mail.example.test" {
+		t.Fatalf("enabled iprev = %+v, want pass via mail.example.test", on.IPRev)
+	}
+	header = AuthenticationResults("posta.local", on)
+	for _, want := range []string{"arc=none", "iprev=pass policy.iprev.ptr=mail.example.test"} {
+		if !strings.Contains(header, want) {
+			t.Fatalf("enabled header %q missing %q", header, want)
+		}
 	}
 }

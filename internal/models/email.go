@@ -37,6 +37,12 @@ const (
 	EmailStatusScheduled  EmailStatus = "scheduled"
 )
 
+// EmailProvenanceSystemForward stamps a transactional Email row that the
+// inbound forwarding executor enqueued as a system message (OB-2, ADR-002
+// decision 2). Forwarding is not a marketing-send path: consent and
+// suppression layers are never consulted for system forwards.
+const EmailProvenanceSystemForward = "system_forward"
+
 type Email struct {
 	ID              uint           `json:"id" gorm:"primaryKey"`
 	UUID            string         `json:"uuid" gorm:"type:uuid;default:gen_random_uuid();uniqueIndex;not null"`
@@ -55,19 +61,24 @@ type Email struct {
 	// TemplateData holds the render data of the template as a JSON object
 	// string. The default keeps Create-safe behavior: gorm omits the zero
 	// value, and jsonb rejects ''.
-	TemplateData          string      `json:"template_data,omitempty" gorm:"type:jsonb;not null;default:'{}'"`
-	ListUnsubscribeURL    string      `json:"list_unsubscribe_url,omitempty" gorm:"type:text"`
-	ListUnsubscribeMailto string      `json:"list_unsubscribe_mailto,omitempty" gorm:"type:text"`
-	ListUnsubscribePost   bool        `json:"list_unsubscribe_post,omitempty"`
-	UnsubscribeListID     *uint       `json:"unsubscribe_list_id,omitempty" gorm:"index"`
-	AutomationID          *uint       `json:"automation_id,omitempty" gorm:"index"`
-	Status                EmailStatus `json:"status" gorm:"default:pending;not null"`
-	ErrorMessage          string      `json:"error_message"`
-	RetryCount            int         `json:"retry_count" gorm:"default:0;not null"`
-	CreatedAt             time.Time   `json:"created_at"`
-	SentAt                *time.Time  `json:"sent_at"`
-	ScheduledAt           *time.Time  `json:"scheduled_at"`
-	Provider              string      `json:"provider,omitempty" gorm:"index;size:32"`
+	TemplateData          string `json:"template_data,omitempty" gorm:"type:jsonb;not null;default:'{}'"`
+	ListUnsubscribeURL    string `json:"list_unsubscribe_url,omitempty" gorm:"type:text"`
+	ListUnsubscribeMailto string `json:"list_unsubscribe_mailto,omitempty" gorm:"type:text"`
+	ListUnsubscribePost   bool   `json:"list_unsubscribe_post,omitempty"`
+	UnsubscribeListID     *uint  `json:"unsubscribe_list_id,omitempty" gorm:"index"`
+	AutomationID          *uint  `json:"automation_id,omitempty" gorm:"index"`
+	// Provenance stamps system-generated messages (OB-2, ADR-002 decision 2):
+	// "system_forward" marks the re-send copy a forwarding executor enqueued
+	// from a routed inbound message. Empty = a tenant/API-originated message.
+	// Additive column; the constant lives below.
+	Provenance   string      `json:"provenance,omitempty" gorm:"size:32;index;default:''"`
+	Status       EmailStatus `json:"status" gorm:"default:pending;not null"`
+	ErrorMessage string      `json:"error_message"`
+	RetryCount   int         `json:"retry_count" gorm:"default:0;not null"`
+	CreatedAt    time.Time   `json:"created_at"`
+	SentAt       *time.Time  `json:"sent_at"`
+	ScheduledAt  *time.Time  `json:"scheduled_at"`
+	Provider     string      `json:"provider,omitempty" gorm:"index;size:32"`
 
 	// Write-once lifecycle timestamps: denormalized from the message-history
 	// event timeline and set only the first time the state is reached, so the

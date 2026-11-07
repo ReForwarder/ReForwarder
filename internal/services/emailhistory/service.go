@@ -87,6 +87,7 @@ var knownEventTypes = map[string]bool{
 	models.EmailEventBounced:      true,
 	models.EmailEventComplained:   true,
 	models.EmailEventUnsubscribed: true,
+	models.EmailEventForwarded:    true,
 }
 
 // Recorder persists message-history events. It is safe for concurrent use and
