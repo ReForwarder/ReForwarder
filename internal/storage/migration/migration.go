@@ -107,12 +107,28 @@ func Run(db *gorm.DB) error {
 		&models.AutomationJourney{},
 		&models.AutomationNodeRun{},
 		&models.AutomationTriggerLog{},
+		// OB-3 mailstore (ADR-003): additive hosted-mailbox storage. Metadata
+		// only — bodies/attachments are content-addressed blobs in blob.Store.
+		&models.Mailbox{},
+		&models.MailFolder{},
+		&models.MailMessage{},
+		&models.MailBlobRef{}, // GAP-45 storage half: content-hash ref counts for dedup + GC
 	); err != nil {
 		return fmt.Errorf("failed to migrate database: %w", err)
 	}
 
 	// run constraints
 	runConstraints(db)
+
+	// OB-3 (ADR-003 decision 3): the mail_messages.search_tsv tsvector
+	// generated column + GIN index are SQL GORM cannot express. Ensured here
+	// so fresh installs get them (the upgrade framework seals its registry on
+	// a fresh database without applying steps) and mirrored in the
+	// "2026-11-07-mailstore-fts" upgrade step for existing databases. Both are
+	// idempotent.
+	if err := EnsureMailstoreSearch(db); err != nil {
+		return fmt.Errorf("failed to ensure mailstore search schema: %w", err)
+	}
 
 	logger.Info("database migrated")
 	return nil

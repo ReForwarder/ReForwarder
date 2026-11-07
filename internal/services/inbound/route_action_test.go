@@ -1108,7 +1108,7 @@ func TestIngestRawForwardQueueIdempotentOnReingest(t *testing.T) {
 	// Simulate the action step running again for the same record.
 	f.svc.applyRouteActions(context.Background(), rec, &models.InboundRoute{
 		ID: 5, Action: models.InboundRouteActionForward, Target: "dest@elsewhere.test",
-	}, RouteMatchCatchAll)
+	}, RouteMatchCatchAll, nil)
 	if n := f.state.rowCount(t, "inbound_forward_tasks"); n != 1 {
 		t.Fatalf("forward tasks after re-run = %d, want 1 (idempotent queue)", n)
 	}

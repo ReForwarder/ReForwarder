@@ -104,6 +104,10 @@ func contractServer(t *testing.T) *okapi.TestServer {
 	// construct the handler with nil collaborators for the same reason.
 	queueOps := handlers.NewQueueOpsHandler(nil, nil, nil, nil)
 
+	// OB-3 mailstore search maintenance is wired unconditionally in InitRoutes;
+	// nil db is fine here — registration only captures the handler reference.
+	mailstoreSearch := handlers.NewMailstoreSearchAdminHandler(nil)
+
 	// inbound and formIngest handlers exist only when their feature flag is on;
 	// construct them the same way InitRoutes does (nil stores are fine — the
 	// constructors are field-assign only).
@@ -135,6 +139,7 @@ func contractServer(t *testing.T) *okapi.TestServer {
 			inboundQuarantine:    quarantineHandler,
 			inboundForwardTarget: forwardTargetHandler,
 			queueOps:             queueOps,
+			mailstoreSearch:      mailstoreSearch,
 		},
 	}
 	r.registerRoutes()

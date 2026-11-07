@@ -42,6 +42,7 @@ import (
 	"github.com/goposta/posta/internal/services/eventbus"
 	"github.com/goposta/posta/internal/services/inbound"
 	"github.com/goposta/posta/internal/services/inbox"
+	"github.com/goposta/posta/internal/services/mailstore"
 	"github.com/goposta/posta/internal/services/messages"
 	"github.com/goposta/posta/internal/services/notification"
 	"github.com/goposta/posta/internal/services/passwordreset"
@@ -169,6 +170,7 @@ type routerHandlers struct {
 	formIngest           *handlers.FormIngestHandler
 	logs                 *handlers.LogsHandler
 	queueOps             *handlers.QueueOpsHandler
+	mailstoreSearch      *handlers.MailstoreSearchAdminHandler
 	webpush              *handlers.WebPushHandler
 }
 
@@ -413,6 +415,12 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 			db, producer, inspector, handlers.NewAsynqQueueInspector(inspector))
 		r.h.queueOps.SetAuditLogger(auditLogger)
 	}
+
+	// OB-3 mailstore search maintenance (ADR-003 decision 3): the operator
+	// recovery path for the mail_messages.search_tsv index — needs only the
+	// primary database, so it is wired unconditionally.
+	r.h.mailstoreSearch = handlers.NewMailstoreSearchAdminHandler(db)
+	r.h.mailstoreSearch.SetAuditLogger(auditLogger)
 
 	// Passkeys (R-19). The WebAuthn Relying Party identity is derived from the
 	// dashboard origin: RPID is the origin's bare host (no scheme, no port),
@@ -661,6 +669,21 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 		)
 		inboundSvc.SetQuarantineStore(quarantineSvc)
 		r.h.inboundQuarantine = handlers.NewInboundQuarantineHandler(quarantineSvc)
+		// OB-3 (ADR-003, flow F13): webhook-ingested deliver-routed mail also
+		// files into the recipient mailbox's INBOX through the mailstore —
+		// same seam as the SMTP receiver. Needs the blob store and the
+		// at-rest encryption key (the production ZstdBlobCodec refuses to
+		// store unencrypted, SF-78); without either, archive-only as before.
+		if blobStore != nil && cfg.EncryptionKey != "" {
+			if msSvc, err := mailstore.New(db, mailstore.ZstdBlobCodec{}, blobStore, nil); err != nil {
+				logger.Error("mailstore service unavailable; inbound delivery stays archive-only", "error", err)
+			} else {
+				inboundSvc.SetMailboxDeliverer(inbound.NewMailboxDelivery(msSvc, domainRepo, inbound.MailboxDeliveryConfig{
+					AutoProvision: cfg.MailstoreAutoProvision,
+				}))
+				logger.Info("hosted-mailbox delivery enabled (webhook path)", "auto_provision", cfg.MailstoreAutoProvision)
+			}
+		}
 		// OB-2 (ADR-002 decision 2): the forwarding executor consumes the
 		// durable inbound_forward_tasks rows (queued above) and re-sends the
 		// stored originals as system_forward copies through the email
