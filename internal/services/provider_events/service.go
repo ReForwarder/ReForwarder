@@ -420,6 +420,20 @@ func (s *IngestionService) captureRaw(rawPayload string, em *models.Email, uuidR
 // carries everything about the event; a dedicated column can be added later
 // without losing data). Returns class → event count.
 func (s *IngestionService) ClassificationCounts(ctx context.Context, from, to *time.Time) (map[string]int64, error) {
+	return s.classificationCounts(ctx, nil, from, to)
+}
+
+// WorkspaceClassificationCounts is ClassificationCounts scoped to one
+// workspace's timeline rows — the shape the workspace-scoped logs endpoint
+// (GET /workspaces/current/logs/classifications) serves. Deployment-wide
+// counts are deliberately not reachable through it.
+func (s *IngestionService) WorkspaceClassificationCounts(ctx context.Context, workspaceID uint, from, to *time.Time) (map[string]int64, error) {
+	return s.classificationCounts(ctx, &workspaceID, from, to)
+}
+
+// classificationCounts runs the shared aggregate; a nil workspaceID spans the
+// deployment, a non-nil one pins email_events.workspace_id.
+func (s *IngestionService) classificationCounts(ctx context.Context, workspaceID *uint, from, to *time.Time) (map[string]int64, error) {
 	if s.db == nil {
 		return nil, nil
 	}
@@ -427,6 +441,9 @@ func (s *IngestionService) ClassificationCounts(ctx context.Context, from, to *t
 		Select("COALESCE(metadata->>'classification', '(none)') AS classification, COUNT(*) AS count").
 		Where("metadata <> '{}' AND metadata->>'classification' IS NOT NULL").
 		Group("classification")
+	if workspaceID != nil {
+		q = q.Where("workspace_id = ?", *workspaceID)
+	}
 	if from != nil {
 		q = q.Where("occurred_at >= ?", *from)
 	}

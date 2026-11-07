@@ -20,6 +20,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -62,6 +63,15 @@ type LogsHandler struct {
 	deliveryRepo   *repositories.WebhookDeliveryRepository
 	attemptRepo    *repositories.WebhookDeliveryAttemptRepository
 	webhookRepo    *repositories.WebhookRepository
+	classification ClassificationCounter
+}
+
+// ClassificationCounter is the workspace-scoped R-05 classification analytics
+// the classifications endpoint serves. The provider_events ingestion service
+// implements it (its ClassificationCounts query over email_events Metadata
+// JSONB); the interface keeps the handler testable without a database.
+type ClassificationCounter interface {
+	WorkspaceClassificationCounts(ctx context.Context, workspaceID uint, from, to *time.Time) (map[string]int64, error)
 }
 
 // NewLogsHandler returns a LogsHandler over repositories built on db. The
@@ -99,6 +109,13 @@ func (h *LogsHandler) SetWebhookDeliveryRepo(r *repositories.WebhookDeliveryRepo
 }
 func (h *LogsHandler) SetWebhookDeliveryAttemptRepo(r *repositories.WebhookDeliveryAttemptRepository) {
 	h.attemptRepo = r
+}
+
+// SetClassificationCounter wires the workspace-scoped classification analytics
+// (SF-53). Nil (the default) makes the classifications endpoint answer 503
+// rather than pretending the workspace has no classified events.
+func (h *LogsHandler) SetClassificationCounter(svc ClassificationCounter) {
+	h.classification = svc
 }
 
 // contentVisible reports whether email body content may leave the server. The
@@ -455,6 +472,168 @@ func (h *LogsHandler) GetMessageEvents(c *okapi.Context, req *LogsMessageRequest
 		events = []models.EmailEvent{}
 	}
 	return ok(c, events)
+}
+
+// ---------- Classification breakdown (SF-53) ----------
+
+// ListClassificationsRequest is the request for
+// GET /workspaces/current/logs/classifications. The window bounds use the
+// same RFC3339 / YYYY-MM-DD forms as the audit filters (a date-only "to" is
+// advanced a day so the whole day is included).
+type ListClassificationsRequest struct {
+	From string `query:"from" doc:"Window start (RFC3339 or YYYY-MM-DD)"`
+	To   string `query:"to" doc:"Window end (RFC3339 or YYYY-MM-DD; a date includes the whole day)"`
+}
+
+// ClassificationBreakdown is the response of the classifications endpoint:
+// R-05 classification → recorded email_event count over the requested window.
+// The "(none)" class carries timeline rows that carry no classification
+// metadata.
+type ClassificationBreakdown struct {
+	Counts map[string]int64 `json:"counts"`
+	Total  int64            `json:"total"`
+	From   *time.Time       `json:"from,omitempty"`
+	To     *time.Time       `json:"to,omitempty"`
+}
+
+// ListClassifications returns the workspace's bounce/rejection classification
+// breakdown (SF-53), computed by the provider_events ingestion service's
+// aggregate over email_events.metadata (no schema migration — the
+// classification lives in the timeline row's JSONB). Workspace-scoped: rows
+// belonging to other workspaces are never counted.
+func (h *LogsHandler) ListClassifications(c *okapi.Context, req *ListClassificationsRequest) error {
+	from, okFrom := parseAuditTime(req.From, false)
+	if !okFrom {
+		return c.AbortBadRequest("invalid from: expected RFC3339 or YYYY-MM-DD")
+	}
+	to, okTo := parseAuditTime(req.To, true)
+	if !okTo {
+		return c.AbortBadRequest("invalid to: expected RFC3339 or YYYY-MM-DD")
+	}
+
+	out := ClassificationBreakdown{Counts: map[string]int64{}, From: from, To: to}
+	if h.classification == nil {
+		return c.AbortServiceUnavailable("classification analytics are not available")
+	}
+	scope := getScope(c)
+	if scope.WorkspaceID == nil {
+		// No workspace binding: like the incoming-webhook list, match nothing
+		// rather than fall back to an unscoped query.
+		return ok(c, out)
+	}
+	counts, err := h.classification.WorkspaceClassificationCounts(
+		c.Request().Context(), *scope.WorkspaceID, from, to)
+	if err != nil {
+		logger.Warn("failed to aggregate classifications", "error", err)
+		return c.AbortInternalServerError("failed to aggregate classifications")
+	}
+	total := int64(0)
+	for class, n := range counts {
+		out.Counts[class] = n
+		total += n
+	}
+	out.Total = total
+	return ok(c, out)
+}
+
+// ---------- Message events live stream (SF-56) ----------
+
+// messageEventsStreamTick is how often the per-message live stream polls the
+// timeline for new rows (the security-events stream cadence).
+const messageEventsStreamTick = 2 * time.Second
+
+// messageEventsStreamPingInterval keeps intermediaries from closing an idle
+// stream.
+const messageEventsStreamPingInterval = 30 * time.Second
+
+// StreamMessageEvents tails one message's email_events timeline over SSE,
+// polling the email-event repository every 2 seconds (the same polling style
+// as the security events stream — the timeline has no push bus). The stream
+// opens at the newest existing event so a client receives only what happens
+// after it connects; the existing timeline is served by
+// GET /logs/messages/{uuid}/events. Each new row goes out as an email.event
+// frame; pings keep the connection idle-tolerant.
+func (h *LogsHandler) StreamMessageEvents(c *okapi.Context, req *LogsMessageRequest) error {
+	em, err := h.emailRepo.FindByUUIDSlim(req.UUID)
+	if err != nil || !ownsResource(c, em.UserID, em.WorkspaceID) {
+		return c.AbortNotFound("message not found")
+	}
+
+	ctx := c.Request().Context()
+	w := c.ResponseWriter()
+
+	// Complete the SSE handshake up front — the okapi Message.Send below
+	// flushes per frame, but with nothing new to send the client would wait
+	// for the first ping before seeing any response headers.
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	if flusher, canFlush := w.(http.Flusher); canFlush {
+		flusher.Flush()
+	}
+
+	var lastID uint
+	if existing, err := h.emailEventRepo.ListByEmailUUID(req.UUID); err == nil {
+		for _, ev := range existing {
+			if ev.ID > lastID {
+				lastID = ev.ID
+			}
+		}
+	}
+
+	send := func() error {
+		events, err := h.emailEventRepo.ListByEmailUUID(req.UUID)
+		if err != nil {
+			return nil // transient database hiccup: keep the stream alive
+		}
+		for i := range events {
+			ev := events[i]
+			if ev.ID <= lastID {
+				continue
+			}
+			lastID = ev.ID
+			msg := okapi.Message{
+				Event:      "email.event",
+				Data:       ev,
+				Serializer: &okapi.JSONSerializer{},
+			}
+			if _, err := msg.Send(w); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Nothing queued yet — the stream opens at the newest event.
+	if err := send(); err != nil {
+		return nil
+	}
+
+	ticker := time.NewTicker(messageEventsStreamTick)
+	defer ticker.Stop()
+	ping := time.NewTicker(messageEventsStreamPingInterval)
+	defer ping.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if err := send(); err != nil {
+				return nil // the client went away
+			}
+		case <-ping.C:
+			pingMsg := okapi.Message{
+				Event:      "ping",
+				Data:       okapi.M{"time": time.Now().UTC()},
+				Serializer: &okapi.JSONSerializer{},
+			}
+			if _, err := pingMsg.Send(w); err != nil {
+				return nil
+			}
+		}
+	}
 }
 
 // ---------- Incoming webhooks ----------

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { settingsApi } from '../../api/settings'
-import type { AdminSetting } from '../../api/types'
+import type { AdminSetting, AdminSettingHistoryEntry } from '../../api/types'
 import { useNotificationStore } from '../../stores/notification'
 import { useConfirm } from '../../composables/useConfirm'
 
@@ -277,6 +277,89 @@ async function toggleBool(setting: AdminSetting) {
   setEditedValue(setting.key, next)
   commit(setting.key)
 }
+
+// ==================== Change history (SF-100) ====================
+// Every platform settings write records one per-key entry (old → new, actor).
+// This section inspects that history and rolls a key back to a recorded prior
+// value. A rollback goes through the normal settings setter, so it produces
+// its own history entry — the list below is append-only, never rewritten.
+
+const HISTORY_PAGE_SIZE = 10
+
+const historyOpen = ref(false)
+const historyLoading = ref(false)
+const historyKey = ref('')
+const historyEntries = ref<AdminSettingHistoryEntry[]>([])
+const historyPage = ref(0)
+const historyTotalPages = ref(0)
+const historyTotal = ref(0)
+const rollingBackId = ref<number | null>(null)
+
+// The picker lists the keys the admin actually sees in the settings grid
+// (reserved app.* internals are not exposed through the history surface).
+const historyKeyOptions = computed(() => settings.value.map(s => s.key))
+
+function toggleHistory() {
+  historyOpen.value = !historyOpen.value
+}
+
+async function loadHistory(page = 0) {
+  if (!historyKey.value) return
+  historyLoading.value = true
+  try {
+    const res = await settingsApi.getSettingHistory(historyKey.value, page, HISTORY_PAGE_SIZE)
+    historyEntries.value = res.data.data || []
+    historyPage.value = res.data.pageable?.current_page ?? page
+    historyTotalPages.value = res.data.pageable?.total_pages ?? 0
+    historyTotal.value = res.data.pageable?.total_elements ?? 0
+  } catch {
+    notify.error('Failed to load change history')
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+async function onHistoryKeyChange() {
+  historyEntries.value = []
+  historyTotal.value = 0
+  historyTotalPages.value = 0
+  await loadHistory(0)
+}
+
+function fmtHistoryTime(value: string): string {
+  return new Date(value).toLocaleString()
+}
+
+// Rollback restores a recorded prior value. A null old_value marks the key's
+// creation — there is nothing to restore, so the server refuses it and the
+// button is disabled up front.
+async function rollbackEntry(entry: AdminSettingHistoryEntry) {
+  if (entry.old_value == null) return
+  const ok = await confirm({
+    title: 'Roll back setting',
+    message: `Restore “${entry.key}” to its previous value “${entry.old_value}”? A rollback is itself recorded in the history.`,
+    confirmText: 'Roll back',
+    variant: 'warning',
+  })
+  if (!ok) return
+  rollingBackId.value = entry.id
+  try {
+    await settingsApi.rollbackSetting(entry.key, entry.id)
+    notify.success(`“${entry.key}” rolled back`)
+    // Refresh both the history list and the current value the grid shows.
+    await loadHistory(historyPage.value)
+    try {
+      const res = await settingsApi.getAdminSettings()
+      settings.value = res.data.data || []
+    } catch {
+      // History refreshed; the grid value catches up on next load.
+    }
+  } catch {
+    notify.error(`Failed to roll back “${entry.key}”`)
+  } finally {
+    rollingBackId.value = null
+  }
+}
 </script>
 
 <template>
@@ -408,6 +491,71 @@ async function toggleBool(setting: AdminSetting) {
               <p>No settings in this category.</p>
             </div>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Change history (SF-100): per-key audit trail with rollback -->
+    <div class="card history-card">
+      <div class="card-header">
+        <h2>Change history</h2>
+        <button type="button" class="history-toggle" :aria-expanded="historyOpen" @click="toggleHistory">
+          <span class="chevron" :class="{ open: historyOpen }">▸</span>
+          <span>{{ historyOpen ? 'Hide' : 'Show' }}</span>
+        </button>
+      </div>
+      <div v-show="historyOpen" class="card-body">
+        <div class="history-controls">
+          <select v-model="historyKey" class="form-input history-key-select" aria-label="Setting key">
+            <option value="" disabled>Select a setting…</option>
+            <option v-for="key in historyKeyOptions" :key="key" :value="key">{{ key }}</option>
+          </select>
+          <button type="button" class="history-load-btn" :disabled="!historyKey || historyLoading" @click="loadHistory(0)">
+            {{ historyLoading ? 'Loading…' : 'Load history' }}
+          </button>
+        </div>
+
+        <table v-if="historyEntries.length" class="history-table">
+          <thead>
+            <tr>
+              <th>When</th>
+              <th>Changed by</th>
+              <th>Old value</th>
+              <th>New value</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="entry in historyEntries" :key="entry.id">
+              <td class="history-time">{{ fmtHistoryTime(entry.created_at) }}</td>
+              <td>{{ entry.changed_by_email || `user #${entry.changed_by}` }}</td>
+              <td class="history-value">
+                <template v-if="entry.old_value === null"><span class="history-created">creation</span></template>
+                <template v-else><code>{{ entry.old_value }}</code></template>
+              </td>
+              <td class="history-value"><code>{{ entry.new_value }}</code></td>
+              <td>
+                <button
+                  type="button"
+                  class="history-rollback-btn"
+                  :disabled="entry.old_value === null || rollingBackId !== null"
+                  :title="entry.old_value === null ? 'Nothing to roll back — this entry created the key' : 'Restore this previous value'"
+                  @click="rollbackEntry(entry)"
+                >
+                  {{ rollingBackId === entry.id ? 'Rolling back…' : 'Roll back' }}
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-else-if="historyKey && !historyLoading" class="history-empty">
+          No recorded changes for this key yet.
+        </div>
+
+        <div v-if="historyTotalPages > 1" class="history-pager">
+          <button type="button" :disabled="historyPage <= 0 || historyLoading" @click="loadHistory(historyPage - 1)">Previous</button>
+          <span>Page {{ historyPage + 1 }} of {{ historyTotalPages }} ({{ historyTotal }} entries)</span>
+          <button type="button" :disabled="historyPage >= historyTotalPages - 1 || historyLoading" @click="loadHistory(historyPage + 1)">Next</button>
         </div>
       </div>
     </div>
@@ -595,5 +743,130 @@ async function toggleBool(setting: AdminSetting) {
 
 .toggle-btn.active .toggle-slider {
   transform: translateX(20px);
+}
+
+/* Change history (SF-100) */
+.history-card {
+  margin-top: 24px;
+}
+
+.history-card .card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.history-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+.history-toggle:hover { color: var(--text-primary); }
+.history-toggle .chevron { transition: transform 0.15s ease; font-size: 11px; }
+.history-toggle .chevron.open { transform: rotate(90deg); }
+
+.history-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.history-key-select {
+  width: 260px;
+}
+
+.history-load-btn {
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border-primary);
+  background: var(--primary-600);
+  color: white;
+  font-size: 13px;
+  cursor: pointer;
+}
+.history-load-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.history-table {
+  width: 100%;
+  font-size: 13px;
+  border-collapse: collapse;
+}
+.history-table th,
+.history-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-primary);
+  text-align: left;
+}
+.history-table th {
+  font-weight: 500;
+  color: var(--text-muted);
+}
+.history-time { white-space: nowrap; color: var(--text-muted); }
+.history-value code {
+  font-size: 12px;
+  background: var(--surface-2, rgba(0, 0, 0, 0.04));
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.history-created {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.history-rollback-btn {
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-primary);
+  background: transparent;
+  color: var(--primary-600);
+  font-size: 12px;
+  cursor: pointer;
+}
+.history-rollback-btn:hover:not(:disabled) {
+  background: var(--primary-50);
+}
+.history-rollback-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.history-empty {
+  padding: 16px 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.history-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-top: 12px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.history-pager button {
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-primary);
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.history-pager button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 </style>

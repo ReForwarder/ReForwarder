@@ -24,6 +24,7 @@ import (
 	"encoding/hex"
 
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/audit"
 	"github.com/goposta/posta/internal/services/domain"
 	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/jkaninda/okapi"
@@ -34,6 +35,7 @@ type DomainHandler struct {
 	repo  *repositories.DomainRepository
 	quota QuotaChecker
 	db    *gorm.DB
+	audit *audit.Logger
 }
 type CreateDomainRequest struct {
 	Body struct {
@@ -56,6 +58,54 @@ type VerifyDomainRequest struct {
 
 func NewDomainHandler(repo *repositories.DomainRepository) *DomainHandler {
 	return &DomainHandler{repo: repo}
+}
+
+// SetAuditLogger wires the optional audit logger (follows the domain-health
+// handler's pattern; every setter method degrades gracefully when nil).
+func (h *DomainHandler) SetAuditLogger(a *audit.Logger) { h.audit = a }
+
+// SetDeliveryModeRequest selects the outbound executor for a domain (OB-1,
+// ADR-001): 'relay' (default) or 'direct'.
+type SetDeliveryModeRequest struct {
+	ID   int `param:"id"`
+	Body struct {
+		DeliveryMode string `json:"delivery_mode" required:"true"`
+	} `json:"body"`
+}
+
+// SetDeliveryMode switches a domain between the relay and direct-to-MX
+// executors. Fail-closed per ADR-001: 'direct' requires ownership
+// verification (the sender domain must be tenant-verified before the MTA
+// will ever deliver for it).
+func (h *DomainHandler) SetDeliveryMode(c *okapi.Context, req *SetDeliveryModeRequest) error {
+	if err := requireEdit(c); err != nil {
+		return c.AbortForbidden("insufficient workspace permissions", err)
+	}
+	mode := req.Body.DeliveryMode
+	if mode != models.DeliveryModeRelay && mode != models.DeliveryModeDirect {
+		return c.AbortBadRequest("delivery_mode must be 'relay' or 'direct'")
+	}
+	d, err := h.repo.FindByID(uint(req.ID))
+	if err != nil || !ownsResource(c, d.UserID, d.WorkspaceID) {
+		return c.AbortNotFound("domain not found")
+	}
+	if mode == models.DeliveryModeDirect && !d.OwnershipVerified {
+		return c.AbortBadRequest("direct delivery requires a verified domain")
+	}
+	if d.DeliveryMode == mode {
+		return ok(c, okapi.M{"domain": d, "delivery_mode": mode, "changed": false})
+	}
+	d.DeliveryMode = mode
+	if err := h.repo.Update(d); err != nil {
+		return c.AbortInternalServerError("failed to update domain")
+	}
+	if h.audit != nil {
+		h.audit.LogCtx(c, "domain.delivery_mode_changed",
+			"Domain delivery mode changed", map[string]any{
+				"domain_id": d.ID, "domain": d.Domain, "delivery_mode": mode,
+			})
+	}
+	return ok(c, okapi.M{"domain": d, "delivery_mode": mode, "changed": true})
 }
 
 // SetQuota sets the quota checker for plan-based resource limits.

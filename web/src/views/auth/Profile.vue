@@ -1,17 +1,19 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted, nextTick } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { authApi } from '../../api/auth'
 import { oauthApi } from '../../api/oauth'
 import { sessionsApi, type Session } from '../../api/sessions'
 import { webauthnApi, passkeysSupported, serializeCreation } from '../../api/webauthn'
+import { webPushApi, applicationServerKeyBytes, serializeSubscription } from '../../api/webpush'
 import { useAuthStore } from '../../stores/auth'
 import { useNotificationStore } from '../../stores/notification'
 import { useConfirm } from '../../composables/useConfirm'
-import type { Plan, OAuthLinkedAccount, OAuthProviderInfo, WebAuthnCredential } from '../../api/types'
+import type { Plan, OAuthLinkedAccount, OAuthProviderInfo, WebAuthnCredential, AppPassword, PushSubscriptionRow } from '../../api/types'
 const auth = useAuthStore()
 const notify = useNotificationStore()
 const { confirm } = useConfirm()
+const route = useRoute()
 const router = useRouter()
 
 // Profile
@@ -19,6 +21,9 @@ const name = ref('')
 const email = ref('')
 const profileLoading = ref(false)
 const twoFactorEnabled = ref(false)
+// GAP-12: set while the two_factor_required policy applies and the account
+// still owes its enrollment — the banner points at the setup card.
+const enrollmentRequired = ref(false)
 const scheduledDeletionAt = ref<string | null>(null)
 const deletionLoading = ref(false)
 
@@ -48,9 +53,20 @@ onMounted(async () => {
   try {
     const res = await authApi.me()
     twoFactorEnabled.value = res.data.data.two_factor_enabled
+    enrollmentRequired.value = !!res.data.data.two_factor_enrollment_required
     scheduledDeletionAt.value = res.data.data.scheduled_deletion_at
     if (twoFactorEnabled.value) await loadRecoveryCount()
   } catch { /* ignore */ }
+
+  // GAP-12 deep link: the login flow redirects an un-enrolled account here
+  // (?setup=2fa). Scroll the 2FA card into view and say why.
+  if (route.query.setup === '2fa' && !twoFactorEnabled.value) {
+    enrollmentRequired.value = true
+    await nextTick()
+    document.getElementById('two-factor-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
+  await loadAppPasswords()
 
   if (passkeysSupportedHere.value) await loadPasskeys()
 
@@ -261,6 +277,88 @@ function downloadRecoveryCodes() {
   a.download = 'posta-recovery-codes.txt'
   a.click()
   URL.revokeObjectURL(url)
+}
+
+// SF-35/SF-67: app passwords for mail clients (IMAP/POP3/submission). The
+// plaintext rides the create response exactly once — same contract as the
+// recovery codes; the backend keeps only a bcrypt digest.
+const appPasswords = ref<AppPassword[]>([])
+const appPasswordsLoading = ref(false)
+const appPasswordName = ref('')
+const appPasswordCreating = ref(false)
+const appPasswordSecret = ref('') // one-time display
+const appPasswordSecretName = ref('')
+const appPasswordCopied = ref(false)
+
+async function loadAppPasswords() {
+  appPasswordsLoading.value = true
+  try {
+    const res = await authApi.listAppPasswords()
+    appPasswords.value = res.data.data || []
+  } catch { /* the card stays empty on failure */ }
+  finally { appPasswordsLoading.value = false }
+}
+
+async function createAppPassword() {
+  const label = appPasswordName.value.trim()
+  if (!label) {
+    notify.error('Give the app password a name first')
+    return
+  }
+  appPasswordCreating.value = true
+  try {
+    const res = await authApi.createAppPassword(label)
+    appPasswordSecret.value = res.data.data.password
+    appPasswordSecretName.value = res.data.data.app_password.name
+    appPasswordCopied.value = false
+    appPasswordName.value = ''
+    await loadAppPasswords()
+  } catch (e: any) {
+    const message = e?.response?.data?.error?.message || 'Failed to create app password'
+    notify.error(message)
+  } finally {
+    appPasswordCreating.value = false
+  }
+}
+
+function copyAppPassword() {
+  navigator.clipboard?.writeText(appPasswordSecret.value).then(
+    () => {
+      appPasswordCopied.value = true
+      notify.success('App password copied to clipboard')
+    },
+    () => notify.error('Copy failed — select the password manually'),
+  )
+}
+
+function dismissAppPasswordSecret() {
+  // Closing the one-time view is final: the value cannot be retrieved again.
+  appPasswordSecret.value = ''
+  appPasswordSecretName.value = ''
+  appPasswordCopied.value = false
+}
+
+async function revokeAppPassword(p: AppPassword) {
+  const confirmed = await confirm({
+    title: 'Revoke App Password',
+    message: `Revoke "${p.name}"? Any mail client using it will stop working immediately.`,
+    confirmText: 'Revoke',
+    variant: 'danger',
+  })
+  if (!confirmed) return
+  try {
+    await authApi.revokeAppPassword(p.id)
+    await loadAppPasswords()
+    notify.success('App password revoked')
+  } catch (e: any) {
+    const message = e?.response?.data?.error?.message || 'Failed to revoke app password'
+    notify.error(message)
+  }
+}
+
+function formatAppPasswordDate(val: string | null): string {
+  if (!val) return '—'
+  return new Date(val).toLocaleString()
 }
 
 async function disable2FA() {
@@ -522,8 +620,108 @@ function formatDeletionDate(dateStr: string): string {
   })
 }
 
+// ---- Browser push notifications (SF-89) ----
+// The deployment advertises Web Push (VAPID public key) via /users/me/push;
+// subscribing runs the browser ceremony — service worker registration,
+// Notification.requestPermission, PushManager.subscribe — then hands the
+// PushSubscription to the backend for user-scoped storage.
+const pushSupported = typeof window !== 'undefined' && 'PushManager' in window && 'serviceWorker' in window.navigator
+const pushState = ref<'loading' | 'off' | 'unsupported' | 'denied' | 'ready'>('loading')
+const pushSubs = ref<PushSubscriptionRow[]>([])
+const pushBusy = ref(false)
+
+async function loadPush() {
+  if (!pushSupported) {
+    pushState.value = 'unsupported'
+    return
+  }
+  try {
+    const cfg = await webPushApi.getConfig()
+    if (!cfg.data.data.enabled) {
+      pushState.value = 'off'
+      return
+    }
+    if (typeof Notification !== 'undefined' && Notification.permission === 'denied') {
+      pushState.value = 'denied'
+      return
+    }
+    const listed = await webPushApi.list()
+    pushSubs.value = listed.data.data || []
+    pushState.value = 'ready'
+  } catch {
+    pushState.value = 'off' // probe failure reads as "not offered here"
+  }
+}
+
+async function enablePush() {
+  pushBusy.value = true
+  try {
+    const cfg = await webPushApi.getConfig()
+    const key = cfg.data.data.public_key
+    if (!key) throw new Error('push is not configured')
+    const permission = await Notification.requestPermission()
+    if (permission !== 'granted') {
+      pushState.value = 'denied'
+      return
+    }
+    const reg = await navigator.serviceWorker.register('/push-sw.js')
+    await navigator.serviceWorker.ready
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: applicationServerKeyBytes(key) as BufferSource,
+    })
+    await webPushApi.subscribe(serializeSubscription(sub))
+    notify.success('Browser notifications enabled')
+    await loadPush()
+  } catch (e: any) {
+    notify.error(e?.message || 'Could not enable browser notifications')
+  } finally {
+    pushBusy.value = false
+  }
+}
+
+// pushSubscriptionLabel names a stored subscription after the push service
+// host and, when recognizable, the browser that registered it.
+function pushSubscriptionLabel(s: PushSubscriptionRow): string {
+  let host = 'push service'
+  try {
+    host = new URL(s.endpoint).host
+  } catch { /* keep the fallback */ }
+  const ua = s.user_agent || ''
+  const browser =
+    ua.includes('Firefox') ? 'Firefox' :
+    ua.includes('Edg/') ? 'Edge' :
+    ua.includes('Chrome') ? 'Chrome' :
+    ua.includes('Safari') ? 'Safari' : ''
+  return browser ? `${browser} via ${host}` : host
+}
+
+async function removePush(id: number) {
+  pushBusy.value = true
+  try {
+    await webPushApi.unsubscribe(id)
+    // Best effort: drop this browser's local subscription so the next enable
+    // starts clean. A different browser's row is removed server-side only.
+    try {
+      const reg = await navigator.serviceWorker.getRegistration()
+      const local = await reg?.pushManager.getSubscription()
+      if (local && pushSubs.value.find((s) => s.id === id)?.endpoint === local.endpoint) {
+        await local.unsubscribe()
+      }
+    } catch { /* the server row is gone either way */ }
+    await loadPush()
+  } catch {
+    notify.error('Could not remove the notification subscription')
+  } finally {
+    pushBusy.value = false
+  }
+}
+
 // Load sessions on mount
-onMounted(() => { loadSessions() })
+onMounted(() => {
+  loadSessions()
+  loadPush()
+})
 </script>
 
 <template>
@@ -594,13 +792,19 @@ onMounted(() => { loadSessions() })
       </div>
 
       <!-- Two-Factor Authentication -->
-      <div class="card">
+      <div id="two-factor-card" class="card">
         <div class="card-header">
           <h2>Two-Factor Authentication</h2>
           <span v-if="twoFactorEnabled" class="badge badge-success">Enabled</span>
           <span v-else class="badge badge-secondary">Disabled</span>
         </div>
         <div class="card-body">
+          <!-- GAP-12: the two_factor_required policy demands enrollment. -->
+          <div v-if="enrollmentRequired && !twoFactorEnabled" class="enrollment-banner" role="alert">
+            <strong>Two-factor authentication is required.</strong>
+            Your administrator requires every account to have a second factor.
+            Enable it below to finish setting up your account.
+          </div>
           <!-- 2FA Not Enabled -->
           <template v-if="!twoFactorEnabled && !show2FASetup">
             <p class="tfa-description">Add an extra layer of security to your account by requiring a code from your authenticator app.</p>
@@ -900,6 +1104,80 @@ onMounted(() => { loadSessions() })
         </div>
       </div>
 
+      <!-- App Passwords (SF-35/SF-67): mail-client credentials -->
+      <div class="card">
+        <div class="card-header"><h2>App Passwords</h2></div>
+        <div class="card-body">
+          <p class="tfa-description">
+            Separate passwords for mail clients (IMAP, POP3, submission) so your account password never
+            has to be pasted into an email app. Each password is shown once, then stored only as a
+            one-way digest.
+          </p>
+
+          <!-- One-time display of a freshly generated password -->
+          <div v-if="appPasswordSecret" class="app-password-reveal">
+            <p class="tfa-description" style="margin-bottom: 8px">
+              <strong>{{ appPasswordSecretName }}</strong> — store this password now. It will never be
+              shown again.
+            </p>
+            <div class="app-password-row">
+              <code class="app-password-value">{{ appPasswordSecret }}</code>
+              <button class="btn btn-secondary btn-sm" @click="copyAppPassword">
+                {{ appPasswordCopied ? 'Copied' : 'Copy' }}
+              </button>
+              <button class="btn btn-primary btn-sm" @click="dismissAppPasswordSecret">Done</button>
+            </div>
+          </div>
+
+          <form v-else class="app-password-form" @submit.prevent="createAppPassword">
+            <div class="form-group">
+              <label class="form-label" for="app-password-name">New app password name</label>
+              <div class="app-password-row">
+                <input
+                  id="app-password-name"
+                  v-model="appPasswordName"
+                  type="text"
+                  class="form-input"
+                  placeholder="e.g. Laptop Thunderbird"
+                  maxlength="100"
+                  required
+                />
+                <button type="submit" class="btn btn-primary" :disabled="appPasswordCreating">
+                  {{ appPasswordCreating ? 'Generating...' : 'Generate' }}
+                </button>
+              </div>
+            </div>
+          </form>
+
+          <div v-if="appPasswordsLoading" style="text-align: center; padding: 12px 0">
+            <div class="spinner"></div>
+          </div>
+          <div v-else-if="appPasswords.length === 0" class="text-muted" style="font-size: 13px">
+            No app passwords yet.
+          </div>
+          <div v-else class="session-list">
+            <div v-for="p in appPasswords" :key="p.id" class="session-item">
+              <div class="session-info">
+                <div class="session-browser">
+                  {{ p.name }}
+                  <span v-if="p.revoked_at" class="badge badge-secondary" style="margin-left: 6px">Revoked</span>
+                </div>
+                <div class="session-meta">
+                  Created {{ formatAppPasswordDate(p.created_at) }} &middot; Last used {{ formatAppPasswordDate(p.last_used_at ?? null) }}
+                </div>
+              </div>
+              <button
+                v-if="!p.revoked_at"
+                class="btn btn-danger btn-sm"
+                @click="revokeAppPassword(p)"
+              >
+                Revoke
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Change Password -->
       <div class="card">
         <div class="card-header"><h2>Change Password</h2></div>
@@ -921,6 +1199,52 @@ onMounted(() => { loadSessions() })
               {{ passwordLoading ? 'Updating...' : 'Change Password' }}
             </button>
           </form>
+        </div>
+      </div>
+
+      <!-- Browser push notifications (SF-89) -->
+      <div class="card" v-if="pushState !== 'off'">
+        <div class="card-header"><h2>Browser Notifications</h2></div>
+        <div class="card-body">
+          <p class="tfa-description">
+            Get a browser notification when new activity lands in your workspaces — message replies,
+            form submissions, and campaign progress — even when the dashboard is closed.
+          </p>
+
+          <div v-if="pushState === 'loading'" style="text-align: center; padding: 12px 0">
+            <div class="spinner"></div>
+          </div>
+
+          <div v-else-if="pushState === 'unsupported'" class="text-muted" style="font-size: 13px">
+            This browser does not support push notifications.
+          </div>
+
+          <div v-else-if="pushState === 'denied'" class="text-muted" style="font-size: 13px">
+            Notifications are blocked for this site. Re-enable them in your browser's site settings,
+            then reload this page.
+          </div>
+
+          <template v-else>
+            <button class="btn btn-primary" :disabled="pushBusy" @click="enablePush">
+              {{ pushBusy ? 'Working...' : 'Enable browser notifications' }}
+            </button>
+
+            <div v-if="pushSubs.length > 0" class="session-list" style="margin-top: 12px">
+              <div v-for="s in pushSubs" :key="s.id" class="session-item">
+                <div class="session-info">
+                  <div class="session-browser">
+                    {{ pushSubscriptionLabel(s) }}
+                  </div>
+                  <div class="session-meta">
+                    Subscribed {{ formatAppPasswordDate(s.created_at) }}
+                  </div>
+                </div>
+                <button class="btn btn-danger btn-sm" :disabled="pushBusy" @click="removePush(s.id)">
+                  Remove
+                </button>
+              </div>
+            </div>
+          </template>
         </div>
       </div>
 
@@ -1166,5 +1490,45 @@ onMounted(() => { loadSessions() })
 .plan-limit-row span:last-child {
   font-weight: 500;
   font-variant-numeric: tabular-nums;
+}
+/* GAP-12: forced-enrollment banner on the 2FA card. */
+.enrollment-banner {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  font-size: 13px;
+  border: 1px solid color-mix(in srgb, var(--warning-text, #b45309) 35%, transparent);
+  background: color-mix(in srgb, var(--warning-text, #b45309) 8%, transparent);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+}
+
+/* SF-35/SF-67: app passwords card. */
+.app-password-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.app-password-row .form-input {
+  flex: 1;
+  min-width: 220px;
+}
+.app-password-value {
+  flex: 1;
+  min-width: 220px;
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  word-break: break-all;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius);
+}
+.app-password-reveal {
+  margin-bottom: 16px;
+  padding: 12px;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius);
+  background: var(--bg-tertiary);
 }
 </style>

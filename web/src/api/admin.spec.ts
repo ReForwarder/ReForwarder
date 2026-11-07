@@ -46,18 +46,11 @@ const NON_ENDPOINT_MODULES = new Set(['client.ts', 'types.ts'])
  * if the endpoint ever drifts again.
  */
 const KNOWN_DRIFT: Array<{ path: string; why: string }> = [
-  {
-    path: '/admin/api-keys',
-    why: 'adminApi.listApiKeys (admin.ts) — dead API method, no view calls it, no GET /admin/api-keys route exists',
-  },
-  {
-    path: '/admin/api-keys/{}',
-    why: 'adminApi.revokeApiKey (admin.ts) — dead API method, no DELETE /admin/api-keys/{id} route exists',
-  },
-  {
-    path: '/admin/emails',
-    why: 'adminApi.listEmails (admin.ts) — dead API method, no view calls it, no GET /admin/emails route exists',
-  },
+  // CA-02 (2026-11-07): the /admin/api-keys, /admin/api-keys/{} and
+  // /admin/emails allowances were deleted together with the dead admin.ts
+  // client functions they covered (RF-F103) — no backend route exists and no
+  // view ever called them.
+
   {
     path: '/users/me/contact-lists',
     why: 'contactListsApi list/create (contactLists.ts) — the backend ContactListHandler is complete but registered NOWHERE; Contact Lists pages 404',

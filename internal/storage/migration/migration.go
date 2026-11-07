@@ -43,6 +43,7 @@ func Run(db *gorm.DB) error {
 		&models.SMTPCredential{},
 		&models.Email{},
 		&models.InboundEmail{},
+		&models.InboundAuthResult{},
 		&models.DMARCReport{},
 		&models.StyleSheet{},
 		&models.Template{},
@@ -54,6 +55,7 @@ func Run(db *gorm.DB) error {
 		&models.Webhook{},
 		&models.Domain{},
 		&models.DomainSigningKey{},
+		&models.MTADeliveryAttempt{},
 		&models.Bounce{},
 		&models.Suppression{},
 		&models.UnsubscribeList{},
@@ -65,6 +67,7 @@ func Run(db *gorm.DB) error {
 		&models.SecurityEvent{},
 		&models.SecurityAllowlist{},
 		&models.Setting{},
+		&models.SettingHistory{}, // SF-100: per-key settings change history + rollback
 		&models.UserSetting{},
 		&models.WorkspaceSetting{},
 		&models.WebhookDelivery{},
@@ -73,9 +76,12 @@ func Run(db *gorm.DB) error {
 		&models.IncomingWebhookEvent{},
 		&models.Session{},
 		&models.WebAuthnCredential{},
+		&models.UserPushSubscription{}, // SF-89: browser Web Push subscriptions (user-scoped)
 		&models.UserEmailVerification{},
 		&models.PasswordResetToken{},
 		&models.UserRecoveryCode{},
+		&models.UserAppPassword{}, // SF-35/SF-67: app passwords for the mail-client surfaces (ADR-004)
+		&models.RefreshToken{},    // CA-03: rotating refresh tokens
 		&models.Subscriber{},
 		&models.SubscriberList{},
 		&models.SubscriberListMember{},

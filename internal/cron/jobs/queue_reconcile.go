@@ -83,9 +83,21 @@ func (j *QueueReconcileJob) Name() string     { return "queue-reconcile" }
 func (j *QueueReconcileJob) Schedule() string { return "*/5 * * * *" }
 
 func (j *QueueReconcileJob) Run(_ context.Context, _ *asynq.Client) error {
+	_, err := j.ReconcileOnce(context.Background())
+	return err
+}
+
+// ReconcileOnce runs one reconcile sweep on demand and reports how many lost
+// emails it re-enqueued. It is the entry point behind the admin
+// POST /admin/queue/actions/requeue_stuck operation (SF-59): the same
+// guard-railed sweep the cron tick runs, invoked by an operator instead of the
+// schedule. Nil producer or inspector reports zero without error — the same
+// no-op contract Run has when the worker is not attached.
+func (j *QueueReconcileJob) ReconcileOnce(_ context.Context) (int, error) {
 	if j.producer == nil || j.inspector == nil {
-		return nil
+		return 0, nil
 	}
+	requeued := 0
 	cutoff := time.Now().Add(-j.stuckFor)
 
 	var stuck []models.Email
@@ -94,7 +106,7 @@ func (j *QueueReconcileJob) Run(_ context.Context, _ *asynq.Client) error {
 		Order("updated_at ASC").
 		Limit(j.batchSize).
 		Find(&stuck).Error; err != nil {
-		return err
+		return 0, err
 	}
 
 	for i := range stuck {
@@ -140,7 +152,8 @@ func (j *QueueReconcileJob) Run(_ context.Context, _ *asynq.Client) error {
 			logger.Error("queue-reconcile: failed to re-enqueue lost email", "email_id", em.ID, "error", err)
 			continue
 		}
+		requeued++
 		logger.Info("queue-reconcile: re-enqueued lost email", "email_id", em.ID)
 	}
-	return nil
+	return requeued, nil
 }

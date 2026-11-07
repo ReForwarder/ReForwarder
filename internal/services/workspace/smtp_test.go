@@ -102,6 +102,10 @@ func TestConnectionDriftNoChange(t *testing.T) {
 }
 
 func TestConnectionDriftPerField(t *testing.T) {
+	// SF-78 hardening: Encrypt refuses to write unprotected secrets when no
+	// POSTA_ENCRYPTION_KEY is configured, so the password-drift arm must run
+	// with crypto initialized (the sibling test below already does).
+	crypto.Init("workspace-drift-test-key")
 	cases := []struct {
 		name   string
 		mutate func(*models.SMTPServer)

@@ -77,6 +77,19 @@ func (r *DomainRepository) FindByUserIDAndDomain(userID uint, domain string) (*m
 	return &d, nil
 }
 
+// FindByWorkspaceAndDomain resolves a domain row inside a workspace (any
+// member's domain, since domain rows carry the owning member's user_id and an
+// optional workspace_id). Used by the send worker to read the per-domain
+// delivery configuration (OB-1, ADR-001). The domain matches exactly, like
+// FindByUserIDAndDomain — sender domains are normalized before lookup.
+func (r *DomainRepository) FindByWorkspaceAndDomain(workspaceID uint, domain string) (*models.Domain, error) {
+	var d models.Domain
+	if err := r.db.Where("workspace_id = ? AND domain = ?", workspaceID, domain).First(&d).Error; err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
 func (r *DomainRepository) FindByWorkspaceID(workspaceID uint, limit, offset int) ([]models.Domain, int64, error) {
 	var domains []models.Domain
 	var total int64

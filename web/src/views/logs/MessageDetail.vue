@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { logsApi } from '../../api/logs'
 import type { MessageDetailRow, MessageContent, EmailEventRecord } from '../../api/types'
@@ -13,6 +13,98 @@ const message = ref<MessageDetailRow | null>(null)
 const events = ref<EmailEventRecord[]>([])
 const content = ref<MessageContent | null>(null)
 const activeTab = ref<'html' | 'mjml' | 'data' | 'meta'>('html')
+
+// ---- Live trace stream (SF-56) ----
+// The SSE tail opens at the newest existing event, so the history fetched
+// above and the stream interleave without duplicates; rows are deduped by id
+// regardless (the SecurityEvents pattern).
+const streaming = ref(false)
+let eventSource: EventSource | null = null
+
+function startStream(uuid: string) {
+  const baseUrl = import.meta.env.VITE_API_URL || '/api/v1'
+  // EventSource cannot set an Authorization header, but it does send the
+  // HttpOnly session cookie on the handshake; the active workspace travels as
+  // the workspace_id query parameter the server's stream middleware reads.
+  eventSource = new EventSource(`${baseUrl}/workspaces/current/logs/${encodeURIComponent(uuid)}/events/stream`, {
+    withCredentials: true,
+  })
+  eventSource.onopen = () => {
+    streaming.value = true
+  }
+  eventSource.addEventListener('email.event', (e) => {
+    try {
+      const evt: EmailEventRecord = JSON.parse((e as MessageEvent).data)
+      if (events.value.some((existing) => existing.id === evt.id)) return
+      events.value = [...events.value, evt].sort((a, b) => a.id - b.id)
+    } catch {
+      // ignore malformed frames
+    }
+  })
+  eventSource.onerror = () => {
+    streaming.value = false
+  }
+}
+
+function stopStream() {
+  if (eventSource) {
+    eventSource.close()
+    eventSource = null
+  }
+  streaming.value = false
+}
+
+onBeforeUnmount(() => {
+  stopStream()
+  stopStatusPolling()
+})
+
+// ---- Delivery-status polling (CA-02) ----
+// While a send is queued or processing, the lightweight
+// GET /workspaces/current/emails/{id}/status view (RF-F103's dead route) is
+// polled every 4s until it reports a terminal state or the poll budget runs
+// out; the badge updates in place and the timeline refetches once on arrival.
+const TERMINAL_STATUSES = new Set(['sent', 'failed', 'suppressed'])
+const STATUS_POLL_MS = 4000
+const STATUS_POLL_MAX = 75 // ~5 minutes, then give up quietly
+let statusTimer: ReturnType<typeof setInterval> | null = null
+let statusPolls = 0
+
+function startStatusPolling(uuid: string) {
+  if (statusTimer) return
+  statusTimer = setInterval(async () => {
+    statusPolls++
+    if (statusPolls > STATUS_POLL_MAX) {
+      stopStatusPolling()
+      return
+    }
+    try {
+      const resp = await logsApi.getEmailStatus(uuid)
+      const status = resp.data.data.status
+      if (message.value && message.value.status !== status) {
+        message.value = { ...message.value, status }
+      }
+      if (TERMINAL_STATUSES.has(status)) {
+        stopStatusPolling()
+        // The terminal row may carry new timeline entries; refetch once.
+        try {
+          const evs = await logsApi.getMessageEvents(uuid)
+          events.value = evs.data.data || []
+        } catch { /* the timeline keeps whatever it had */ }
+      }
+    } catch {
+      // A single failed probe is ignored; the next tick retries. The SSE tail
+      // remains the primary live channel.
+    }
+  }, STATUS_POLL_MS)
+}
+
+function stopStatusPolling() {
+  if (statusTimer) {
+    clearInterval(statusTimer)
+    statusTimer = null
+  }
+}
 
 onMounted(async () => {
   const uuid = route.params.uuid as string
@@ -31,6 +123,12 @@ onMounted(async () => {
   if (evs.status === 'fulfilled') events.value = evs.value.data.data || []
   if (cnt.status === 'fulfilled') content.value = cnt.value.data.data
   loading.value = false
+  // Live tail: new timeline rows arrive over SSE while the page is open.
+  if (!notFound.value) startStream(uuid)
+  // CA-02: poll the delivery status while the send is still in flight.
+  if (!notFound.value && message.value && !TERMINAL_STATUSES.has(message.value.status)) {
+    startStatusPolling(uuid)
+  }
 })
 
 // The content endpoint answers {redacted: true} — and nothing else — when the
@@ -51,6 +149,19 @@ const EVENT_META: Record<string, { icon: string; cls: string }> = {
 
 function eventMeta(type: string) {
   return EVENT_META[type] || { icon: 'mdi-dots-horizontal', cls: 'badge-neutral' }
+}
+
+// The R-05 classification the ingestion pipeline stamped onto the event's
+// metadata JSONB ({"classification": "mailbox_not_found", …}); empty when the
+// event carries none.
+function eventClassification(ev: EmailEventRecord): string {
+  if (!ev.metadata) return ''
+  try {
+    const meta = JSON.parse(ev.metadata) as Record<string, unknown>
+    return typeof meta.classification === 'string' ? meta.classification : ''
+  } catch {
+    return ''
+  }
 }
 
 function statusBadgeClass(status: string) {
@@ -203,7 +314,10 @@ function copy(key: string, text: string) {
                 <td style="color: var(--danger-text)">{{ message.error_message }}</td>
               </tr>
               <tr v-if="events.length">
-                <td style="font-weight: 600">Timeline</td>
+                <td style="font-weight: 600">
+                  Timeline
+                  <span v-if="streaming" class="live-indicator" title="Streaming new events">live</span>
+                </td>
                 <td>
                   <div class="timeline">
                     <span
@@ -215,6 +329,9 @@ function copy(key: string, text: string) {
                     >
                       <span class="mdi" :class="eventMeta(ev.type).icon"></span>
                       {{ ev.type }}
+                      <span v-if="eventClassification(ev)" class="event-classification">
+                        · {{ eventClassification(ev).replace(/_/g, ' ') }}
+                      </span>
                     </span>
                   </div>
                 </td>
@@ -313,6 +430,26 @@ function copy(key: string, text: string) {
 
 .event-badge .mdi {
   font-size: 13px;
+}
+
+/* Classification stamped by the ingestion pipeline onto the event (SF-53). */
+.event-classification {
+  font-weight: 500;
+  opacity: 0.85;
+}
+
+/* Live-tail marker on the timeline row (SF-56). */
+.live-indicator {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  background: var(--success-50, #e6f6ec);
+  color: var(--success-text, #157347);
 }
 
 /* Accent badge for clicks (the signature ramp). */

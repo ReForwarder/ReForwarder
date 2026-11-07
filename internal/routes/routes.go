@@ -58,6 +58,7 @@ import (
 	"github.com/goposta/posta/internal/services/verifier"
 	"github.com/goposta/posta/internal/services/webauthn"
 	"github.com/goposta/posta/internal/services/webhook"
+	"github.com/goposta/posta/internal/services/webpush"
 	"github.com/goposta/posta/internal/services/workermon"
 	"github.com/goposta/posta/internal/services/workspaceprovision"
 	"github.com/goposta/posta/internal/storage/blob"
@@ -140,6 +141,7 @@ type routerHandlers struct {
 	workspaceSetting *handlers.WorkspaceSettingHandler
 	security         *handlers.SecurityHandler
 	session          *handlers.SessionHandler
+	appPassword      *handlers.AppPasswordHandler
 	webauthn         *handlers.WebAuthnHandler
 	impersonation    *handlers.ImpersonationHandler
 	cron             *handlers.CronHandler
@@ -163,6 +165,8 @@ type routerHandlers struct {
 	messageFilter    *handlers.MessageFilterHandler
 	formIngest       *handlers.FormIngestHandler
 	logs             *handlers.LogsHandler
+	queueOps         *handlers.QueueOpsHandler
+	webpush          *handlers.WebPushHandler
 }
 
 func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *config.Config, eng *security.Engine, producer *worker.Producer, cronManager *cronpkg.Manager, blobStore blob.Store, ctx context.Context, notifier ...*notification.Service) *email.Service {
@@ -235,10 +239,18 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 		Timeout:        time.Duration(cfg.WebhookTimeoutSecs) * time.Second,
 		ProxyURL:       cfg.WebhookProxyURL,
 		ProxyAckPolicy: cfg.WebhookProxyAckPolicy,
+
+		// SF-90: batch delivery is off unless POSTA_WEBHOOK_BATCH_ENABLED is
+		// set; the pending cap is inert in per-event mode.
+		BatchEnabled:       cfg.WebhookBatchEnabled,
+		BatchMaxEvents:     cfg.WebhookBatchMaxEvents,
+		BatchFlushInterval: time.Duration(cfg.WebhookBatchFlushSecs) * time.Second,
+		MaxPendingEvents:   cfg.WebhookMaxPendingEvents,
 	})
 	dispatcher.OnDeliverySuccess(func() { metrics.IncrementWebhookDelivery("success") })
 	dispatcher.OnDeliveryFailed(func() { metrics.IncrementWebhookDelivery("failed") })
 	dispatcher.OnDeliveryDone(metrics.ObserveWebhookDeliveryDuration)
+	dispatcher.OnEventsDropped(metrics.IncrementWebhookEventsDropped)
 	emailService := email.NewService(emailRepo, smtpRepo, templateRepo, suppressionRepo, limiter, dispatcher, cfg.DevMode)
 	emailService.SetSettings(settingsProvider)
 	emailService.SetPlanLimits(&emailPlanAdapter{planService})
@@ -352,6 +364,7 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 			userSetting:      handlers.NewUserSettingHandler(userSettingRepo),
 			workspaceSetting: handlers.NewWorkspaceSettingHandler(workspaceSettingRepo),
 			session:          handlers.NewSessionHandler(sessionRepo, sessionStore),
+			appPassword:      handlers.NewAppPasswordHandler(repositories.NewUserAppPasswordRepository(db)),
 			verify:           handlers.NewVerifyHandler(verifierSvc),
 		},
 	}
@@ -360,8 +373,43 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	r.h.user.SetSessionRepo(sessionRepo)
 	r.h.admin.SetSessionRepo(sessionRepo, sessionStore)
 	r.h.admin.SetMigrator(migrator)
+	// Queue operations (cancel/run/archive/destroy, pause/resume) are audited
+	// on the deployment audit trail.
+	r.h.admin.SetAuditLogger(auditLogger)
 	// Recovery-code logins (R-10) land on the user audit trail.
 	r.h.user.SetAuditLogger(auditLogger)
+	// Delivery-mode switches (OB-1) are audited on the deployment trail.
+	r.h.domain.SetAuditLogger(auditLogger)
+
+	// SF-100: platform settings writes record a per-key change history
+	// (setting_history) and invalidate the shared provider's 30s TTL cache
+	// through the one write path (applySettingWrites) — update and rollback
+	// alike. The history repository rides the same DB; the provider is the
+	// instance every consumer (rate limiter, retention jobs, plan service)
+	// already reads through.
+	r.h.setting.SetHistoryRepo(repositories.NewSettingHistoryRepository(db))
+	r.h.setting.SetSettingsProvider(settingsProvider)
+
+	// SF-35/SF-67: app passwords for the future mail-client surfaces (ADR-004).
+	// The management endpoints and the verification seam share this repository.
+	r.h.user.SetAppPasswordRepo(repositories.NewUserAppPasswordRepository(db))
+
+	// CA-03: rotating refresh tokens ride every login unless the deployment
+	// opted out with POSTA_REFRESH_TOKENS_ENABLED=false.
+	refreshSvc := auth.NewRefreshTokenService(repositories.NewRefreshTokenRepository(db), cfg.JWTSecret)
+	if cfg.RefreshTokensEnabled {
+		r.h.user.SetRefreshTokens(refreshSvc)
+		r.h.session.SetRefreshTokens(refreshSvc)
+	}
+
+	// Operational queue actions (SF-59): requeue_stuck needs the send
+	// producer, which only exists when the deployment runs a worker, and
+	// purge_archived_before rides the same asynq inspector.
+	if producer != nil {
+		r.h.queueOps = handlers.NewQueueOpsHandler(
+			db, producer, inspector, handlers.NewAsynqQueueInspector(inspector))
+		r.h.queueOps.SetAuditLogger(auditLogger)
+	}
 
 	// Passkeys (R-19). The WebAuthn Relying Party identity is derived from the
 	// dashboard origin: RPID is the origin's bare host (no scheme, no port),
@@ -394,6 +442,27 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 		// Disabled passkeys still get a handler: it answers 503 on every
 		// endpoint instead of the route table dereferencing a nil handler.
 		r.h.webauthn = handlers.NewWebAuthnHandler(nil, userRepo, userHandler)
+	}
+
+	// SF-89 Web Push: off unless POSTA_WEB_PUSH_ENABLED=true with a valid
+	// VAPID identity. When off, the handler still answers the capability
+	// probe with enabled=false and refuses the subscription endpoints.
+	pushRepo := repositories.NewUserPushSubscriptionRepository(db)
+	var pushService *webpush.Service
+	if cfg.WebPushEnabled {
+		if svc, err := webpush.New(webpush.Config{
+			PublicKey:  cfg.WebPushVapidPublic,
+			PrivateKey: cfg.WebPushVapidPriv,
+			Subject:    cfg.WebPushSubject,
+		}); err != nil {
+			logger.Error("web push disabled: invalid VAPID configuration", "error", err)
+			r.h.webpush = handlers.NewWebPushHandler(nil, pushRepo)
+		} else {
+			pushService = svc
+			r.h.webpush = handlers.NewWebPushHandler(svc, pushRepo)
+		}
+	} else {
+		r.h.webpush = handlers.NewWebPushHandler(nil, pushRepo)
 	}
 
 	// Administrative impersonation (R-20): endpoint handlers plus wiring; the
@@ -551,6 +620,9 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 
 	// Logs (message history, webhook stores, audit)
 	r.h.logs = handlers.NewLogsHandler(db, logsRecorder, settingsProvider)
+	// Classification breakdown (SF-53): the ingestion service's workspace-
+	// scoped aggregate over email_events.metadata backs the endpoint.
+	r.h.logs.SetClassificationCounter(providerEventSvc)
 
 	// Inbound email
 	if cfg.InboundEnabled {
@@ -631,7 +703,14 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 		r.h.form.SetKeyCache(messageSvc)
 		r.h.message = handlers.NewMessageHandler(messageRepo, formRepo, messageFilterRepo, messageSvc, auditLogger)
 		r.h.message.SetEventBus(bus)
-		r.h.message.SetRealtime(realtime.NewRedis(redisClient))
+		// SF-89: when Web Push is enabled, published dashboard message events
+		// also fan out to workspace members' browsers; otherwise the plain
+		// Redis bus serves the SSE stream only.
+		messageBus := realtime.Bus(realtime.NewRedis(redisClient))
+		if pushService != nil {
+			messageBus = webpush.NewFanout(messageBus, pushService, pushRepo)
+		}
+		r.h.message.SetRealtime(messageBus)
 		r.h.messageFilter = handlers.NewMessageFilterHandler(messageFilterRepo, messageRepo, formRepo, messageSvc.Scanner())
 		r.h.formIngest = handlers.NewFormIngestHandler(
 			messageSvc,

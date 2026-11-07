@@ -34,6 +34,7 @@ import (
 	"net/mail"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jkaninda/logger"
@@ -92,6 +93,24 @@ type Config struct {
 	// covers what the operator's proxy adds. Any other value keeps the
 	// dispatcher in guarded direct mode even when ProxyURL is set.
 	ProxyAckPolicy string
+
+	// BatchEnabled turns on SF-90 batch delivery: events for the same
+	// endpoint are grouped (up to BatchMaxEvents, or flushed after
+	// BatchFlushInterval) instead of delivered per event. Default false —
+	// per-event delivery remains the default behavior.
+	BatchEnabled bool
+	// BatchMaxEvents is how many events a batch may carry before an
+	// immediate flush. Zero selects the default (25).
+	BatchMaxEvents int
+	// BatchFlushInterval is how long events may wait in the batch buffer
+	// before an interval flush. Zero selects the default (5s).
+	BatchFlushInterval time.Duration
+	// MaxPendingEvents caps how many events may sit queued for ONE webhook
+	// endpoint; when reached, the oldest queued event is dropped (logged +
+	// counted via the OnEventsDropped callback →
+	// posta_webhook_events_dropped_total). Zero selects the default (1000).
+	// The cap is inert while batching is off (no pending backlog exists).
+	MaxPendingEvents int
 }
 
 type Dispatcher struct {
@@ -128,6 +147,17 @@ type Dispatcher struct {
 	onDeliverySuccess func()
 	onDeliveryFailed  func()
 	onDeliveryDone    func(float64) // duration in seconds
+	onEventsDropped   func()
+
+	// SF-90 batch delivery state. batchEnabled is false (per-event mode)
+	// until SetConfig turns batching on; batches holds one buffer per
+	// webhook endpoint, guarded by batchMu.
+	batchEnabled       bool
+	batchMaxEvents     int
+	batchFlushInterval time.Duration
+	maxPendingEvents   int
+	batchMu            sync.Mutex
+	batches            map[uint]*batchBuffer
 }
 
 func NewDispatcher(repo *repositories.WebhookRepository) *Dispatcher {
@@ -186,7 +216,28 @@ func (d *Dispatcher) SetConfig(cfg Config) {
 		d.client.Transport = transport
 		logger.Info("webhook proxy configured", "proxy", cfg.ProxyURL)
 	}
+
+	// SF-90 batch delivery + pending cap. BatchEnabled is false by default:
+	// per-event dispatch stays the default behavior.
+	d.batchEnabled = cfg.BatchEnabled
+	d.batchMaxEvents = cfg.BatchMaxEvents
+	if d.batchMaxEvents <= 0 {
+		d.batchMaxEvents = defaultBatchMaxEvents
+	}
+	d.batchFlushInterval = cfg.BatchFlushInterval
+	if d.batchFlushInterval <= 0 {
+		d.batchFlushInterval = defaultBatchFlush
+	}
+	d.maxPendingEvents = cfg.MaxPendingEvents
+	if d.maxPendingEvents <= 0 {
+		d.maxPendingEvents = defaultMaxPendingEvents
+	}
 }
+
+// OnEventsDropped sets a callback invoked each time an event is dropped by
+// the per-endpoint pending cap (SF-90). Wired to the
+// posta_webhook_events_dropped_total metric.
+func (d *Dispatcher) OnEventsDropped(fn func()) { d.onEventsDropped = fn }
 
 // pinnedProxyTransport builds the outbound transport for proxy mode. Supported
 // schemes: http, https (pinned request-rewriting RoundTripper) and socks5
@@ -318,6 +369,13 @@ func (d *Dispatcher) DispatchJSON(userID uint, workspaceID *uint, event string, 
 
 		for _, wh := range webhooks {
 			if !matchesFilters(wh.Filters, fromAddr) {
+				continue
+			}
+			// SF-90: with batching enabled (POSTA_WEBHOOK_BATCH_ENABLED),
+			// events group per endpoint instead of firing per event;
+			// per-event delivery remains the default.
+			if d.batchEnabled {
+				d.dispatchBatched(userID, wh, event, body)
 				continue
 			}
 			d.deliverWithRetry(userID, wh, body, event)

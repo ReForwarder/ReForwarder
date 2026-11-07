@@ -22,6 +22,7 @@ package handlers
 import (
 	"fmt"
 
+	"github.com/goposta/posta/internal/services/auth"
 	"github.com/goposta/posta/internal/services/clientinfo"
 	"github.com/goposta/posta/internal/services/session"
 	"github.com/goposta/posta/internal/storage/repositories"
@@ -31,10 +32,27 @@ import (
 type SessionHandler struct {
 	repo  *repositories.SessionRepository
 	store *session.Store
+	// refresh is the CA-03 refresh-token service; nil when refresh tokens are
+	// disabled, in which case logout revokes only the access session.
+	refresh *auth.RefreshTokenService
 }
 
 func NewSessionHandler(repo *repositories.SessionRepository, store *session.Store) *SessionHandler {
 	return &SessionHandler{repo: repo, store: store}
+}
+
+// SetRefreshTokens wires the CA-03 refresh-token service for logout revocation.
+func (h *SessionHandler) SetRefreshTokens(s *auth.RefreshTokenService) {
+	h.refresh = s
+}
+
+// LogoutRequest carries the optional refresh token the client wants dead with
+// the session (CA-03). CLI/SDK clients hold one; browsers log out with the
+// cookie alone.
+type LogoutRequest struct {
+	Body struct {
+		RefreshToken string `json:"refresh_token"`
+	} `json:"body"`
 }
 
 // SessionResponse is the API representation of a session.
@@ -140,8 +158,15 @@ func (h *SessionHandler) RevokeOthers(c *okapi.Context) error {
 // Logout revokes the current session and clears the browser session cookie.
 // Clearing the cookie unconditionally means a browser holding a token we can no
 // longer resolve still ends up logged out.
-func (h *SessionHandler) Logout(c *okapi.Context) error {
+//
+// CA-03: when the body carries a refresh token it is revoked too, so a stolen
+// long-lived credential does not survive the sign-out that kills its session.
+func (h *SessionHandler) Logout(c *okapi.Context, req *LogoutRequest) error {
 	session.ClearCookie(c)
+
+	if req != nil && req.Body.RefreshToken != "" && h.refresh != nil {
+		_ = h.refresh.RevokeByHash(req.Body.RefreshToken)
+	}
 
 	currentJTI := c.GetString("jti")
 	if currentJTI == "" {

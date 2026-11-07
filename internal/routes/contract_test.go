@@ -99,6 +99,11 @@ func contractServer(t *testing.T) *okapi.TestServer {
 	// identical to a production boot.
 	cronHandler := handlers.NewCronHandler(cron.NewManager(nil))
 
+	// The SF-59 operational actions are registered only when a worker producer
+	// is wired (r.h.queueOps != nil); a production boot always runs one, so
+	// construct the handler with nil collaborators for the same reason.
+	queueOps := handlers.NewQueueOpsHandler(nil, nil, nil, nil)
+
 	// inbound and formIngest handlers exist only when their feature flag is on;
 	// construct them the same way InitRoutes does (nil stores are fine — the
 	// constructors are field-assign only).
@@ -121,6 +126,7 @@ func contractServer(t *testing.T) *okapi.TestServer {
 			cron:       cronHandler,
 			formIngest: formIngest,
 			inbound:    inboundHandler,
+			queueOps:   queueOps,
 		},
 	}
 	r.registerRoutes()

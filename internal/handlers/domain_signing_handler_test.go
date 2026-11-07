@@ -602,6 +602,12 @@ xNoKUSDg9uZ7jvVqi5vj0RMx+Pz9Z2MnMaPrTr3Bce8qo3EJMPDY4g==
 
 func newSigningServer(t *testing.T) (*okapi.TestServer, *dskState) {
 	t.Helper()
+	// SF-78: Encrypt refuses to store secrets without a configured key, so the
+	// signing-key flow needs one. (These tests previously exercised the
+	// insecure base64 fallback implicitly.)
+	postacrypto.Init("signing-test-key")
+	t.Cleanup(func() { postacrypto.Init("") })
+
 	state := newDskState()
 	gdb := dskGorm(t, state)
 	h := NewDomainSigningHandler(

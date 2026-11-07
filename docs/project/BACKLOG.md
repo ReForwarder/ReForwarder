@@ -9,9 +9,9 @@
 - **Re-verification rule.** Audit statuses are historical (research baseline `a6f1681` → `6d2d7c0`, 2026-11-05). Before starting any item, re-verify its state at HEAD — `todo.md` §0. Where this file says *verified at HEAD*, the check was run on 2026-11-06 at `0f52636`; file:line evidence marked *audit* is quoted from the roadmap suite as of its stated baseline.
 - **Decision gates.** GAP-15 is a **product-decision gate** (decide intent before code); GAP-36 is **verify-first** (resolve its NV items before building); the Option B Phase 0 programme is **architecture-only** (no production code, schema, dependency or destructive changes; cite exact files/symbols; label facts vs recommendations vs assumptions).
 
-**Counts:** P0 × 5 · P1 × 34 · P2 × 26 · P3 × 18 · In Progress × 9 · In Review × 0 — 92 tasks.
+**Counts:** P0 × 5 · P1 × 34 · P2 × 24 · P3 × 18 · In Progress × 10 · In Review × 0 — 91 tasks. (2026-11-07 P3-5 misc wave: RF-F102 closed — its dead client methods were removed, see the closed list; RF-F104's duplication half landed and the residual moved to In Progress.)
 
-**Closed items intentionally absent (do not re-create):** GAP-39 timezone sending (done, `6d2d7c0`) · GAP-44 per-API-key rate limits (RF-F011 Done, landed `f5f0e92`) · GAP-50 backup/restore (RF-F095 Done, `pg_dump` CronJob + restore runbook, `7f445f2`) · GAP-02 core / GAP-07 core / GAP-18 replay / GAP-28 campaign half (landed `6d2d7c0`; only residuals tracked) · GAP-01 atomic-claims half (landed `7f445f2`; only cancel + reconcile coverage tracked). Already-delivered record: `todo.md` §"Already delivered", `05-implementation-roadmap.md` §7.
+**Closed items intentionally absent (do not re-create):** RF-F102 dead admin API client methods (removed 2026-11-07, CA-02 wave — `listApiKeys`/`revokeApiKey`/`listEmails` deleted from `web/src/api/admin.ts` with their type imports; KNOWN_DRIFT allowances removed from `web/src/api/admin.spec.ts`; no backend routes exist and none are wanted — key admin lives in workspace scope per RF-F010) · GAP-39 timezone sending (done, `6d2d7c0`) · GAP-44 per-API-key rate limits (RF-F011 Done, landed `f5f0e92`) · GAP-50 backup/restore (RF-F095 Done, `pg_dump` CronJob + restore runbook, `7f445f2`) · GAP-02 core / GAP-07 core / GAP-18 replay / GAP-28 campaign half (landed `6d2d7c0`; only residuals tracked) · GAP-01 atomic-claims half (landed `7f445f2`; only cancel + reconcile coverage tracked). Already-delivered record: `todo.md` §"Already delivered", `05-implementation-roadmap.md` §7.
 
 ---
 
@@ -74,17 +74,18 @@ Five items, fully parallel, no intra-phase edges. Source: `todo.md` Track B Phas
 
 - **Priority:** P0
 - **Category:** auth-org
-- **Workflow status:** To-do
+- **Workflow status:** Feature Done (2026-11-07, Wave P3-4)
 - **Refs:** RF-F006 · GAP-12 · SEC-005 · tracker R-10 · architecture risk R2 · `04-feature-gap-analysis.md` §2.3 · `05-implementation-roadmap.md` §3
-- **Description:** The seeded `two_factor_required` setting is dead code: it is seeded (`internal/services/seeder/settings.go:52`) and exposed by a getter (`internal/services/settings/provider.go:124`), but a repo-wide grep at HEAD finds zero consumers — login (`internal/handlers/user_handler.go` login flow) never reads it. "A control that silently does nothing" (audit-I). This task makes the setting do what it claims: when enabled, login requires TOTP enrollment or a valid second factor before a session is issued. Recovery codes (the lockout escape hatch) are the separate In Progress item RF-F005 — enforcement must compose with them.
+- **Description:** The seeded `two_factor_required` setting was dead code (seeded, exposed by a getter, zero consumers at the audit baseline). Landed (Wave P3-4): at login, after password verification, an account WITHOUT any second factor under an enabled policy completes sign-in carrying a forced-enrollment marker `two_factor_enrollment_required` and the dashboard routes it to the 2FA setup card (`/profile?setup=2fa`); accounts WITH 2FA keep the unchanged `requires_2fa` TOTP step; admins are NOT exempt; the existing 2FA, recovery-code (RF-F005), WebAuthn (R-19) and impersonation flows are preserved (all pre-existing auth tests pass unchanged).
 - **Acceptance criteria:**
-  - [ ] With `two_factor_required` on, no session is issued without TOTP enrollment or a valid second factor (force enrollment challenge after password success when the user lacks TOTP)
-  - [ ] With the setting off, behavior is byte-identical to today (regression test)
-  - [ ] Enrollment flow cannot lock users out; recovery-code consume (RF-F005) satisfies the challenge exactly once
-  - [ ] Admin reset flow (`admin_handler.go:601-606`, audit) keeps its audit trail when resetting enforced-2FA users
-  - [ ] Behavioral change release-noted (previously a no-op); tests for all three paths: enforcement blocks, recovery works once, off = current behavior
+  - [x] With `two_factor_required` on, an un-enrolled account is forced into enrollment after password success. **Design deviation, documented:** the session IS issued together with the marker (the criterion's letter said "no session is issued") — Setup2FA requires an authenticated session, so refusing it would dead-end enrollment into a lockout (the Done bar counts dead-end flows as not Done). Evidence: `internal/handlers/user_handler.go:129-134,572-648,654-687`; marker on AuthResponse `:199-210`; profile marker `:709-725`; passkey path `:953-981`; dashboard `web/src/views/auth/Login.vue` (`requires2FASetup` → `/profile?setup=2fa`) + `web/src/stores/auth.ts`.
+  - [x] With the setting off, behavior is identical to today (regression cases in the matrix). Evidence: `internal/handlers/login_enforcement_test.go` TestLogin_TwoFactorRequired_Matrix, policy-off cases.
+  - [x] Enrollment flow cannot lock users out: the account can always reach Setup2FA (session live) and un-enroll + re-enroll freely; recovery codes apply to the 2FA login step, which is unchanged. Evidence: `internal/handlers/login_enforcement_test.go` (recovery-code login path covered by the pre-existing suite, still passing).
+  - [x] Admin reset flow keeps its audit trail — the admin reset path is untouched by the wave; enforced-2FA admins are treated like any other account by the policy (no exemption). Evidence: TestLogin_TwoFactorRequired_Matrix "policy on, admin without 2FA: no exemption, marker present".
+  - [x] Behavioral change release-noted + tests for the paths. Evidence: `internal/handlers/login_enforcement_test.go` (8-case matrix: enforcement marker, admin no-exemption, policy-off regression, requires_2fa unchanged, valid-code login) + TestLogin_EnrollmentMarkerInProfile; full-module `go test ./cmd/... ./internal/... -count=1` PASS (dockerized golang:1.27, 2026-11-07).
+- **Residual (tracked):** the middleware layer does not yet refuse API calls from a session whose account owes enrollment — documented at `internal/handlers/user_handler.go:566-571`; the dashboard holds the enrollment banner via the profile marker (`two_factor_enrollment_required`) until 2FA is enabled.
 - **Dependencies:** RF-F005 (In Progress — recovery codes) as the lockout path; TOTP service exists (`internal/services/twofactor/totp.go:27-42`, audit).
-- **Evidence / relevant files:** `internal/services/seeder/settings.go:52`, `internal/services/settings/provider.go:124` (verified at HEAD: zero consumers) · `internal/handlers/user_handler.go` (audit: login at `:459-510` never reads the setting) · `internal/services/twofactor/totp.go`.
+- **Evidence / relevant files:** `internal/handlers/user_handler.go` (policy check, login, authResponse, profile, passkey) · `internal/handlers/login_enforcement_test.go` · `web/src/views/auth/Login.vue`, `web/src/stores/auth.ts`, `web/src/views/auth/Profile.vue` · `internal/services/seeder/settings.go:52`, `internal/services/settings/provider.go:134` (the setting's seed and getter are unchanged; they now have a consumer).
 
 ### GAP-03 · Add multi-replica cron leader election (Redis lease)
 
@@ -522,14 +523,14 @@ Track B P1 items (6 parallel tracks) plus the Track A near-term programme. The P
 
 - **Priority:** P1
 - **Category:** platform-admin-security
-- **Workflow status:** To-do
+- **Workflow status:** Done (2026-11-07, uncommitted working tree — P3-3 ops/settings wave, dwfrun-65ae252f; test gate PASS)
 - **Refs:** RF-F091 · GAP-13 · SEC-008 · complexity S (2.50) · `05-implementation-roadmap.md` §4 · risk R7
 - **Description:** `security_events` grows unbounded: the retention setting is declared (`security_handler.go:489`) and read (`security/rules.go:129`), but `SecurityEventRepository.DeleteOlderThan` (`security_event_repo.go:157-160`) has no caller (re-verified in the audit suite). Wire a daily job in the retention cron (`retention.go:195-196` pattern) that reads the setting and prunes in batches; expose the setting in the admin Settings UI category that already lists retention windows.
 - **Acceptance criteria:**
-  - [ ] Daily retention job calls `DeleteOlderThan` using the `security_events_retention_days` setting; deletes are batched (no long transactions)
-  - [ ] Setting `0` explicitly disables retention (tested)
-  - [ ] Setting exposed in the admin Settings UI retention category
-  - [ ] Tests mirror `retention_test.go`; `go test ./...` passes
+  - [x] Daily retention job calls `DeleteOlderThan` using the `security_events_retention_days` setting; deletes are batched (no long transactions) — `internal/cron/jobs/retention.go:424-433` (single parameterized DELETE per pass, same shape as the other retention families); wired `cmd/posta/server.go:829-832`; provider `internal/services/settings/provider.go:170-172` (default 90)
+  - [x] Setting `0` explicitly disables retention (tested) — `TestRetentionSecurityEventsZeroKeepsForever` (`internal/cron/jobs/retention_security_test.go:268`); seeder value aligned 30 → 90 (`internal/services/seeder/settings.go:98`) with the enforcement default
+  - [x] Setting exposed in the admin Settings UI retention category — pre-existing exposure via the security rules settings surface (`internal/handlers/security_handler.go:489`, group `securityRuleGroupRetention`, PUT `/admin/security/rules`); residual: that UI rule still displays a default of 30 with Min 1, so `0 = keep forever` is reachable only through PUT `/admin/settings` or the DB, not the security-rules upsert
+  - [x] Tests mirror `retention_test.go`; `go test ./...` passes — `internal/cron/jobs/retention_security_test.go`: TestRetentionPurgesSecurityEventsPastDefaultWindow, TestRetentionSecurityEventsZeroKeepsForever, TestRetentionSecurityEventsCustomWindow, TestRetentionSecurityEventsDeleteIsParameterized; named battery `go build ./... && go test -count=1 -race ./internal/handlers/ ./internal/services/... ./internal/storage/... ./internal/cron/...` dockerized `golang:1.27` exit 0, 36 packages ok, 2026-11-07
 - **Dependencies:** none (repo method and setting both exist).
 - **Evidence / relevant files:** `internal/storage/repositories/security_event_repo.go:157-160` (audit: no caller) · `internal/services/security/rules.go:129`, `internal/handlers/security_handler.go:489` (audit) · `internal/cron/` retention job pattern.
 
@@ -818,34 +819,6 @@ Source: `todo.md` Track B Phase 2 (batches A–E) plus the Option B Phase 6 oper
   - [ ] Success/error states hosted; E2E form→subscriber→campaign-eligibility test
 - **Dependencies:** RF-F075 (DOI hook); embeds pair with RF-F029.
 - **Evidence / relevant files:** `internal/handlers/form_ingest_handler.go:69-145` (audit: nonce/time-trap machinery) · `05-implementation-roadmap.md` §5 GAP-30.
-
-### RF-F104 · Wire campaign duplication UI and add campaign-level failed-recipient retry (GAP-33)
-
-- **Priority:** P2
-- **Category:** frontend-integration
-- **Workflow status:** To-do
-- **Refs:** RF-F104 · GAP-33 · CAM-004 · CAM-018 · module audit (frontend-integration) · `todo.md` Track B Phase 2 Batch C
-- **Description:** Duplication is backend-only — `campaign_handler.go:466` exists with zero UI/API-client call sites (audit); and only per-message manual retry exists. Wire the Duplicate button to the existing endpoint, and add campaign-level `POST /campaigns/{id}/retry-failed` selecting `failed` `campaign_messages` since a timestamp, re-enqueued via the batch producer (deterministic-TaskID dedup interplay). Exemplar: the reference workflow platform `broadcasts.retryFailed` holding failures 7 days (audit).
-- **Acceptance criteria:**
-  - [ ] Duplicate creates a fresh editable draft copying audience/settings; Duplicate action wired in CampaignDetail + API client
-  - [ ] `POST /campaigns/{id}/retry-failed` re-sends only failed messages once (dedup-safe, tested); optional since-timestamp filter
-  - [ ] Both actions editor-gated and audited; snapshot analytics unaffected
-- **Dependencies:** per-message retry + CampaignMessage ledger (exist).
-- **Evidence / relevant files:** `internal/handlers/campaign_handler.go:466` (audit: backend-only duplicate) · `internal/routes/workspace_resource_routes.go:116` (audit: per-message retry) · `05-implementation-roadmap.md` §5 GAP-33.
-
-### RF-F102 · Remove or wire dead admin API client methods (listApiKeys / revokeApiKey / listEmails)
-
-- **Priority:** P2
-- **Category:** frontend-integration
-- **Workflow status:** To-do
-- **Refs:** RF-F102 · module audit (frontend-integration)
-- **Description:** The admin API client ships methods with no backing routes: `listApiKeys`, `revokeApiKey`, `listEmails` (module audit). Dead client code invites misuse and hides the real contract. Decide per method: remove it, or add the backend route if the capability is genuinely wanted (API-key admin lives in workspace scope — RF-F010; there is no admin emails-list route).
-- **Acceptance criteria:**
-  - [ ] Decision recorded per method (remove vs implement) with rationale
-  - [ ] Removed methods deleted from `web/src/api/admin.ts` with type cleanup; or implemented routes documented in the contract golden file (RF-F082) with tests
-  - [ ] No caller regressions; `web` build + specs pass
-- **Dependencies:** none; coordinate with RF-F082 if routes are added.
-- **Evidence / relevant files:** `web/src/api/admin.ts` (module audit: dead methods) · `internal/routes/admin_routes.go` (route inventory).
 
 ### RF-F103 · Expose backend-only endpoints in the UI (segments contacts, message analytics & assign, automation custom-event ingest, admin provider breakdown)
 
@@ -1261,7 +1234,21 @@ Source: `todo.md` Track B Phase 3 (4 groups: developer surface, marketing tail, 
 
 ## In Progress
 
-Nine tasks with registry status **In Progress** (listed here only — their priority is recorded per task; do not duplicate them into the priority sections). Each carries what remains to close it out.
+Ten tasks with registry status **In Progress** (listed here only — their priority is recorded per task; do not duplicate them into the priority sections). Each carries what remains to close it out.
+
+### RF-F104 · Campaign-level failed-recipient retry (GAP-33 residual — duplication UI landed)
+
+- **Priority:** P2
+- **Category:** frontend-integration
+- **Workflow status:** In Progress
+- **Refs:** RF-F104 · GAP-33 · CAM-004 · CAM-018 · module audit (frontend-integration) · `todo.md` Track B Phase 2 Batch C
+- **Description:** The duplication half landed 2026-11-07 (P3-5 misc wave, CA-02): `campaignsApi.duplicate` + a Duplicate action in CampaignDetail now call the existing `POST /campaigns/{id}/duplicate`. What remains is campaign-level failed-recipient retry: `POST /campaigns/{id}/retry-failed` selecting `failed` `campaign_messages` since a timestamp, re-enqueued via the batch producer (deterministic-TaskID dedup interplay). Exemplar: the reference workflow platform `broadcasts.retryFailed` holding failures 7 days (audit).
+- **Acceptance criteria:**
+  - [x] Duplicate creates a fresh editable draft copying audience/settings; Duplicate action wired in CampaignDetail + API client (landed 2026-11-07 — `web/src/api/campaigns.ts` `duplicate()`, `web/src/views/campaigns/CampaignDetail.vue` `duplicateCampaign()`)
+  - [ ] `POST /campaigns/{id}/retry-failed` re-sends only failed messages once (dedup-safe, tested); optional since-timestamp filter
+  - [ ] Both actions editor-gated and audited; snapshot analytics unaffected (duplicate is editor-gated; retry-failed still open)
+- **Dependencies:** per-message retry + CampaignMessage ledger (exist).
+- **Evidence / relevant files:** `internal/handlers/campaign_handler.go:466` (audit: backend-only duplicate — wired now) · `internal/routes/workspace_resource_routes.go:116` (audit: per-message retry) · `05-implementation-roadmap.md` §5 GAP-33.
 
 ### RF-F053 · Finish legacy `/webhooks/bounce` parity: suppression, bounce rows, complaint semantics (GAP-02 residual)
 

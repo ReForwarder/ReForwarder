@@ -57,6 +57,13 @@ type EmailEnqueuer interface {
 	EnqueueEmailSendAt(emailID uint, queue string, sendAt time.Time) error
 }
 
+// messageSender is the delivery seam of the synchronous pipeline (sendSync).
+// *SMTPSender is the production implementation; tests inject a stub so the
+// CA-06 dev fallback broker can be exercised without a live SMTP server.
+type messageSender interface {
+	Send(server *models.SMTPServer, from string, to []string, subject, htmlBody, textBody string, attachments []models.Attachment, headers map[string]string, listUnsubscribeURL, listUnsubscribeMailto string, listUnsubscribePost bool) error
+}
+
 // PlanLimitsProvider resolves effective plan limits for a given workspace.
 type PlanLimitsProvider interface {
 	EffectiveLimits(workspaceID *uint) *PlanLimits
@@ -91,7 +98,7 @@ type Service struct {
 	domainRepo       *repositories.DomainRepository
 	userRepo         *repositories.UserRepository
 	wsSettingRepo    *repositories.WorkspaceSettingRepository
-	sender           *SMTPSender
+	sender           messageSender
 	renderer         *TemplateRenderer
 	limiter          *ratelimit.RedisLimiter
 	dispatcher       *webhook.Dispatcher
@@ -913,7 +920,18 @@ func (s *Service) Send(ctx context.Context, userID, apiKeyID uint, workspaceID *
 		return &SendResponse{ID: em.UUID, Status: em.Status}, nil
 	}
 
-	// Synchronous fallback: send email directly (no worker configured)
+	// CA-06 dev fallback broker: no queue producer is wired (dev mode never
+	// creates one — cmd/posta/server.go gates worker.NewProducer on
+	// !POSTA_DEV_MODE), so sends degrade to synchronous delivery through the
+	// same pipeline (sendSync: the same SMTP sender, suppression-filtered
+	// content, webhook events, and message-history records the worker path
+	// produces). For brand-new sends the dev short-circuit above returns
+	// first (store-without-send); the sync pipeline is what the retry path
+	// and any enqueuer-less flow use. Dev-only by construction: a production
+	// deployment always wires a producer. A production enqueue failure
+	// deliberately does NOT degrade to sync — silently failing over would
+	// mask a broken broker — the email is marked failed and the
+	// queue-reconcile cron owns recovery.
 	return s.sendSync(em, userID, workspaceID, req)
 }
 
@@ -955,7 +973,8 @@ func marshalTemplateData(data map[string]any) string {
 	return string(b)
 }
 
-// sendSync performs synchronous SMTP delivery (used when no enqueuer is configured).
+// sendSync performs synchronous SMTP delivery — the CA-06 dev fallback
+// broker's pipeline (no enqueuer configured) and the retry path's fallback.
 func (s *Service) sendSync(em *models.Email, userID uint, workspaceID *uint, req *SendRequest) (*SendResponse, error) {
 	var smtpServer *models.SMTPServer
 	var err error

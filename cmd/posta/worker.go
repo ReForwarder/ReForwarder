@@ -26,6 +26,7 @@ import (
 
 	"github.com/goposta/posta/internal/config"
 	"github.com/goposta/posta/internal/cron/jobs"
+	"github.com/goposta/posta/internal/logging"
 	"github.com/goposta/posta/internal/metrics"
 	"github.com/goposta/posta/internal/services/automation"
 	"github.com/goposta/posta/internal/services/crypto"
@@ -45,6 +46,21 @@ import (
 )
 
 func runWorker() error {
+	// SF-94: multi-sink logging (POSTA_LOG_SINKS / POSTA_LOG_FILE) — the same
+	// fail-open arrangement as runServer, and it must run before
+	// cfg.InitWorker(): the structured logger's handler captures os.Stdout at
+	// construction, so the file tee has to be in place first.
+	logSinks, err := logging.Init()
+	if err != nil {
+		logger.Error("log sink setup failed, logging to stdout only", "error", err)
+		logSinks = nil
+	}
+	defer func() {
+		if logSinks != nil {
+			_ = logSinks.Close()
+		}
+	}()
+
 	cfg := config.New()
 	if err := cfg.InitWorker(); err != nil {
 		logger.Fatal("worker configuration is not usable", "error", err)
@@ -109,6 +125,9 @@ func runWorker() error {
 	handler.SetBounceRepo(repositories.NewBounceRepository(db))
 	handler.SetAutoSuppress(cfg.AutoSuppressOnReject)
 	handler.SetStamper(email.NewStamper("Posta", config.Version, []byte(cfg.JWTSecret)))
+	// Outbound MTA executor (OB-1, ADR-001): domains configured 'direct'
+	// deliver direct-to-MX; everything else keeps today's relay path.
+	handler.SetMTAExecutor(newMTAExecutor(db, cfg))
 	handler.OnSent(func() {
 		metrics.IncrementEmailSent()
 		metrics.DecrementEmailQueued()
@@ -217,6 +236,7 @@ func runWorker() error {
 		parseSvc.SetEventBus(parseBus)
 		attachThreadRouter(parseSvc, db, cfg, parseProducer)
 		parseSvc.EnableDMARC(db) // R-17: parse DMARC aggregate reports on the parse path
+		parseSvc.EnableVerification(db, cfg.InboundHostname) // SF-22/23/24: message-level auth verification
 		parseHandler := worker.NewInboundParseHandler(
 			repositories.NewInboundEmailRepository(db),
 			parseSvc,

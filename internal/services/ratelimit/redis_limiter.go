@@ -36,13 +36,17 @@ type SettingsProvider interface {
 }
 
 type RedisLimiter struct {
-	client      *redis.Client
+	// client is the redis.Cmdable surface (the go-redis interface *redis.Client
+	// satisfies). Holding the interface rather than the concrete client keeps
+	// the limiter unit-testable with an in-process fake (SF-91) without adding
+	// a Redis test dependency.
+	client      redis.Cmdable
 	hourlyLimit int
 	dailyLimit  int
 	settings    SettingsProvider
 }
 
-func NewRedisLimiter(client *redis.Client, hourlyLimit, dailyLimit int) *RedisLimiter {
+func NewRedisLimiter(client redis.Cmdable, hourlyLimit, dailyLimit int) *RedisLimiter {
 	return &RedisLimiter{
 		client:      client,
 		hourlyLimit: hourlyLimit,
