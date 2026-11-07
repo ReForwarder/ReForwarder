@@ -834,6 +834,21 @@ func (r *Router) workspaceResourceRoutes() []okapi.RouteDefinition {
 				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
+		{
+			Method:      http.MethodPatch,
+			Path:        pathDomainByID + "/delivery-mode",
+			Handler:     okapi.H(r.h.domain.SetDeliveryMode),
+			Group:       opsGroup,
+			Summary:     "Set domain delivery mode",
+			Description: "Switch the outbound executor between 'relay' (trusted relay) and 'direct' (direct-to-MX, OB-1). Direct requires a verified domain.",
+			Request:     &handlers.SetDeliveryModeRequest{},
+			Response:    &dto.Response[any]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Domain ID"),
+				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
 
 		// ==================== Managed DKIM signing keys (R-02) ====================
 		// Literal paths (rotate) are registered before param paths ({keyId}).
@@ -1528,7 +1543,17 @@ func (r *Router) logsRoutes() []okapi.RouteDefinition {
 	})
 	logsGroup.WithBearerAuth()
 
-	return []okapi.RouteDefinition{
+	// The per-message live stream skips WithBearerAuth like every SSE group:
+	// the browser's EventSource handshake authenticates with the session
+	// cookie and cannot set an Authorization header. Workspace context comes
+	// from the query parameter (WorkspaceFromQueryOrHeader) for the same
+	// reason — the pattern the message-stream and inbound-stream use.
+	logsStreamGroup := r.v1.Group("/workspaces/current", r.mw.auth, r.mw.workspaceQuery).WithTagInfo(okapi.GroupTag{
+		Name:        tagWorkspaceResources,
+		Description: "Message history and logs scoped to the active workspace.",
+	})
+
+	routes := []okapi.RouteDefinition{
 		{
 			Method:      http.MethodGet,
 			Path:        "/logs/messages",
@@ -1648,5 +1673,40 @@ func (r *Router) logsRoutes() []okapi.RouteDefinition {
 				okapi.DocErrorResponse(403, &dto.ErrorResponseBody{}),
 			},
 		},
+
+		// Classification breakdown (SF-53): the R-05 classifier's counts over
+		// the workspace's recorded timeline, served by the provider_events
+		// ingestion service's workspace-scoped aggregate.
+		{
+			Method:      http.MethodGet,
+			Path:        "/logs/classifications",
+			Handler:     okapi.H(r.h.logs.ListClassifications),
+			Group:       logsGroup,
+			Summary:     "Classification breakdown",
+			Description: "Counts of recorded timeline events per R-05 bounce/rejection classification (from the classification stored on each email event's metadata) over an optional from/to window.",
+			Request:     &handlers.ListClassificationsRequest{},
+			Response:    &dto.Response[handlers.ClassificationBreakdown]{},
+			Options: []okapi.RouteOption{
+				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+			},
+		},
+
+		// Per-message live stream (SF-56): SSE tail of one message's timeline.
+		// Registered after the plain routes here is fine — no /logs/{param}
+		// route at this position exists to shadow; the stream group skips
+		// WithBearerAuth so the EventSource handshake can authenticate with
+		// the session cookie.
+		{
+			Method:      http.MethodGet,
+			Path:        "/logs/{uuid}/events/stream",
+			Handler:     okapi.H(r.h.logs.StreamMessageEvents),
+			Group:       logsStreamGroup,
+			Summary:     "Stream one message's events (SSE)",
+			Description: "Live tail of one message's email_events timeline via Server-Sent Events. Opens at the newest existing event (history comes from GET /logs/messages/{uuid}/events) and emits email.event frames for rows recorded afterwards. Authenticated by the session cookie; the active workspace travels as the workspace_id query parameter.",
+			Options:     []okapi.RouteOption{okapi.DocHide()},
+		},
 	}
+
+	return routes
 }

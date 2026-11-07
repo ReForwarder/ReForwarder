@@ -188,6 +188,45 @@ function formatDate(date: string | null | undefined) {
   if (!date) return '-'
   return new Date(date).toLocaleString(undefined, { timeZoneName: 'short' })
 }
+
+// ---- Classification breakdown (SF-53) ----
+// R-05 bounce/rejection classifications aggregated over the workspace's
+// recorded timeline. The endpoint answers 503 when the ingestion service is
+// not wired (nothing classifies events), in which case the card stays hidden.
+const classifications = ref<Record<string, number> | null>(null)
+const classificationsTotal = ref(0)
+
+const CLASSIFICATION_LABELS: Record<string, string> = {
+  bad_domain: 'Bad domain',
+  mailbox_not_found: 'Mailbox not found',
+  mailbox_full: 'Mailbox full',
+  policy_rejection: 'Policy rejection',
+  spam_rejection: 'Spam rejection',
+  rate_limited: 'Rate limited',
+  temporary_failure: 'Temporary failure',
+  network_error: 'Network error',
+  complaint: 'Complaint',
+  '(none)': 'Unclassified',
+}
+
+function classificationLabel(cls: string): string {
+  return CLASSIFICATION_LABELS[cls] || cls.replace(/_/g, ' ')
+}
+
+async function loadClassifications() {
+  try {
+    const res = await logsApi.getClassifications()
+    classifications.value = res.data.data.counts || {}
+    classificationsTotal.value = res.data.data.total
+  } catch {
+    // Analytics are best-effort: absent service, absent counts — no card.
+    classifications.value = null
+  }
+}
+
+onMounted(() => {
+  loadClassifications()
+})
 </script>
 
 <template>
@@ -201,6 +240,29 @@ function formatDate(date: string | null | undefined) {
         <span class="mdi" :class="loading ? 'mdi-loading mdi-spin' : 'mdi-refresh'"></span>
         Refresh
       </button>
+    </div>
+
+    <!-- Classification breakdown (SF-53): how the providers' bounces and
+         rejections were classified over the recorded timeline. -->
+    <div v-if="classifications && classificationsTotal > 0" class="card classification-card">
+      <div class="card-body classification-row">
+        <span class="mdi mdi-chart-donut classification-icon"></span>
+        <div class="classification-chips">
+          <span class="classification-title">
+            Bounce classifications
+            <span class="classification-total">{{ classificationsTotal }} classified event{{ classificationsTotal === 1 ? '' : 's' }}</span>
+          </span>
+          <span
+            v-for="(count, cls) in classifications"
+            :key="cls"
+            class="badge badge-neutral classification-chip"
+            :title="`${count} event${count === 1 ? '' : 's'} classified as ${classificationLabel(String(cls))}`"
+          >
+            {{ classificationLabel(String(cls)) }}
+            <strong>{{ count }}</strong>
+          </span>
+        </div>
+      </div>
     </div>
 
     <div class="card">
@@ -548,5 +610,46 @@ function formatDate(date: string | null | undefined) {
 
 .table-wrapper table {
   min-width: 860px;
+}
+
+/* Classification breakdown card (SF-53). */
+.classification-card {
+  margin-bottom: 1rem;
+}
+
+.classification-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.classification-icon {
+  font-size: 22px;
+  color: var(--text-muted);
+}
+
+.classification-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.classification-title {
+  display: block;
+  width: 100%;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.classification-total {
+  font-weight: 400;
+  color: var(--text-muted);
+  margin-left: 6px;
+}
+
+.classification-chip strong {
+  margin-left: 4px;
 }
 </style>

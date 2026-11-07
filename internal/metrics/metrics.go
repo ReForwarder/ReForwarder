@@ -260,6 +260,15 @@ var (
 			Help: "Total number of schedule-trigger fires (R-13)",
 		},
 	)
+
+	// SF-90: events dropped by the webhook dispatcher's per-endpoint pending
+	// cap (drop-oldest when the buffer for one webhook is full).
+	webhookEventsDroppedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "posta_webhook_events_dropped_total",
+			Help: "Total number of webhook events dropped by the per-endpoint pending cap",
+		},
+	)
 )
 
 func init() {
@@ -292,6 +301,7 @@ func init() {
 	prometheus.MustRegister(automationJourneysFailedTotal)
 	prometheus.MustRegister(automationNodeFailuresTotal)
 	prometheus.MustRegister(automationScheduleFiresTotal)
+	prometheus.MustRegister(webhookEventsDroppedTotal)
 }
 
 // IncrementEmailSent increments the emails sent counter.
@@ -328,6 +338,12 @@ func IncrementWebhookDelivery(status string) {
 // ObserveWebhookDeliveryDuration records a webhook delivery duration.
 func ObserveWebhookDeliveryDuration(seconds float64) {
 	webhookDeliveryDuration.Observe(seconds)
+}
+
+// IncrementWebhookEventsDropped increments the webhook events dropped counter
+// (SF-90 per-endpoint pending cap).
+func IncrementWebhookEventsDropped() {
+	webhookEventsDroppedTotal.Inc()
 }
 
 // IncrementBounce increments the bounce counter for the given type (hard, soft, complaint).

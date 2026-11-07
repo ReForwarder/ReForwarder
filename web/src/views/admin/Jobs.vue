@@ -1,12 +1,19 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 import { adminApi } from '../../api/admin'
 import type { CronJob, QueueStats, QueueTask } from '../../api/types'
 import { useNotificationStore } from '../../stores/notification'
+import { useAuthStore } from '../../stores/auth'
 import { useConfirm } from '../../composables/useConfirm'
 
 const notify = useNotificationStore()
+const authStore = useAuthStore()
 const { confirm } = useConfirm()
+
+// Queue operations are destructive deployment-wide switches; they render only
+// for platform admins (the route itself is admin-gated too — this keeps the
+// buttons out of impersonated or degraded sessions).
+const canOperate = computed(() => authStore.isAdmin === true)
 
 const loading = ref(true)
 const jobs = ref<CronJob[]>([])
@@ -24,6 +31,11 @@ const tasksError = ref('')
 const taskPage = ref(0)
 const taskHasMore = ref(false)
 const actingTaskId = ref('')
+
+// ---- Global pause / resume + operational actions (SF-54, SF-59) ----
+const queuesPaused = computed(() => queues.value.length > 0 && queues.value.every((q) => q.paused))
+const queuePauseBusy = ref(false)
+const queueActionBusy = ref('')
 
 const queueStates = [
   { value: 'pending', label: 'Pending' },
@@ -157,6 +169,63 @@ function formatDate(date: string | null) {
   return new Date(date).toLocaleString()
 }
 
+// Pause (or resume) every delivery queue at once. Already-there queues come
+// back with changed=false and are not an error.
+async function setQueuesPaused(pause: boolean) {
+  const ok = await confirm({
+    title: pause ? 'Pause all delivery queues' : 'Resume all delivery queues',
+    message: pause
+      ? 'Stop task processing on the transactional, bulk and low queues? Messages stop being handed to workers until you resume. Per-domain suspension is not part of this switch.'
+      : 'Resume task processing on every delivery queue?',
+    confirmText: pause ? 'Pause queues' : 'Resume queues',
+    variant: pause ? 'danger' : 'info',
+  })
+  if (!ok) return
+  queuePauseBusy.value = true
+  try {
+    const res = pause ? await adminApi.pauseQueues() : await adminApi.resumeQueues()
+    const changed = res.data.data.queues.filter((q) => q.changed).length
+    notify.success(pause
+      ? `Queues paused (${changed === 0 ? 'already paused' : `${changed} queue${changed === 1 ? '' : 's'} stopped`})`
+      : `Queues resumed (${changed === 0 ? 'already running' : `${changed} queue${changed === 1 ? '' : 's'} restarted`})`)
+    await loadQueues()
+  } catch (e: any) {
+    notify.error(e?.response?.data?.message || (pause ? 'Failed to pause queues' : 'Failed to resume queues'))
+  } finally {
+    queuePauseBusy.value = false
+  }
+}
+
+// Operational queue actions (SF-59): run the reconcile sweep on demand, or
+// purge the dead-letter set.
+async function runQueueAction(action: 'requeue_stuck' | 'purge_archived_before') {
+  const ok = await confirm({
+    title: action === 'requeue_stuck' ? 'Requeue stuck messages' : 'Purge dead-letter set',
+    message: action === 'requeue_stuck'
+      ? 'Run the queue-reconcile sweep now? Messages stuck in queued whose queue task was lost are re-enqueued (the same guarded sweep the cron runs every 5 minutes).'
+      : 'Delete every dead-lettered (archived) task now? This empties the dead-letter view across all queues; the failure history is gone afterwards.',
+    confirmText: action === 'requeue_stuck' ? 'Run sweep' : 'Purge dead letters',
+    variant: action === 'purge_archived_before' ? 'danger' : 'info',
+  })
+  if (!ok) return
+  queueActionBusy.value = action
+  try {
+    const res = await adminApi.runQueueAction(action)
+    const d = res.data.data
+    if (action === 'requeue_stuck') {
+      notify.success(d.requeued === 1 ? 'Re-enqueued 1 stuck message' : `Re-enqueued ${d.requeued} stuck messages`)
+    } else {
+      notify.success(d.purged === 1 ? 'Purged 1 dead-lettered task' : `Purged ${d.purged} dead-lettered tasks`)
+    }
+    await loadQueues()
+    if (selectedQueue.value) await loadTasks(taskPage.value)
+  } catch (e: any) {
+    notify.error(e?.response?.data?.message || 'Queue action failed')
+  } finally {
+    queueActionBusy.value = ''
+  }
+}
+
 function timeUntil(date: string | null) {
   if (!date) return '-'
   const diff = new Date(date).getTime() - Date.now()
@@ -197,6 +266,17 @@ function scheduleName(schedule: string) {
           <span class="section-note">
             {{ activeWorkers }} worker{{ activeWorkers === 1 ? '' : 's' }} connected
           </span>
+          <div v-if="canOperate" class="section-actions">
+            <button v-if="!queuesPaused" class="btn btn-secondary btn-sm" :disabled="queuePauseBusy"
+              @click="setQueuesPaused(true)">Pause all queues</button>
+            <button v-else class="btn btn-primary btn-sm" :disabled="queuePauseBusy"
+              @click="setQueuesPaused(false)">Resume all queues</button>
+          </div>
+        </div>
+
+        <div v-if="queuesPaused" class="pause-banner">
+          <span class="mdi mdi-pause-circle"></span>
+          Delivery is paused — no tasks are being handed to workers.
         </div>
 
         <div class="queue-cards">
@@ -204,6 +284,7 @@ function scheduleName(schedule: string) {
             :class="{ selected: selectedQueue === q.queue }" @click="selectQueue(q.queue)">
             <div class="queue-card-head">
               <span class="queue-name">{{ q.queue }}</span>
+              <span v-if="q.paused" class="badge badge-warning">paused</span>
               <span v-if="q.archived > 0" class="badge badge-error">{{ q.archived }} dead</span>
             </div>
             <div class="queue-nums">
@@ -216,6 +297,31 @@ function scheduleName(schedule: string) {
               {{ q.processed }} processed · {{ q.failed }} failed · latency {{ q.latency_ms }}ms
             </div>
           </button>
+        </div>
+
+        <!-- Operational actions (SF-59) -->
+        <div v-if="canOperate" class="card ops-card">
+          <div class="card-body">
+            <div class="ops-row">
+              <div>
+                <h3 class="ops-title">Queue operations</h3>
+                <p class="ops-note">
+                  Requeue re-runs the lost-task reconcile sweep on demand. Purge deletes the whole
+                  dead-letter set (all queues); a purge is permanent and audited.
+                </p>
+              </div>
+              <div class="flex gap-2">
+                <button class="btn btn-secondary btn-sm" :disabled="queueActionBusy !== ''"
+                  @click="runQueueAction('requeue_stuck')">
+                  {{ queueActionBusy === 'requeue_stuck' ? 'Running…' : 'Requeue stuck messages' }}
+                </button>
+                <button class="btn btn-danger btn-sm" :disabled="queueActionBusy !== ''"
+                  @click="runQueueAction('purge_archived_before')">
+                  {{ queueActionBusy === 'purge_archived_before' ? 'Purging…' : 'Purge dead letters' }}
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="card">
@@ -421,6 +527,49 @@ function scheduleName(schedule: string) {
 .section-note {
   font-size: 13px;
   color: var(--text-muted);
+}
+
+.section-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.pause-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm, 4px);
+  background: var(--warning-50);
+  color: var(--warning-text);
+  font-size: 13.5px;
+}
+
+.ops-card {
+  margin-bottom: 1rem;
+}
+
+.ops-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.ops-title {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.ops-note {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  max-width: 560px;
 }
 
 .queue-cards {

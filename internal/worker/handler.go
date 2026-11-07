@@ -33,6 +33,7 @@ import (
 	"github.com/goposta/posta/internal/services/automation"
 	"github.com/goposta/posta/internal/services/email"
 	"github.com/goposta/posta/internal/services/emailhistory"
+	"github.com/goposta/posta/internal/services/mta"
 	"github.com/goposta/posta/internal/services/provider_events"
 	"github.com/goposta/posta/internal/services/webhook"
 	"github.com/goposta/posta/internal/storage/blob"
@@ -60,8 +61,12 @@ type EmailSendHandler struct {
 	recorder        *emailhistory.Recorder
 	automations     automation.AutomationTrigger
 	subscriberRepo  *repositories.SubscriberRepository
-	onSent          func()
-	onFailed        func()
+	// mta is the outbound MTA executor for domains with delivery_mode=direct
+	// (ADR-001, OB-1). Nil disables direct delivery: such emails fail closed
+	// with a clear message instead of silently falling back to the relay.
+	mta      *mta.Executor
+	onSent   func()
+	onFailed func()
 }
 
 func NewEmailSendHandler(
@@ -142,6 +147,13 @@ func (h *EmailSendHandler) SetAutoSuppress(enabled bool) {
 	h.autoSuppress = enabled
 }
 
+// SetMTAExecutor wires the outbound MTA executor (ADR-001, OB-1) used for
+// domains whose delivery_mode is 'direct'. Nil (the default) leaves relay as
+// the only delivery path; a direct-mode email on such a worker fails closed.
+func (h *EmailSendHandler) SetMTAExecutor(e *mta.Executor) {
+	h.mta = e
+}
+
 // OnSent sets a callback invoked after each successful email send.
 func (h *EmailSendHandler) OnSent(fn func()) { h.onSent = fn }
 
@@ -206,6 +218,14 @@ func (h *EmailSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error
 		senderAddr = parsed.Address
 	}
 
+	// OB-1 (ADR-001): per-domain delivery mode. 'relay' (the default) takes
+	// today's path unchanged below; 'direct' hands the claimed email to the
+	// outbound MTA executor. Claim/atomicity semantics are identical — the
+	// claim above already flipped queued→processing exactly once (R-26).
+	if dom := h.lookupDeliveryDomain(em, senderAddr); dom != nil && dom.DeliveryMode == models.DeliveryModeDirect {
+		return h.processDirect(ctx, em, senderAddr, dom)
+	}
+
 	// Server selection:
 	// 1. Try the workspace or user's own per-account SMTP server first.
 	// 2. Fall back to a shared server whose allowed_domains covers the sender domain.
@@ -264,6 +284,45 @@ func (h *EmailSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error
 	em.SMTPHostname = smtpServer.Host
 	_ = h.emailRepo.Update(em)
 
+	// Shared pre-delivery steps for both delivery modes: plain-text
+	// autogeneration, attachments, headers, suppression filter, campaign
+	// message and header stamping. ok=false means the email was finalized
+	// (suppressed or an attachment problem) — nothing to deliver.
+	prep, ok := h.prepareOutgoing(ctx, em)
+	if !ok {
+		return nil
+	}
+
+	if err := h.sender.Send(smtpServer, em.Sender, prep.recipients, em.Subject, em.HTMLBody, em.TextBody, prep.attachments, prep.headers, em.ListUnsubscribeURL, em.ListUnsubscribeMailto, em.ListUnsubscribePost); err != nil {
+		// Increment the shared server's failure counter regardless of outcome.
+		if sharedServerID != 0 && h.serverRepo != nil {
+			go h.serverRepo.IncrementFailedCount(sharedServerID)
+		}
+		return h.handleSendFailure(em, smtpServer, sharedServerID, prep.campMsg, err, nil)
+	}
+
+	// Success
+	h.handleSendSuccess(em, smtpServer, sharedServerID, prep.campMsg, prep.recipients, nil)
+	return nil
+}
+
+// outgoingPrep carries the delivery payload prepared by prepareOutgoing,
+// shared verbatim by the relay and direct-MTA paths.
+type outgoingPrep struct {
+	recipients  []string
+	attachments []models.Attachment
+	headers     map[string]string
+	campMsg     *models.CampaignMessage
+}
+
+// prepareOutgoing runs the pre-delivery steps common to both delivery modes:
+// plain-text autogeneration, attachment loading, header parsing, suppression
+// filtering, campaign-message resolution, and Posta header stamping.
+// ok=false means the email has been finalized already (all recipients
+// suppressed, or an attachment problem marked failed) and no delivery may
+// happen. The steps and their order are exactly the ones the relay path has
+// always run.
+func (h *EmailSendHandler) prepareOutgoing(ctx context.Context, em *models.Email) (*outgoingPrep, bool) {
 	// Auto-generate plain text from HTML if not provided
 	if em.TextBody == "" && em.HTMLBody != "" {
 		em.TextBody = email.HTMLToText(em.HTMLBody)
@@ -273,13 +332,13 @@ func (h *EmailSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error
 	attachments, err := email.LoadAttachments(ctx, em, h.blobStore)
 	if err != nil {
 		h.markFailed(em, fmt.Sprintf("failed to load attachments: %v", err))
-		return nil
+		return nil, false
 	}
 	// An attachment with no payload would go out as a zero-byte file; fail loudly instead.
 	for _, att := range attachments {
 		if att.Content == "" {
 			h.markFailed(em, fmt.Sprintf("attachment %q has no content", att.Filename))
-			return nil
+			return nil, false
 		}
 	}
 
@@ -307,7 +366,7 @@ func (h *EmailSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error
 					}
 				}
 				logger.Info("worker: skipping email, all recipients suppressed", "id", em.ID)
-				return nil
+				return nil, false
 			}
 			recipients = filtered
 		}
@@ -343,67 +402,86 @@ func (h *EmailSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error
 		h.stamper.Sign(headers, em, recipients, em.Subject)
 	}
 
-	if err := h.sender.Send(smtpServer, em.Sender, recipients, em.Subject, em.HTMLBody, em.TextBody, attachments, headers, em.ListUnsubscribeURL, em.ListUnsubscribeMailto, em.ListUnsubscribePost); err != nil {
-		// Increment the shared server's failure counter regardless of outcome.
-		if sharedServerID != 0 && h.serverRepo != nil {
-			go h.serverRepo.IncrementFailedCount(sharedServerID)
-		}
+	return &outgoingPrep{
+		recipients:  recipients,
+		attachments: attachments,
+		headers:     headers,
+		campMsg:     campMsg,
+	}, true
+}
 
-		// R-05: classify the failure instead of the binary 5xx-vs-retry split.
-		// A permanent class (hard_bounce, invalid_recipient — e.g. 550 5.1.1
-		// user unknown) keeps the existing auto-suppress; soft/deferred
-		// classes (reputation blocks, auth failures, transient policy
-		// rejections) increment RetryCount without suppression and come back
-		// through the retry path below.
-		var rejection *email.SendError
-		var cls provider_events.Classification
-		isRejection := false
-		if se, ok := permanentRejection(err); ok {
-			rejection, isRejection = se, true
-			cls = provider_events.ClassifySendError(se)
-		}
-		if isRejection && cls.Permanent() && h.autoSuppress {
-			h.handlePermanentRejection(em, rejection, cls)
-			logger.Info("worker: recipient permanently rejected, suppressed",
-				"id", em.ID, "recipient", rejection.Recipient, "code", rejection.Code, "classification", cls)
-			return nil
-		}
-
-		em.RetryCount++
-		em.Status = models.EmailStatusFailed
-		em.ErrorMessage = err.Error()
-		_ = h.emailRepo.Update(em)
-		metadata := h.eventMetadata(smtpServer, campMsg, sharedServerID, em.RetryCount)
-		if isRejection {
-			metadata["classification"] = string(cls)
-			metadata["smtp_code"] = rejection.Code
-			metadata["smtp_stage"] = rejection.Stage
-			if rejection.Recipient != "" {
-				metadata["recipient"] = rejection.Recipient
-			}
-		}
-		emailhistory.RecordFailed(h.recorder, em, em.ErrorMessage, metadata)
-		logger.Debug("worker: email send failed, will retry",
-			"id", em.ID, "attempt", em.RetryCount, "classification", cls, "error", err)
-		// Return error so Asynq retries the task
-		return fmt.Errorf("SMTP send failed: %w", err)
+// handleSendFailure applies the R-05 classification chain to a send failure —
+// auto-suppression for permanent recipient rejections (550 at RCPT TO with a
+// permanent class), otherwise the retry bookkeeping — and returns the error
+// asynq should see (nil when the message was finalized as suppressed). Both
+// delivery modes route their failures through here so classification and
+// bounce handling stay identical. extraMeta merges delivery-mode-specific
+// trace fields (mx_host, mta_attempts) into the history metadata.
+func (h *EmailSendHandler) handleSendFailure(em *models.Email, smtpServer *models.SMTPServer, sharedServerID uint, campMsg *models.CampaignMessage, err error, extraMeta map[string]any) error {
+	// R-05: classify the failure instead of the binary 5xx-vs-retry split.
+	// A permanent class (hard_bounce, invalid_recipient — e.g. 550 5.1.1
+	// user unknown) keeps the existing auto-suppress; soft/deferred
+	// classes (reputation blocks, auth failures, transient policy
+	// rejections) increment RetryCount without suppression and come back
+	// through the retry path below.
+	var rejection *email.SendError
+	var cls provider_events.Classification
+	isRejection := false
+	if se, ok := permanentRejection(err); ok {
+		rejection, isRejection = se, true
+		cls = provider_events.ClassifySendError(se)
+	}
+	if isRejection && cls.Permanent() && h.autoSuppress {
+		h.handlePermanentRejection(em, rejection, cls)
+		logger.Info("worker: recipient permanently rejected, suppressed",
+			"id", em.ID, "recipient", rejection.Recipient, "code", rejection.Code, "classification", cls)
+		return nil
 	}
 
-	// Success
+	em.RetryCount++
+	em.Status = models.EmailStatusFailed
+	em.ErrorMessage = err.Error()
+	_ = h.emailRepo.Update(em)
+	metadata := h.eventMetadata(smtpServer, campMsg, sharedServerID, em.RetryCount)
+	for k, v := range extraMeta {
+		metadata[k] = v
+	}
+	if isRejection {
+		metadata["classification"] = string(cls)
+		metadata["smtp_code"] = rejection.Code
+		metadata["smtp_stage"] = rejection.Stage
+		if rejection.Recipient != "" {
+			metadata["recipient"] = rejection.Recipient
+		}
+	}
+	emailhistory.RecordFailed(h.recorder, em, em.ErrorMessage, metadata)
+	logger.Debug("worker: email send failed, will retry",
+		"id", em.ID, "attempt", em.RetryCount, "classification", cls, "error", err)
+	// Return error so Asynq retries the task
+	return fmt.Errorf("SMTP send failed: %w", err)
+}
+
+// handleSendSuccess finalizes a delivered email for either delivery mode:
+// status sent, history event, webhook dispatch, contact stats, campaign
+// message status. extraMeta merges delivery-mode-specific trace fields into
+// the history metadata.
+func (h *EmailSendHandler) handleSendSuccess(em *models.Email, smtpServer *models.SMTPServer, sharedServerID uint, campMsg *models.CampaignMessage, recipients []string, extraMeta map[string]any) {
 	now := time.Now()
 	em.Status = models.EmailStatusSent
 	em.SentAt = &now
 	em.ErrorMessage = ""
 	_ = h.emailRepo.Update(em)
-	emailhistory.RecordSent(h.recorder, em, h.eventMetadata(smtpServer, campMsg, sharedServerID, 0))
+	metadata := h.eventMetadata(smtpServer, campMsg, sharedServerID, 0)
+	for k, v := range extraMeta {
+		metadata[k] = v
+	}
+	emailhistory.RecordSent(h.recorder, em, metadata)
 	// Increment the shared server's success counter
 	if sharedServerID != 0 && h.serverRepo != nil {
 		go h.serverRepo.IncrementSentCount(sharedServerID)
 	}
 	if h.dispatcher != nil {
-		if h.dispatcher != nil {
-			h.dispatcher.Dispatch(em.UserID, em.WorkspaceID, "email.sent", em.UUID, em.Sender)
-		}
+		h.dispatcher.Dispatch(em.UserID, em.WorkspaceID, "email.sent", em.UUID, em.Sender)
 	}
 	if h.onSent != nil {
 		h.onSent()
@@ -417,8 +495,110 @@ func (h *EmailSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error
 		}
 	}
 	logger.Info("worker: email sent successfully", "id", em.ID)
+}
 
+// lookupDeliveryDomain resolves the sender domain's configuration row for the
+// delivery-mode branch (OB-1): the workspace's row first, then the user's
+// own. nil means no domain row — relay mode, the default.
+func (h *EmailSendHandler) lookupDeliveryDomain(em *models.Email, senderAddr string) *models.Domain {
+	if h.domainRepo == nil {
+		return nil
+	}
+	d := senderDomain(senderAddr)
+	if d == "" {
+		return nil
+	}
+	if em.WorkspaceID != nil {
+		if row, err := h.domainRepo.FindByWorkspaceAndDomain(*em.WorkspaceID, d); err == nil {
+			return row
+		}
+	}
+	if row, err := h.domainRepo.FindByUserIDAndDomain(em.UserID, d); err == nil {
+		return row
+	}
 	return nil
+}
+
+// processDirect delivers a claimed email through the outbound MTA executor
+// (ADR-001, OB-1): MX resolution, ESMTP with mandatory STARTTLS-when-offered,
+// per-domain policy, durable attempt records — and a delivered status only
+// from the MX 2xx. The message is built and DKIM-signed exactly like the
+// relay path builds and signs it.
+func (h *EmailSendHandler) processDirect(ctx context.Context, em *models.Email, senderAddr string, domain *models.Domain) error {
+	prep, ok := h.prepareOutgoing(ctx, em)
+	if !ok {
+		return nil
+	}
+
+	// Fail closed when the worker has no MTA executor (e.g. an older worker
+	// binary): never silently fall back to the relay for a domain configured
+	// direct.
+	if h.mta == nil {
+		h.markFailed(em, "direct delivery mode is configured for this domain but the MTA executor is not available on this worker")
+		return nil
+	}
+
+	msg := email.BuildMessage(em.Sender, prep.recipients, em.Subject, em.HTMLBody, em.TextBody, prep.attachments, prep.headers, em.ListUnsubscribeURL, em.ListUnsubscribeMailto, em.ListUnsubscribePost)
+	envelopeFrom := email.EnvelopeAddress(em.Sender)
+	senderDom := senderDomain(envelopeFrom)
+
+	// DKIM signing (R-02): sign the final message for the sender's domain,
+	// mirroring SMTPSender.Send's signing step. A signing error fails the
+	// send (asynq retries); a missing key keeps the message unsigned.
+	signer := email.CurrentDkimSigner()
+	if signer != nil && senderDom != "" {
+		signed, serr := signer.SignForDomain(msg, senderDom)
+		if serr != nil {
+			return h.handleSendFailure(em, nil, 0, prep.campMsg, fmt.Errorf("DKIM signing failed: %w", serr), nil)
+		}
+		msg = signed
+	}
+
+	res, err := h.mta.Deliver(ctx, mta.DeliverySpec{
+		SenderDomain:   senderDom,
+		DomainVerified: domain.OwnershipVerified,
+		BindIP:         domain.OutboundBindIP,
+		Policy:         mta.PolicyFor(domain),
+	}, mta.Envelope{
+		EmailID:     em.ID,
+		WorkspaceID: em.WorkspaceID,
+		From:        envelopeFrom,
+		Recipients:  prep.recipients,
+		Msg:         msg,
+	})
+	if err != nil {
+		// A fail-closed policy refusal (unverified sender domain) is a
+		// configuration error, not a transient transport failure: record the
+		// refusal attempt row (the executor did), mark failed, no asynq retry.
+		var refusal *mta.PolicyRefusal
+		if errors.As(err, &refusal) {
+			h.markFailed(em, refusal.Reason)
+			return nil
+		}
+		return h.handleSendFailure(em, nil, 0, prep.campMsg, err, mtaMetadata(res))
+	}
+
+	// Delivered = MX 2xx only (never on enqueue). The accepting MX host lands
+	// on the row for traceability, like the relay hostname does.
+	if res != nil && res.MXHost != "" {
+		em.SMTPHostname = res.MXHost
+	}
+	h.handleSendSuccess(em, nil, 0, prep.campMsg, prep.recipients, mtaMetadata(res))
+	return nil
+}
+
+// mtaMetadata adds direct-delivery trace fields to history event metadata.
+func mtaMetadata(res *mta.DeliveryResult) map[string]any {
+	meta := map[string]any{"delivery_mode": "direct"}
+	if res != nil {
+		if res.MXHost != "" {
+			meta["mx_host"] = res.MXHost
+		}
+		if res.Attempts > 0 {
+			meta["mta_attempts"] = res.Attempts
+		}
+	}
+	return meta
 }
 
 func (h *EmailSendHandler) markFailed(em *models.Email, reason string) {

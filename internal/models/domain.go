@@ -21,6 +21,15 @@ package models
 
 import "time"
 
+// Per-domain outbound delivery modes (ADR-001 §2). 'relay' (the default) sends
+// through the configured trusted SMTP relay exactly as before; 'direct' hands
+// mail from this domain to the outbound MTA executor for direct-to-MX
+// delivery.
+const (
+	DeliveryModeRelay  = "relay"
+	DeliveryModeDirect = "direct"
+)
+
 type Domain struct {
 	ID                uint      `json:"id" gorm:"primaryKey"`
 	UserID            uint      `json:"user_id" gorm:"index;not null"`
@@ -31,7 +40,22 @@ type Domain struct {
 	DKIMVerified      bool      `json:"dkim_verified" gorm:"default:false"`
 	DMARCVerified     bool      `json:"dmarc_verified" gorm:"default:false"`
 	VerificationToken string    `json:"verification_token" gorm:"not null"`
-	CreatedAt         time.Time `json:"created_at"`
+
+	// OB-1 outbound MTA (ADR-001): per-domain delivery configuration. The
+	// columns are additive (default 'relay' = today's behavior); the PATCH
+	// route is wired separately by the coordinator wave.
+	//
+	// DeliveryMode selects the executor ('relay' | 'direct').
+	// OutboundBindIP pins the source address of direct deliveries (single IP
+	// in this phase; PTR guidance for it is surfaced in domain health).
+	// MaxMsgsPerConnection and HourlyBudget feed the per-domain sending
+	// policy; 0 means the built-in default / unlimited respectively.
+	DeliveryMode         string `json:"delivery_mode" gorm:"size:16;not null;default:'relay'"`
+	OutboundBindIP       string `json:"outbound_bind_ip" gorm:"size:64"`
+	MaxMsgsPerConnection int    `json:"max_msgs_per_connection" gorm:"default:0"`
+	HourlyBudget         int    `json:"hourly_budget" gorm:"default:0"`
+
+	CreatedAt time.Time `json:"created_at"`
 
 	User User `json:"-" gorm:"foreignKey:UserID"`
 }

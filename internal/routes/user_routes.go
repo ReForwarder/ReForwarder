@@ -190,11 +190,58 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 		{
 			Method:      http.MethodPost,
 			Path:        "/sessions/logout",
-			Handler:     r.h.session.Logout,
+			Handler:     okapi.H(r.h.session.Logout),
 			Group:       userGroup,
 			Summary:     "Logout current session",
-			Description: "Revoke the current session's JWT token",
+			Description: "Revoke the current session's JWT token. A refresh token in the body is revoked with it (CA-03).",
+			Request:     &handlers.LogoutRequest{},
 			Response:    &dto.Response[any]{},
+		},
+		// SF-89 Web Push (user-scoped): the capability probe, then CRUD over
+		// the calling user's own browser push subscriptions.
+		{
+			Method:      http.MethodGet,
+			Path:        "/push/config",
+			Handler:     r.h.webpush.GetConfig,
+			Group:       userGroup,
+			Summary:     "Get Web Push capability",
+			Description: "Returns whether Web Push is enabled on this deployment and the VAPID public key to subscribe with (SF-89).",
+			Response:    &dto.Response[handlers.PushConfigResponse]{},
+		},
+		{
+			Method:      http.MethodPost,
+			Path:        "/push/subscriptions",
+			Handler:     okapi.H(r.h.webpush.Subscribe),
+			Group:       userGroup,
+			Summary:     "Register a browser push subscription",
+			Description: "Stores the browser's PushSubscription (endpoint + RFC 8291 keys) for the current user (SF-89).",
+			Request:     &handlers.SubscribeRequest{},
+			Response:    &dto.Response[map[string]any]{},
+			Options: []okapi.RouteOption{
+				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodGet,
+			Path:        "/push/subscriptions",
+			Handler:     r.h.webpush.List,
+			Group:       userGroup,
+			Summary:     "List push subscriptions",
+			Description: "Returns the current user's own Web Push subscriptions (SF-89).",
+			Response:    &dto.Response[[]models.UserPushSubscription]{},
+		},
+		{
+			Method:      http.MethodDelete,
+			Path:        "/push/subscriptions/{id:int}",
+			Handler:     okapi.H(r.h.webpush.Unsubscribe),
+			Group:       userGroup,
+			Summary:     "Remove a push subscription",
+			Description: "Deletes one of the current user's own Web Push subscriptions by ID (SF-89).",
+			Response:    &dto.Response[map[string]string]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Push subscription ID"),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+			},
 		},
 		{
 			Method:      http.MethodPut,
@@ -444,6 +491,76 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 		Response:    &dto.Response[okapi.M]{},
 		Options: []okapi.RouteOption{
 			okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+		},
+	})
+
+	// SF-35/SF-67: app passwords. Per-user secrets for the future IMAP / POP3 /
+	// submission surfaces (ADR-004). Generate returns the plaintext exactly
+	// once (bcrypt stored); list and revoke never touch credential material.
+	appPasswordGroup := r.v1.Group("/users/me/app-passwords", r.mw.jwtOnly).WithTagInfo(okapi.GroupTag{
+		Name:        tagUser,
+		Description: "App passwords for mail clients (IMAP/POP3/submission). Requires a dashboard session.",
+	})
+
+	routes = append(routes,
+		okapi.RouteDefinition{
+			Method:      http.MethodPost,
+			Path:        "",
+			Handler:     okapi.H(r.h.appPassword.Create),
+			Group:       appPasswordGroup,
+			Summary:     "Generate an app password",
+			Description: "Creates a named app password for the current user. The plaintext is returned exactly once and stored only as a bcrypt digest.",
+			Request:     &handlers.CreateAppPasswordRequest{},
+			Response:    &dto.Response[handlers.AppPasswordCreatedResponse]{},
+			Options: []okapi.RouteOption{
+				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+			},
+		},
+		okapi.RouteDefinition{
+			Method:      http.MethodGet,
+			Path:        "",
+			Handler:     r.h.appPassword.List,
+			Group:       appPasswordGroup,
+			Summary:     "List app passwords",
+			Description: "The current user's app passwords with metadata only — the plaintext is never recoverable.",
+			Response:    &dto.Response[[]handlers.AppPasswordResponse]{},
+		},
+		okapi.RouteDefinition{
+			Method:      http.MethodDelete,
+			Path:        "/{id:int}",
+			Handler:     okapi.H(r.h.appPassword.Revoke),
+			Group:       appPasswordGroup,
+			Summary:     "Revoke an app password",
+			Description: "Permanently disables one of the current user's app passwords.",
+			Request:     &handlers.RevokeAppPasswordRequest{},
+			Response:    &dto.Response[any]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "App password ID"),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
+	)
+
+	// CA-03: single-use refresh-token rotation. Public like /auth/login and
+	// under the same per-IP limiter. Registered from the user route set because
+	// the rotation logic lives on the user handler alongside the login that
+	// issues the tokens.
+	refreshGroup := r.v1.Group("/auth", r.mw.loginLimiter).WithTagInfo(okapi.GroupTag{
+		Name:        "Auth",
+		Description: "Refresh-token rotation for issued sessions.",
+	})
+	routes = append(routes, okapi.RouteDefinition{
+		Method:      http.MethodPost,
+		Path:        "/refresh",
+		Handler:     okapi.H(r.h.user.Refresh),
+		Group:       refreshGroup,
+		Summary:     "Rotate refresh token",
+		Description: "Redeem a single-use refresh token for a fresh access JWT and successor refresh token. Replaying a rotated token revokes its whole rotation family.",
+		Request:     &handlers.RefreshRequest{},
+		Response:    &dto.Response[handlers.AuthResponse]{},
+		Options: []okapi.RouteOption{
+			okapi.DocErrorResponse(401, &dto.ErrorResponseBody{}),
+			okapi.DocErrorResponse(429, &dto.ErrorResponseBody{}),
 		},
 	})
 

@@ -230,6 +230,25 @@ func (c *claimConn) QueryContext(_ context.Context, query string, args []driver.
 	case strings.Contains(lower, `from "subscribers"`):
 		// The FindPendingByCampaign preload: fixture rows carry no subscriber.
 		return &claimRows{cols: []string{"id"}}, nil
+	case strings.Contains(lower, `from "domains"`):
+		// The send worker's delivery-mode lookup (OB-1) reads the sender
+		// domain's configuration row; the fixture rows decide relay vs direct.
+		matched, err := c.s.evalWhere("domains", lower, args)
+		if err != nil {
+			return nil, err
+		}
+		matched = claimLimit(matched, lower)
+		if len(matched) == 0 {
+			return &claimRows{cols: []string{"id"}}, nil
+		}
+		cols := claimOrderedCols(matched[0])
+		rows := make([][]driver.Value, len(matched))
+		for i, r := range matched {
+			for _, col := range cols {
+				rows[i] = append(rows[i], r.cols[col])
+			}
+		}
+		return &claimRows{cols: cols, rows: rows}, nil
 	case strings.Contains(lower, `from "emails"`), strings.Contains(lower, `from "campaign_messages"`):
 		table := "emails"
 		if strings.Contains(lower, `from "campaign_messages"`) {

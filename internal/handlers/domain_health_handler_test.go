@@ -21,8 +21,10 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -209,5 +211,147 @@ func TestDomainHealthDiagnosePersistsAndAudits(t *testing.T) {
 	}
 	if rows[0]["workspace_id"] != int64(3) {
 		t.Fatalf("persistence must keep the workspace binding: %+v", rows[0])
+	}
+}
+
+
+// ---------- OB-1 SetDeliveryMode (route wiring by the coordinator) ----------
+
+func newDomainServerWithRoutes(t *testing.T) (*okapi.TestServer, *dmrState) {
+	t.Helper()
+	state := newDmrState()
+	gdb := dmrGorm(t, state)
+	h := NewDomainHandler(repositories.NewDomainRepository(gdb))
+	h.SetAuditLogger(audit.NewLogger(eventbus.New(repositories.NewEventRepository(gdb))))
+	o := okapi.NewTestServer(t)
+	g := o.Group("/workspaces/current",
+		middlewares.Authenticate(middlewares.JWTAuth(&config.Config{JWTSecret: logsTestJWTSecret}), nil, nil, nil),
+		dmrWorkspaceBinding,
+	)
+	g.Patch("/domains/{id:int}/delivery-mode", okapi.H(h.SetDeliveryMode))
+	return o, state
+}
+
+func patchDeliveryMode(t *testing.T, o *okapi.TestServer, id int, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPatch, "/workspaces/current/domains/"+itoa(id)+"/delivery-mode", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	// The route group mounts the real JWT middleware and the workspace-binding
+	// middleware, so the request must carry a dashboard token and name the
+	// workspace — same arrangement doDMARCReq uses for the other domain routes.
+	req.Header.Set("Authorization", "Bearer "+logsTestJWT(t, "user"))
+	req.Header.Set("X-Test-Workspace", dmrTestWorkspace)
+	rec := httptest.NewRecorder()
+	o.ServeHTTP(rec, req)
+	return rec
+}
+
+func itoa(n int) string { return fmt.Sprintf("%d", n) }
+
+func TestDeliveryModeSwitchToDirect(t *testing.T) {
+	o, state := newDomainServerWithRoutes(t)
+	dmrSeed(t, state, "domains", map[string]any{
+		"id": 10, "user_id": int64(1), "workspace_id": int64(3), "domain": "verified.example",
+		"ownership_verified": true,
+	})
+	rec := patchDeliveryMode(t, o, 10, `{"delivery_mode":"direct"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var res struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Changed bool `json:"changed"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !res.Data.Changed {
+		t.Fatalf("changed = false, want true")
+	}
+	rows := state.rowsOf("domains")
+	if len(rows) != 1 || rows[0]["delivery_mode"] != "direct" {
+		t.Fatalf("delivery_mode not persisted: %+v", rows)
+	}
+	events := state.rowsOf("events")
+	found := false
+	for _, e := range events {
+		if e["type"] == "domain.delivery_mode_changed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("delivery-mode change not audited: %+v", events)
+	}
+}
+
+func TestDeliveryModeDirectRequiresVerifiedDomain(t *testing.T) {
+	o, state := newDomainServerWithRoutes(t)
+	dmrSeed(t, state, "domains", map[string]any{
+		"id": 11, "user_id": int64(1), "workspace_id": int64(3), "domain": "unverified.example",
+		"ownership_verified": false,
+	})
+	rec := patchDeliveryMode(t, o, 11, `{"delivery_mode":"direct"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	rows := state.rowsOf("domains")
+	if rows[0]["delivery_mode"] != "relay" {
+		t.Fatalf("delivery_mode mutated on refusal: %+v", rows[0])
+	}
+}
+
+func TestDeliveryModeRejectsInvalidMode(t *testing.T) {
+	o, state := newDomainServerWithRoutes(t)
+	dmrSeed(t, state, "domains", map[string]any{
+		"id": 12, "user_id": int64(1), "workspace_id": int64(3), "domain": "any.example",
+		"ownership_verified": true,
+	})
+	rec := patchDeliveryMode(t, o, 12, `{"delivery_mode":"open"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	rows := state.rowsOf("domains")
+	if rows[0]["delivery_mode"] != "relay" {
+		t.Fatalf("delivery_mode mutated on invalid mode: %+v", rows[0])
+	}
+}
+
+func TestDeliveryModeForeignDomainNotFound(t *testing.T) {
+	o, _ := newDomainServerWithRoutes(t)
+	rec := patchDeliveryMode(t, o, 999, `{"delivery_mode":"direct"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestDeliveryModeSameModeNoop(t *testing.T) {
+	o, state := newDomainServerWithRoutes(t)
+	dmrSeed(t, state, "domains", map[string]any{
+		"id": 13, "user_id": int64(1), "workspace_id": int64(3), "domain": "relay.example",
+		"ownership_verified": true,
+	})
+	rec := patchDeliveryMode(t, o, 13, `{"delivery_mode":"relay"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var res struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Changed bool `json:"changed"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if res.Data.Changed {
+		t.Fatalf("changed = true for same-mode noop")
+	}
+	events := state.rowsOf("events")
+	for _, e := range events {
+		if e["type"] == "domain.delivery_mode_changed" {
+			t.Fatalf("noop must not audit: %+v", events)
+		}
 	}
 }

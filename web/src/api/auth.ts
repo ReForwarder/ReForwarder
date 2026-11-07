@@ -1,5 +1,5 @@
 import api from './client'
-import type { ApiResponse, AuthResponse, UserProfile, Setup2FAResponse, Plan } from './types'
+import type { ApiResponse, AuthResponse, UserProfile, Setup2FAResponse, Plan, AppPassword, AppPasswordCreated } from './types'
 
 export const authApi = {
   login(email: string, password: string, twoFactorCode?: string) {
@@ -7,12 +7,18 @@ export const authApi = {
     if (twoFactorCode) body.two_factor_code = twoFactorCode
     return api.post<ApiResponse<AuthResponse>>('/auth/login', body)
   },
+  // CA-03: redeem a single-use refresh token for a fresh token pair.
+  refresh(refreshToken: string) {
+    return api.post<ApiResponse<AuthResponse>>('/auth/refresh', { refresh_token: refreshToken })
+  },
   me() {
     return api.get<ApiResponse<UserProfile>>('/users/me')
   },
   // Revokes the current session server-side and expires the session cookie.
-  logout() {
-    return api.post<ApiResponse<{ message: string }>>('/users/me/sessions/logout')
+  // A refresh token in the body dies with it (CA-03).
+  logout(refreshToken?: string) {
+    return api.post<ApiResponse<{ message: string }>>('/users/me/sessions/logout',
+      refreshToken ? { refresh_token: refreshToken } : undefined)
   },
   updateProfile(data: { name: string; require_verified_domain?: boolean }) {
     return api.put<ApiResponse<UserProfile>>('/users/me', data)
@@ -76,5 +82,16 @@ export const authApi = {
   },
   getMyPlan() {
     return api.get<ApiResponse<Plan | null>>('/users/me/plan')
+  },
+  // SF-35/SF-67: app passwords for mail clients. Generation returns the
+  // plaintext exactly once; the backend stores only a bcrypt digest.
+  listAppPasswords() {
+    return api.get<ApiResponse<AppPassword[]>>('/users/me/app-passwords')
+  },
+  createAppPassword(name: string) {
+    return api.post<ApiResponse<AppPasswordCreated>>('/users/me/app-passwords', { name })
+  },
+  revokeAppPassword(id: number) {
+    return api.delete<ApiResponse<{ message: string }>>(`/users/me/app-passwords/${id}`)
   },
 }

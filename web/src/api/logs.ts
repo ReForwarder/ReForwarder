@@ -6,12 +6,25 @@ import type {
   MessageDetailRow,
   MessageContent,
   EmailEventRecord,
+  EmailStatusView,
+  ClassificationBreakdown,
   IncomingWebhookEventRow,
   IncomingWebhookEventDetail,
   OutgoingDeliveryRow,
   DeliveryAttemptRow,
   AuditRow,
 } from './types'
+
+const WORKSPACE_KEY = 'posta_workspace_id'
+
+// Browser-direct requests (EventSource) cannot set the X-Posta-Workspace-Id
+// header, so the active workspace travels as a query parameter that the
+// backend's WorkspaceFromQueryOrHeader middleware reads (the inbound.ts
+// pattern).
+function workspaceParam(): string {
+  const ws = localStorage.getItem(WORKSPACE_KEY)
+  return ws ? `workspace_id=${encodeURIComponent(ws)}` : ''
+}
 
 /**
  * Query-string builder for the logs endpoints. Built by hand instead of
@@ -95,6 +108,34 @@ export const logsApi = {
 
   getMessageEvents(uuid: string) {
     return api.get<ApiResponse<EmailEventRecord[]>>(`${BASE}/messages/${uuid}/events`)
+  },
+
+  /**
+   * Lightweight delivery-status probe (CA-02). Wires the backend
+   * GET /workspaces/current/emails/{id}/status route, which until now had no
+   * frontend caller (RF-F103); used by MessageDetail.vue to poll a queued or
+   * processing send until it reaches a terminal state.
+   */
+  getEmailStatus(uuid: string) {
+    return api.get<ApiResponse<EmailStatusView>>(`/workspaces/current/emails/${encodeURIComponent(uuid)}/status`)
+  },
+
+  /**
+   * Classification breakdown (SF-53): R-05 bounce/rejection classification
+   * counts over the workspace's recorded timeline.
+   */
+  getClassifications(params: { from?: string; to?: string } = {}) {
+    return api.get<ApiResponse<ClassificationBreakdown>>(`${BASE}/classifications?${buildQuery(params)}`)
+  },
+
+  /**
+   * SSE stream URL of one message's live timeline (SF-56). No token in the
+   * URL: EventSource sends the HttpOnly session cookie on the handshake, and
+   * the active workspace travels as the workspace_id query parameter.
+   */
+  messageEventsStreamUrl(uuid: string) {
+    const ws = workspaceParam()
+    return `/api/v1${BASE}/${encodeURIComponent(uuid)}/events/stream${ws ? `?${ws}` : ''}`
   },
 
   listIncoming(params: IncomingWebhookListParams = {}) {

@@ -44,7 +44,7 @@
 | Landed | Tracker | Affects |
 | --- | --- | --- |
 | Atomic send/campaign claims: CAS transitions (`queued→processing`, `failed→queued`), TaskID dedup, `FOR UPDATE SKIP LOCKED` batch claims + concurrency test | R-26 | **GAP-01** (partially — cancel + reconcile coverage still to verify) |
-| TOTP recovery codes: bcrypt-hashed single-use, atomic consume, regeneration gated on current TOTP | R-10 | **GAP-12** (half — enforcement of `two_factor_required` still open) |
+| TOTP recovery codes: bcrypt-hashed single-use, atomic consume, regeneration gated on current TOTP | R-10 | **GAP-12** (enforcement landed 2026-11-07 — Wave P3-4; RF-F005 full completion remains the open half) |
 | `pg_dump` backup CronJob (gzip + retention) + restore runbook (`POSTA_BACKUP_ENABLED`) | R-11 | **GAP-50** (⚠ verify acceptance criteria, likely closeable) |
 | Domain deliverability health endpoint (GET + diagnose): SPF/DKIM/DMARC status, DKIM key state, per-domain bounce/complaint rates, live DNS re-verification persisted | R-07 | **GAP-08** (⚠ large chunk landed; verify remaining depth) |
 | `require_domain_verification` platform setting actually enforced | R-23 | **GAP-10** (partial progress) |
@@ -421,7 +421,7 @@ flowchart TD
 ```
 
 - [ ] **GAP-11** — Server-side editor gate on automation write & event-ingest routes · S (2.85) — smallest, highest certainty
-- [ ] **GAP-12** — Enforce or remove `two_factor_required`; recovery codes · M (2.85) — ⚠ recovery codes landed `7f445f2` (R-10): remaining work = **enforcement** of `two_factor_required` (or removal decision)
+- [x] **GAP-12** — Enforce or remove `two_factor_required`; recovery codes · M (2.85) — **enforcement landed 2026-11-07 (Wave P3-4)**: policy read at login (`internal/handlers/user_handler.go:129-134`), forced-enrollment marker + dashboard redirect to 2FA setup, admins not exempt, 8-case test matrix (`internal/handlers/login_enforcement_test.go`); recovery codes themselves (R-10) landed `7f445f2`; residual: middleware-layer refusal for un-enrolled sessions (documented `user_handler.go:566-571`)
 - [ ] **GAP-03** — Multi-replica cron leader election · M (3.15) — Redis `SET NX PX` lease; all 10 cron jobs currently run on every replica
 - [ ] **GAP-01** — Scheduled transactional email: cancel + reconcile coverage · M (3.40) — top of register · ⚠ atomic claims landed `7f445f2` (R-26); verify cancel/reconcile remainder · → OB Phase 1
 - [ ] **GAP-02** ◆ residual — Delivery & complaint signal ingestion · M (2.85) — core landed `6d2d7c0`:
@@ -450,7 +450,7 @@ flowchart TD
 - [ ] **GAP-05** — Caller-supplied idempotency keys · M (2.85) — → OB Phase 1
 - [ ] **GAP-14** — Webhook signature replay protection · S (2.75) — signed timestamp + 5-minute tolerance
 - [ ] **GAP-04** — Native ESP sending integrations, failover, per-send server selection · XL (2.55) — `Sender` interface + drivers; seam reused by OB MTA adapter · → OB Phase 1. **Blocks GAP-44 + ESP value.**
-- [ ] **GAP-13** — `security_events` retention caller · S (2.50) — currently unbounded
+- [x] **GAP-13** — `security_events` retention caller · S (2.50) — landed 2026-11-07 (uncommitted working tree, P3-3 ops/settings wave, dwfrun-65ae252f): `RetentionCleanupJob` purges via `SecurityEventRepository.DeleteOlderThan` under `security_events_retention_days` (default 90, 0 = keep forever); wiring `internal/cron/jobs/retention.go:424-433` + `cmd/posta/server.go:829-832`; tests `internal/cron/jobs/retention_security_test.go` (4 named tests); battery PASS
 - [ ] **GAP-27** — Data export completeness · M (2.00)
 - [ ] **GAP-15** — Tracking toggle symmetry (privacy) · S (2.00) — ⚠ **product-decision gate: decide intent before code**
 - [ ] **GAP-26** — Campaign test-send + campaign-scoped preview · M (1.95) — top usability gap; blocks GAP-34

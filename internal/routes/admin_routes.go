@@ -297,6 +297,41 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response: &dto.Response[[]models.Setting]{},
 		},
 
+		// Settings change history (SF-100): the per-key audit trail over every
+		// platform settings write, and rollback of one key to a recorded prior
+		// value. Rollback writes the old value back through the normal setter,
+		// so it appends its own history entry and invalidates the provider's
+		// TTL cache. Platform keys are admin-only, so both endpoints are
+		// admin-gated; workspace-scoped keys do not exist yet (the history
+		// table carries a nullable workspace id for them).
+		{
+			Method:      http.MethodGet,
+			Path:        "/settings/history",
+			Handler:     okapi.H(r.h.setting.GetSettingHistory),
+			Group:       adminGroup,
+			Summary:     "Get the change history of one platform setting",
+			Description: "Returns one page of change-history entries for the ?key= query parameter, newest first: old value → new value, who changed it, when. Reserved internal keys (app.*) are refused.",
+			Request:     &handlers.SettingHistoryRequest{},
+			Response:    &dto.PageableResponse[models.SettingHistory]{},
+			Options: []okapi.RouteOption{
+				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodPost,
+			Path:        "/settings/history/rollback",
+			Handler:     okapi.H(r.h.setting.RollbackSetting),
+			Group:       adminGroup,
+			Summary:     "Roll back one platform setting to a recorded prior value",
+			Description: "Restores the setting named in the body to the old value of the selected history entry (history_id, or the newest entry when omitted). Refuses the key's creation entry (no prior value to restore) and reserved internal keys. The rollback is itself a settings write: it records a new history entry and takes effect immediately.",
+			Request:     &handlers.RollbackSettingRequest{},
+			Response:    &dto.Response[[]models.Setting]{},
+			Options: []okapi.RouteOption{
+				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
+
 		// ==================== Updates ====================
 		{
 			Method:      http.MethodGet,
@@ -724,7 +759,76 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
 			},
 		},
+		okapi.RouteDefinition{
+			Method:      http.MethodDelete,
+			Path:        "/queues/{queue}/tasks/{task_id}",
+			Handler:     okapi.H(r.h.admin.DestroyQueueTask),
+			Group:       adminGroup,
+			Tags:        []string{tagAdmin},
+			Summary:     "Destroy a task",
+			Description: "Deletes a pending/scheduled/retrying/archived task outright (the REST destroy verb beside POST /cancel; active tasks cannot be deleted). Audited as admin.queue.task_destroyed. PATCH of a task's options is not offered: asynq's Inspector has no API to modify a task's options in place — adjust by cancel + re-enqueue instead.",
+			Response:    &dto.Response[okapi.M]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("queue", "string", "Queue name"),
+				okapi.DocPathParam("task_id", "string", "Asynq task ID"),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+			},
+		},
 	)
+
+	// Queue pause/resume (SF-54): a deployment-wide delivery switch over all
+	// managed queues. Per-domain email suspension is explicitly out of scope
+	// (ADR-001).
+	routes = append(routes,
+		okapi.RouteDefinition{
+			Method:      http.MethodPost,
+			Path:        "/queue/pause",
+			Handler:     r.h.admin.PauseQueues,
+			Group:       adminGroup,
+			Tags:        []string{tagAdmin},
+			Summary:     "Pause all delivery queues",
+			Description: "Stops task processing on the transactional, bulk and low queues (already-paused queues are reported unchanged). Audited. The per-queue paused flags appear in GET /admin/queues.",
+			Response:    &dto.Response[handlers.QueuePauseResult]{},
+			Options: []okapi.RouteOption{
+				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+			},
+		},
+		okapi.RouteDefinition{
+			Method:      http.MethodPost,
+			Path:        "/queue/resume",
+			Handler:     r.h.admin.ResumeQueues,
+			Group:       adminGroup,
+			Tags:        []string{tagAdmin},
+			Summary:     "Resume all delivery queues",
+			Description: "Resumes task processing on the transactional, bulk and low queues (already-running queues are reported unchanged). Audited.",
+			Response:    &dto.Response[handlers.QueuePauseResult]{},
+			Options: []okapi.RouteOption{
+				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+			},
+		},
+	)
+
+	// Operational queue actions (SF-59) exist only when a worker is wired —
+	// requeue_stuck re-enqueues through the send producer.
+	if r.h.queueOps != nil {
+		routes = append(routes, okapi.RouteDefinition{
+			Method:      http.MethodPost,
+			Path:        "/queue/actions/{action}",
+			Handler:     okapi.H(r.h.queueOps.RunAction),
+			Group:       adminGroup,
+			Tags:        []string{tagAdmin},
+			Summary:     "Run a queue operation",
+			Description: "Operational actions over the delivery queues: requeue_stuck (run the queue-reconcile sweep to re-enqueue emails stuck in queued whose task was lost) and purge_archived_before (delete dead-lettered tasks that reached the archive at or before body.before; absent means now). Audited.",
+			Request:     &handlers.QueueActionRequest{},
+			Response:    &dto.Response[handlers.QueueActionResponse]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("action", "string", "requeue_stuck or purge_archived_before"),
+				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+			},
+		})
+	}
 
 	return routes
 }

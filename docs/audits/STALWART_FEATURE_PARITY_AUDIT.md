@@ -56,9 +56,9 @@
 |---|---|
 | Source | inventory §A SF-01 · ledger N/A |
 | Requirement | First-party ESMTP/LMTP command state machine (EHLO/MAIL/RCPT/DATA/RSET/NOOP/VRFY/EXPNS/STARTTLS/AUTH) |
-| Implementation | Relay model: outbound via trusted relays (`internal/services/email/smtp_sender.go`); an inbound SMTP receiver exists feature-gated (`internal/services/inbound/`) |
-| Status fields | Backend: Missing (MTA) · Frontend: — · DB: — · API: — · Security: — · Tests: Missing · Docs: Missing |
-| Final status | **PLANNED (ADR-001 accepted · OB-1)** |
+| Implementation | Wave OB-1: first-party outbound ESMTP client (`internal/services/mta/session.go:100` runSession — EHLO / STARTTLS-when-offered / MAIL / RCPT / DATA over net/smtp, certificate verification always on, per-domain source bind `:124`) + gated 587 MSA (`internal/services/mta/submission.go:45-53,187-219`); relay path (`internal/services/email/smtp_sender.go`) and the feature-gated inbound receiver (`internal/services/inbound/`) unchanged. LMTP (LHLO), VRFY and EXPN absent (grep over `internal/services/mta/` + `internal/services/inbound/`, 2026-11-07) |
+| Status fields | Backend: Partial (client + MSA real; no LMTP/VRFY/EXPN) · Frontend: — · DB: Verified (mta_delivery_attempts, models/mta_delivery_attempt.go:50) · API: Verified (PATCH /domains/{id}/delivery_mode) · Security: Verified (session guards, no open relay) · Tests: Verified (mta package in the services battery) · Docs: Partial |
+| Final status | **PARTIAL** — ESMTP client + MSA landed (Wave OB-1); LMTP/VRFY/EXPN remain **PLANNED (OB-1 remainder / ADR-002 receiver)** |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-A1.md. |
 
 ### SF-02 — ESMTP extension advertisement
@@ -66,9 +66,9 @@
 |---|---|
 | Source | inventory §A SF-02 · ledger N/A |
 | Requirement | PIPELINING/CHUNKING/8BITMIME/SMTPUTF8/DSN/REQUIRETLS/FUTURERELEASE advertisement |
-| Implementation | go-smtp receiver advertises its defaults; outbound client negotiates none (relay protocol only) |
-| Status fields | Backend: Missing · Frontend: — · DB: — · API: — · Security: — · Tests: Missing · Docs: Missing |
-| Final status | **PLANNED (ADR-001 accepted · OB-1)** |
+| Implementation | Wave OB-1: outbound client negotiates and records PIPELINING/8BITMIME/SMTPUTF8 (+AUTH, STARTTLS-upgrade flag) on the session result (`internal/services/mta/session.go:153-156`, SessionCaps `:46-48`; carried on DeliveryResult `deliver.go:90,243`); a non-ASCII envelope is refused when the remote does not advertise SMTPUTF8 (`session.go:181-188`); receivers advertise SMTPUTF8 (`internal/services/inbound/smtp_server.go:205`, MSA `submission.go:196`). REQUIRETLS, DSN and CHUNKING advertisement absent (grep, 2026-11-07) |
+| Status fields | Backend: Partial · Frontend: — · DB: — · API: — · Security: — · Tests: Verified (session_test.go negotiation matrix) · Docs: Partial |
+| Final status | **PARTIAL** — PIPELINING/8BITMIME/SMTPUTF8 negotiated + recorded on the session result (Wave OB-1); REQUIRETLS/DSN remain **PLANNED (OB-1 remainder)** |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-A1.md. |
 
 ### SF-03 — Submission (MSA) with delivery-status writeback
@@ -76,9 +76,9 @@
 |---|---|
 | Source | inventory §A SF-03 · ledger N/A |
 | Requirement | Authenticated submission port with status writeback |
-| Implementation | HTTP API send (`POST /api/v1/emails/send|batch|send-template`) with event writeback (`email_events`) is the submission analog; SMTP MSA absent |
-| Status fields | Backend: Partial (HTTP analog) · Frontend: — · DB: Verified (events) · API: Verified · Security: Verified (auth) · Tests: Verified · Docs: Partial |
-| Final status | **PARTIAL** — SMTP MSA deferred to ADR-001 (OB-1); HTTP analog COMPLETE |
+| Implementation | HTTP API send (`POST /api/v1/emails/send|batch|send-template`) with event writeback (`email_events`) + Wave OB-1 SMTP MSA: gated go-smtp submission listener on 587 (`internal/services/mta/submission.go:45-53,187-219`; `POSTA_SUBMISSION_ENABLED` default off, `internal/config/config.go:514-524`), PLAIN AUTH over relay credentials (bcrypt + rehash + IP allowlist, `submission.go:74-91`), fail-closed sender-domain tenant check (`submission.go:299-307`), accepted messages enter the same Send pipeline — claim/sign/deliver/record, `submission.go:324-378` — so the event writeback applies |
+| Status fields | Backend: Verified · Frontend: — · DB: Verified (events + mta_delivery_attempts) · API: Verified · Security: Verified (no open relay; construction refuses a missing guard, `submission.go:151-164`) · Tests: Verified (submission_test.go in the services battery) · Docs: Partial (POSTA_SUBMISSION_* not yet in configuration.md) |
+| Final status | **COMPLETE** — 587 MSA landed (Wave OB-1) on the existing event-writeback pipeline; HTTP analog unchanged |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-A1.md. |
 
 ### SF-04 — Relay control / open-relay prevention
@@ -86,9 +86,9 @@
 |---|---|
 | Source | inventory §A SF-04 · ledger N/A |
 | Requirement | Authenticated relaying only; no open relay |
-| Implementation | Relay credentials bcrypt + constant-time (R-25) + IP allowlists; security engine SMTP/HTTP enforcement; inbound receiver domain-verified |
+| Implementation | Relay credentials bcrypt + constant-time (R-25) + IP allowlists; security engine SMTP/HTTP enforcement; inbound receiver domain-verified; allowlist + auth-gate direct tests (Wave P3-4) |
 | Status fields | Backend: Verified · Frontend: — · DB: Verified · API: Verified (smtp-credentials CRUD/revoke, workspace_resource_routes.go:219-267) · Security: Verified · Tests: Verified · Docs: Partial |
-| Final status | **COMPLETE** — residual hardening recorded: `middlewares.IPAllowed` and the `ErrAuthRequired` auth gate have zero direct test coverage (V-A1); **PLANNED (Phase 3)** |
+| Final status | **COMPLETE** — the V-A1 test-coverage residual closed (Wave P3-4): direct unit tests in `internal/middlewares/ipallowed_test.go` — TestIPAllowed (19-case matrix: empty allowlist / exact-IP v4+v6 / single & multiple entries / CIDR v4+v6 / malformed entries must not panic or open the door), TestAPIKeyAuth_MissingKeyPaths (the API-key gate's 401 paths: no header, empty bearer, JWT-shaped bearer, Basic scheme, query-token on a plain route), TestQueryTokenAllowedMatrix (R-28: `?token=` reaches the key path only on the four SSE streams), TestAuthenticate_MissingCredentialMessage (the "authentication required" gate at `internal/middlewares/middleware.go:253`) |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-A1.md. |
 
 ### SF-05 — Routing strategies (Local / Mx / Relay via expressions)
@@ -96,9 +96,9 @@
 |---|---|
 | Source | inventory §A SF-05 · ledger N/A |
 | Requirement | Per-domain routing strategy selection |
-| Implementation | Relay-only routing (per-domain SMTP server config); Local/Mx absent |
-| Status fields | Backend: Missing · Frontend: Verified (client+router+views fully wired, V-A1) · DB: Verified · API: Verified · Security: — · Tests: Partial · Docs: Partial |
-| Final status | **PLANNED (ADR-001 accepted · OB-1)** — relay half COMPLETE |
+| Implementation | Wave OB-1: per-domain `delivery_mode` selects the executor — `relay` (default) or `direct`-to-MX (`internal/models/domain.go:29-30,48-53`; `PATCH /domains/{id}/delivery_mode` with direct requiring ownership verification, `internal/handlers/domain_handler.go:80-98`; worker branch `internal/worker/handler.go:223-227,527-539` — fail-closed when the worker lacks the MTA executor). Local delivery absent (mailbox model is ADR-003) |
+| Status fields | Backend: Partial (two of three strategies) · Frontend: Verified (client+router+views fully wired, V-A1) · DB: Verified · API: Verified · Security: Verified (fail-closed unverified-domain refusal, `deliver.go:147-158`) · Tests: Verified (TestDeliveryMode* suite in the handlers battery) · Docs: Partial |
+| Final status | **PARTIAL** — relay \| direct per domain = two of Stalwart's three strategies (Wave OB-1); local delivery **PLANNED (ADR-003 accepted · OB-3)** |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-A1.md. |
 
 ### SF-06 — MX handling (preference, shuffle, null-MX, implicit MX, DNSSEC)
@@ -106,19 +106,19 @@
 |---|---|
 | Source | inventory §A SF-06 · ledger N/A |
 | Requirement | MX resolution behaviors for direct delivery |
-| Implementation | absent (no direct-to-MX) |
-| Status fields | Backend: Missing · others: — |
-| Final status | **PLANNED (ADR-001 accepted · OB-1)** |
-| Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-A1.md. |
+| Implementation | Wave OB-1 direct-to-MX resolver: preference-ordered hosts with equal-preference-group shuffle (RFC 5321 §5.1 guidance, `internal/services/mta/resolver.go:260-278`), implicit MX — no records → A/AAAA of the domain (RFC 5321 §5.1, `resolver.go:218-222`), null MX (RFC 7505) honored with the ADR-001-recorded deviation — A/AAAA fallback instead of refusal (`resolver.go:210-216`); TTL cache that never caches DNS failures (`resolver.go:191-196`) |
+| Status fields | Backend: Verified · Frontend: — · DB: — · API: — · Security: Partial (no DNSSEC validation) · Tests: Verified (resolver_test.go in the services battery) · Docs: Partial |
+| Final status | **COMPLETE** — preference / shuffle / null-MX / implicit MX landed (Wave OB-1); DNSSEC-validated resolution absent, recorded as the limitation (DNSSEC/DANE stays SF-30, OB-1/6) |
+| Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-A1.md. Wave OB-1 (2026-11-07, uncommitted at 02666cc): resolver.go lines cited above; re-verified this session. |
 
 ### SF-07 — Outbound relays (SASL, TLS modes, source-IP pools, pipelining)
 | Field | Value |
 |---|---|
 | Source | inventory §A SF-07 · ledger PART |
 | Requirement | Configurable outbound relays with auth, TLS modes, source-IP pools, pipelining |
-| Implementation | SMTP server config + relay creds (R-25) + dial timeout/deadlines (R-22); source-IP pools absent |
+| Implementation | SMTP server config + relay creds (R-25) + dial timeout/deadlines (R-22); Wave OB-1: per-domain outbound bind IP (`internal/models/domain.go:49-54` OutboundBindIP → `internal/worker/handler.go:560` → `internal/services/mta/session.go:124` DialSMTPWithBind) + per-domain sending budgets (`internal/services/mta/policy.go:33-38,88-148`); source-IP pools absent |
 | Status fields | Backend: Partial · Frontend: Verified (server config) · DB: Verified · API: Verified · Security: Verified (bcrypt) · Tests: Verified · Docs: Partial |
-| Final status | **PARTIAL** — pools PLANNED under ADR-001 (per ADR-001 covers: source-IP pools land with OB-1 binding + OB-6 pool expansion; V-A1 re-gated the remainder to OB-1) |
+| Final status | **PARTIAL** — bind IP + per-domain budgets landed (Wave OB-1); source-IP pools **PLANNED (OB-6 pool expansion, ADR-001/007)** |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-A1.md. |
 
 ### SF-08 — Persistent multi-queue manager (per-recipient retry/notify schedules, expiry, event-locked delivery)
@@ -138,7 +138,7 @@
 | Requirement | Deferred delivery at message level |
 | Implementation | scheduled campaigns (R-01) + API `scheduled_at` = HOLDFOR/UNTIL analog at application level |
 | Status fields | Backend: Verified (app-level) · Frontend: Verified · DB: Verified · API: Verified · Security: Verified · Tests: Verified · Docs: Verified |
-| Final status | **PARTIAL** — SMTP-protocol params deferred to ADR-001 (OB-1) |
+| Final status | **PARTIAL** — application-level analog verified; OB-1 landed (2026-11-07) without SMTP-protocol HOLDFOR/HOLDUNTIL/DELIVERBY/DSN params, which remain **PLANNED (OB-1 remainder)** |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-A1.md. |
 
 ### SF-10 — Full DSN generation (RFC 3464), double-bounce, signed DSNs
@@ -163,8 +163,9 @@
 | Field | Value |
 |---|---|
 | Source | inventory §A SF-12 · ledger N/I |
-| Status fields | Backend: Missing · others: — |
-| Final status | **PLANNED (ADR-001 accepted · OB-1)** |
+| Implementation | Wave OB-1: MAIL FROM validated + enforced on the MSA (non-empty + `mail.ParseAddress`, `internal/services/mta/submission.go:290-297`; sender domain must be tenant-verified, `:299-307`); outbound envelope derived via `email.EnvelopeAddress` (`internal/services/email/smtp_sender.go:390-393`). No rewriting (VERP/SRS) |
+| Status fields | Backend: Partial (validation real; rewriting absent) · Frontend: — · DB: — · API: — · Security: Verified · Tests: Verified (submission_test.go) · Docs: Missing |
+| Final status | **PARTIAL** — MAIL FROM validation landed (Wave OB-1); envelope rewriting (VERP/SRS) **PLANNED under ADR-002 (OB-2, CA-05)** |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-A2.md. |
 
 ### SF-13 — Traceability (Received headers, queue ids, wire logging)
@@ -198,15 +199,16 @@
 | Source | inventory §A SF-16 · ledger PART |
 | Implementation | HMAC-signed outbound webhooks with retries/replay (SF-90 machinery) + automation triggers on business events; per-SMTP-stage (EHLO/MAIL/RCPT) hooks absent |
 | Status fields | Backend: Partial · Frontend: Verified · DB: Verified · API: Verified · Security: Verified (HMAC) · Tests: Verified · Docs: Partial |
-| Final status | **PARTIAL** — SMTP-stage hooks deferred to ADR-001 (OB-1/2) |
+| Final status | **PARTIAL** — business-event hooks verified; OB-1 landed (2026-11-07) without per-SMTP-stage (EHLO/MAIL/RCPT) hooks (no hook dispatch under `internal/services/mta/`, grep) — **PLANNED (ADR-001/002 later slices)** |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-A2.md. |
 
 ### SF-17 — Queue quota reservations
 | Field | Value |
 |---|---|
 | Source | inventory §A SF-17 · ledger N/A |
-| Status fields | Backend: Missing · others: — |
-| Final status | **PLANNED (ADR-001 accepted · OB-1)** |
+| Implementation | Wave OB-1 per-domain sending policy: hourly budget — sliding window, exhaustion defers 421-style with jitter (`internal/services/mta/policy.go:56-58,88-148`, enforced `deliver.go:174-188`) — and max-messages-per-connection (default 10, per-domain override, `policy.go:47-51,73-75`; binds once batch sending lands), columns on the domain row (`internal/models/domain.go:55-56`). Size quotas absent |
+| Status fields | Backend: Partial · Frontend: — (no domain-form fields yet, grep over web/src) · DB: Verified (domain columns) · API: Partial (values ride the domain row; delivery-mode PATCH verified) · Security: — · Tests: Verified (policy tests in the services battery) · Docs: Partial |
+| Final status | **PARTIAL** — hourly budget + msgs/connection landed (Wave OB-1); size quotas **PLANNED (OB-1 remainder/OB-3)** |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-A2.md. |
 
 ### SF-18 — Queue blob encryption [ENT]
@@ -238,8 +240,9 @@
 | Field | Value |
 |---|---|
 | Source | inventory §A SF-21 · ledger N/A |
+| Implementation | absent — OB-1 landed (2026-11-07) without MT-PRIORITY ingress or virtual-queue ordering (no MT-PRIORITY code under internal/, grep) |
 | Status fields | Backend: Missing · others: — |
-| Final status | **PLANNED (ADR-001 accepted · OB-1)** |
+| Final status | **PLANNED (ADR-001 accepted · OB-1 remainder)** — honest: not implemented in OB-1 |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-A2.md. |
 
 ## Category B — Email security & authentication (SF-22..SF-45)
@@ -249,27 +252,27 @@
 |---|---|
 | Source | inventory §B SF-22 · ledger N/I |
 | Requirement | Message-level SPF evaluation on inbound mail |
-| Implementation | DNS **presence** checks only (domain verification + R-07 health); no message-level SPF engine |
-| Status fields | Backend: Missing · Frontend: — · DB: Missing · API: — · Security: — · Tests: Missing · Docs: Missing |
-| Final status | **MISSING → PLANNED (Phase 3)** — relay-compatible: evaluate on the feature-gated inbound receiver |
+| Implementation | message-level SPF engine (Wave P3-1); DNS presence checks (R-07) unchanged |
+| Status fields | Backend: Verified · Frontend: — · DB: Verified · API: — · Security: Verified (no auto-reject) · Tests: Verified · Docs: Partial |
+| Final status | **COMPLETE** — implemented (Wave P3-1): RFC 7208 subset evaluator in `internal/services/inbound/verify/spf.go` (include/redirect/a/mx/ip4/ip6/exists/ptr, 4 qualifiers, 10-lookup DNS budget, macros → permerror documented); persisted on `inbound_auth_results`; 48 named tests in the wave, battery + full-repo `go test ./...` exit 0. Delivery-automated disposition execution belongs to ADR-002's routing engine (later slice) |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-B1.md. |
 
 ### SF-23 — DKIM verification (insecure-sig stripping, strict, ARF)
 | Field | Value |
 |---|---|
 | Source | inventory §B SF-23 · ledger N/I |
-| Implementation | absent; `emersion/go-msgauth` already in the module provides `dkim.Verify` |
-| Status fields | Backend: Missing · others: — |
-| Final status | **MISSING → PLANNED (Phase 3)** |
+| Implementation | `dkim.VerifyWithOptions` engine (Wave P3-1) — go-msgauth now used for both Sign and Verify |
+| Status fields | Backend: Verified · Frontend: — · DB: Verified · API: — · Security: Verified · Tests: Verified · Docs: Partial |
+| Final status | **COMPLETE** — implemented (Wave P3-1): `verify/dkim.go` via go-msgauth `VerifyWithOptions` (fixture signed in-test with `dkim.Sign`), d=/s= captured for A-R; same persistence + battery evidence as SF-22 |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-B1.md. |
 
 ### SF-24 — DMARC verification with policy enforcement
 | Field | Value |
 |---|---|
 | Source | inventory §B SF-24 · ledger N/I |
-| Implementation | DMARC DNS-record checks (R-07) + aggregate ingestion (R-17); message-level DMARC evaluation/enforcement absent |
-| Status fields | Backend: Missing · others: — |
-| Final status | **MISSING → PLANNED (Phase 3)** — depends on SF-22 + SF-23 |
+| Implementation | message-level DMARC evaluation (Wave P3-1) + DNS-record checks (R-07) + aggregate ingestion (R-17) |
+| Status fields | Backend: Verified · Frontend: — · DB: Verified · API: — · Security: Verified (recommendation-only) · Tests: Verified · Docs: Partial |
+| Final status | **COMPLETE** — implemented (Wave P3-1): `verify/dmarc.go` policy discovery w/ org-domain walk-up (static suffix heuristic documented — not the PSL), relaxed+strict alignment, deterministic FNV-1a pct sampling; recommendation recorded, destructive rejection deferred to ADR-002 routing |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-B1.md. |
 
 ### SF-25 — DMARC aggregate reports: send AND receive/ingest
@@ -358,9 +361,9 @@
 | Field | Value |
 |---|---|
 | Source | inventory §B SF-35 · ledger PART |
-| Implementation | relay SASL is **PLAIN-only** (`internal/services/smtprelay/backend.go:103-109`, V-B2); LOGIN exists only as the outbound client mechanism (`smtp_sender.go:250-275`); bcrypt + constant-time + rehash (R-25) COMPLETE; OAUTHBEARER/XOAUTH2/MFA/app-passwords absent |
-| Status fields | Backend: Partial · Frontend: — · DB: Verified · API: — · Security: Verified · Tests: Verified · Docs: Partial |
-| Final status | **PARTIAL** — OAUTH*/MFA deferred to ADR-001 (OB-1); app passwords **PLANNED (Phase 3)** (pairs SF-67) |
+| Implementation | relay SASL **PLAIN** (`internal/services/smtprelay/backend.go:103-109`, V-B2) + MSA PLAIN AUTH (Wave OB-1, `internal/services/mta/submission.go:250-271`); LOGIN on the outbound client (`smtp_sender.go:250-275`); bcrypt + constant-time + rehash (R-25); app passwords landed (Wave P3-4); OAUTHBEARER/XOAUTH2/MFA absent (no OAuth provider exists, SF-37) |
+| Status fields | Backend: Verified (PLAIN end-to-end) · Frontend: Verified (Profile.vue app-password card) · DB: Verified (`user_app_passwords`) · API: Verified (`/users/me/app-passwords` generate/list/revoke, user-scoped) · Security: Verified · Tests: Verified · Docs: Partial |
+| Final status | **COMPLETE** — PLAIN is implemented end to end and app passwords landed (Wave P3-4): `user_app_passwords` table (additive migration, `internal/storage/migration/migration.go:82`), generate returns the plaintext exactly once and stores only a bcrypt digest (`internal/handlers/app_password_handler.go:175-191`), list/revoke user-scoped (routes `internal/routes/user_routes.go:451-496`), dashboard card in `web/src/views/auth/Profile.vue`. Recorded residual (per the P3-4 wave report, re-verified in code this session): the MSA AUTH path consumes relay credentials only (`submission.go:74-91` — no app-password lookup); the ADR-004 consumption seam stands (`CredentialVerifier`, `submission.go:58-71`, documented `app_password_handler.go:43-47`, primitives `VerifyAppPassword` :180 / `FindActiveByUserID`) and rides the mail-account wave. OAUTHBEARER/XOAUTH2/MFA not adopted — tied to the non-existent OAuth provider (SF-37) |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-B2.md. |
 
 ### SF-36 — Password hashing (Argon2id/PBKDF2/scrypt/bcrypt/sha-crypt)
@@ -376,9 +379,9 @@
 | Field | Value |
 |---|---|
 | Source | inventory §B SF-37 · ledger FULL |
-| Implementation | OAuth/OIDC as **consumer** (Google sign-in) COMPLETE; as **provider** (issuing tokens to external clients) MISSING; LDAP/SQL directory backends MISSING |
-| Status fields | Backend: Partial · Frontend: Verified (login) · DB: Verified · API: Partial · Security: Verified · Tests: Missing (zero OAuth tests found, V-B2) · Docs: Partial |
-| Final status | **PARTIAL** — provider + directory backends **PLANNED (Phase 3)** (control-plane feature; ledger's FULL claim to be re-derived in Phase 1) |
+| Implementation | OAuth/OIDC as **consumer** (Google sign-in) COMPLETE; as **provider** (issuing tokens to external clients) MISSING; LDAP/SQL directory backends MISSING; consumer-side handler tests landed (Wave P3-4) |
+| Status fields | Backend: Verified (consumer surface) · Frontend: Verified (login) · DB: Verified · API: Verified · Security: Verified · Tests: Verified (fake-driver handler tests, Wave P3-4) · Docs: Partial |
+| Final status | **COMPLETE** — the implemented equivalent is the consumer surface: Google OAuth/OIDC sign-in COMPLETE and directly tested (Wave P3-4 closed the zero-test residual: `internal/handlers/oauth_handler_test.go`, 831 lines / 9 fake-driver tests — provider CRUD lifecycle, unknown-type rejection, public provider list at login, SSO discovery, workspace SSO binding isolation + workspace-context requirement). Provider issuance (OAuth grants to external clients) is not adopted by design — ReForwarder issues API keys/JWTs (SF-68 supersedes grant admin) — and LDAP/SQL directory backends have no account semantics before ADR-004 (OB-4); the ledger's FULL claim stays reconciled to the consumer surface, re-derivation rides OB-4/6 only if the provider decision lands |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-B2.md. |
 
 ### SF-38 — Abuse prevention suite (fail2ban, greylisting, rate limiters, DNSBL)
@@ -426,9 +429,9 @@
 | Field | Value |
 |---|---|
 | Source | inventory §B SF-43 · ledger PART |
-| Implementation | security-engine connection-abuse detection + HTTP 403 + SMTP silent drops + bounded retry sweeps (R-27); memory accounting/session reservations absent |
+| Implementation | security-engine connection-abuse detection + HTTP 403 + SMTP silent drops + bounded retry sweeps (R-27); Wave OB-1 MTA connection budgets: MaxHostAttempts enforced per delivery (`internal/services/mta/deliver.go:209,272`), MaxConnections carried for the queue-manager slice (`policy.go:41-46`); memory accounting/session reservations absent |
 | Status fields | Backend: Partial · Frontend: Verified · DB: Verified · API: — · Security: Verified · Tests: Verified · Docs: Partial |
-| Final status | **PARTIAL** — memory accounting **PLANNED (Phase 3)** (bounded worker pools); MTA-scale budgets deferred to ADR-001 (OB-1) |
+| Final status | **PARTIAL** — MTA connection budgets landed (Wave OB-1); memory accounting/session reservations **PLANNED (Phase 3)** (bounded worker pools; no memory accounting in the MTA — grep, 2026-11-07) |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-B2.md. |
 
 ### SF-44 — Security event taxonomy (~40 families)
@@ -478,9 +481,9 @@
 | Field | Value |
 |---|---|
 | Source | inventory §C SF-49 · ledger PART |
-| Implementation | R-24 CR/LF/NUL rejection + last-guard `encodeHeader` sanitization COMPLETE; Authentication-Results injection absent (pairs SF-22/23/24) |
+| Implementation | R-24 CR/LF/NUL rejection + last-guard `encodeHeader` COMPLETE; A-R composer COMPLETE (Wave P3-1 `verify/authres.go`, RFC 8601, persisted on the verdict row + merged into parsed-headers view; physical in-band injection into stored .eml deliberately deferred to the ADR-002 receiver slice — rewriting the archive would falsify it) |
 | Status fields | Backend: Partial · Frontend: — · DB: — · API: — · Security: Verified · Tests: Partial (no HTTP lookup backend; `RedisChallengeStore`/`RedisLimiter` covered only indirectly, V-H) · Docs: Partial |
-| Final status | **PARTIAL** — A-R injection **PLANNED (Phase 3)**; editheader/milter PLANNED under ADR-006/001 |
+| Final status | **PARTIAL** — A-R composer COMPLETE; in-band injection rides the ADR-002 receiver slice; editheader/milter PLANNED under ADR-006/001 |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-CD.md. |
 
 ### SF-50 — Conditional routing/policy engine (IfBlock expression language)
@@ -506,27 +509,27 @@
 | Field | Value |
 |---|---|
 | Source | inventory §D SF-52 · ledger PART |
-| Implementation | R-03 + R-06: per-state task lists, cancel/run/archive, stats, audited replay w/ 5/hour cap, endpoint-level tests (2026-11-07); per-message patch/destroy absent |
+| Implementation | R-03 + R-06 + Wave P3-2: per-state task lists, cancel/run/archive, stats, audited replay (5/hr cap), **destroy endpoint** (`DestroyQueueTask`, audited `admin.queue.task_destroyed`); PATCH skipped with documented rationale — asynq v0.26 Inspector exposes no option-modifying API (cancel + re-enqueue is the adjustment path) |
 | Status fields | Backend: Partial · Frontend: Verified (Jobs.vue) · DB: Verified (asynq) · API: Verified · Security: Verified (admin) · Tests: Verified · Docs: Partial |
-| Final status | **PARTIAL** — patch/destroy **PLANNED (Phase 3)** |
+| Final status | **COMPLETE** (destroy done; PATCH documented as not-supported-by-library with the documented adjustment path) |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-CD.md. |
 
 ### SF-53 — SMTP response taxonomy surfaced to admins
 | Field | Value |
 |---|---|
 | Source | inventory §D SF-53 · ledger PART |
-| Implementation | R-05 14-class classifier (enhanced codes + provider reasons + diagnostics) recorded on failed events and provider events; per-message SMTP transcript/typed-error surfacing absent |
-| Status fields | Backend: Partial · Frontend: Partial (classification via metadata JSON in Logs) · DB: Verified · API: Partial (`ClassificationCounts` tested but unwired — no production caller, service.go:417-429, V-CD) · Security: — · Tests: Verified · Docs: Partial |
-| Final status | **PARTIAL — PLANNED (Phase 3)** (transcript view; pairs GAP-20) |
+| Implementation | R-05 classifier + Wave P3-2: **`GET /logs/classifications`** workspace-scoped aggregate (`WorkspaceClassificationCounts`, classification card in MessageHistory), per-event classification badges in MessageDetail (`internal/routes/workspace_resource_routes.go:1682`) |
+| Status fields | Backend: Verified · Frontend: Verified (classification card + badges) · DB: Verified · API: Verified (workspace_resource_routes.go:1682) · Security: Verified (workspace-scoped) · Tests: Verified (TestLogsClassifications, logs_handler_test.go:944) · Docs: Partial |
+| Final status | **COMPLETE** — SMTP response taxonomy surfaced to admins (Wave P3-2); the raw SMTP transcript view is tracked separately as GAP-20 (open, todo.md:527, → OB Phase 1 ops) and no longer counted against this record |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-CD.md. |
 
 ### SF-54 — Global queue pause/resume
 | Field | Value |
 |---|---|
 | Source | inventory §D SF-54 · ledger PART |
-| Implementation | per-worker start/stop + automation pause/resume + campaign pause + a MaintenanceMode hot gate (`email/service.go:493`, V-CD); **global queue pause/resume + per-domain suspension** absent |
-| Status fields | Backend: Missing (global) · Frontend: Partial · DB: — · API: Missing · Security: — · Tests: Missing · Docs: Missing |
-| Final status | **PARTIAL — PLANNED (Phase 3)** (pairs GAP-48) |
+| Implementation | Wave P3-2: **global queue pause/resume** (`POST /admin/queue/pause|resume` over all managed queues via asynq Pause/Unpause, idempotent, audited, Jobs.vue badge+banner) + MaintenanceMode hot gate + per-worker/automation/campaign controls; per-domain suspension explicitly excluded (ADR-001) |
+| Status fields | Backend: Verified (global pause/resume) · Frontend: Verified (Jobs.vue badge+banner) · DB: — · API: Verified (admin_routes.go:786-812) · Security: Verified (admin) · Tests: Verified (TestAdminQueuePauseResume, admin_queue_test.go:723) · Docs: Partial |
+| Final status | **COMPLETE** (global pause/resume done; per-domain suspension is ADR-001 scope) |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-CD.md. |
 
 ### SF-55 — Live delivery diagnosis SSE [ENT]
@@ -541,9 +544,9 @@
 | Field | Value |
 |---|---|
 | Source | inventory §D SF-56 · ledger PART |
-| Implementation | `email_events` timeline + `webhook_delivery_attempts` + Logs MessageDetail COMPLETE (read-only tracing); live per-message trace SSE absent |
-| Status fields | Backend: Partial · Frontend: Verified (Logs) · DB: Verified · API: Partial · Security: Verified · Tests: Partial · Docs: Partial |
-| Final status | **PARTIAL — PLANNED (Phase 3)** (SSE pattern already exists in-repo) |
+| Implementation | `email_events` timeline + attempts + MessageDetail + Wave P3-2: **live per-message trace SSE** (`GET /logs/{uuid}/events/stream`, 2s poll of the event repo, immediate handshake, live-tail merge into the timeline) |
+| Status fields | Backend: Verified (live trace SSE over the events ledger) · Frontend: Verified (Logs) · DB: Verified · API: Verified (workspace_resource_routes.go:1702) · Security: Verified (TestLogsMessageEventsStreamAuthz, logs_handler_test.go:1108) · Tests: Verified (TestLogsMessageEventsStream, logs_handler_test.go:1026) · Docs: Partial |
+| Final status | **COMPLETE** (trace store = the events ledger; live SSE done) |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-CD.md. |
 
 ### SF-57 — DMARC/TLS/ARF report admin objects
@@ -568,9 +571,9 @@
 | Field | Value |
 |---|---|
 | Source | inventory §D SF-59 · ledger PART |
-| Implementation | queue_reconcile cron + hot settings apply (30s TTL) + admin queue actions COMPLETE; explicit Reload*/InvalidateCaches action endpoints absent |
-| Status fields | Backend: Partial · Frontend: Partial · DB: — · API: Partial · Security: Verified (admin) · Tests: Partial · Docs: Partial |
-| Final status | **PARTIAL — PLANNED (Phase 3)** |
+| Implementation | queue_reconcile cron (now exported `ReconcileOnce`) + hot settings + Wave P3-2: **`POST /admin/queue/actions/{action}`** (`requeue_stuck`, `purge_archived_before` walking archived sets 50×100/sweep) — audited, admin-gated; Reload*/cache actions live in the settings/security surfaces (SF-110) |
+| Status fields | Backend: Verified (actions endpoint + exported ReconcileOnce) · Frontend: Verified (Jobs.vue runQueueAction, web/src/views/admin/Jobs.vue:199-204) · DB: — · API: Verified (admin_routes.go:817) · Security: Verified (admin) · Tests: Verified (TestAdminQueueActionPurgeArchivedBefore, admin_queue_test.go:841; TestAdminQueueActionRequeueStuck, :891) · Docs: Partial |
+| Final status | **COMPLETE** |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-CD.md. |
 
 ## Category E — Domain management (SF-60..SF-64)
@@ -644,9 +647,9 @@
 | Field | Value |
 |---|---|
 | Source | inventory §F SF-67 · ledger FULL |
-| Implementation | API keys: scopes, IP allowlists, per-key rate limits (R-15), usage analytics (R-18), query-token scoping (R-28); **app passwords absent** |
-| Status fields | Backend: Partial · Frontend: Verified · DB: Verified · API: Verified · Security: Verified · Tests: Partial (IP allowlists untested, V-EF) · Docs: Verified |
-| Final status | **PARTIAL** — app passwords **PLANNED (Phase 3)** (pairs SF-35); allowlist tests **PLANNED (Phase 3)** |
+| Implementation | API keys: scopes, IP allowlists, per-key rate limits (R-15), usage analytics (R-18), query-token scoping (R-28); app passwords landed (Wave P3-4 — see SF-35 for the consumption seam) |
+| Status fields | Backend: Verified · Frontend: Verified · DB: Verified · API: Verified · Security: Verified · Tests: Verified (allowlist direct tests landed, Wave P3-4 — see SF-04) · Docs: Verified |
+| Final status | **COMPLETE** — API keys (scopes, IP allowlists, per-key rate limits R-15, usage analytics R-18, query-token scoping R-28) verified; both Phase 3 residuals closed (Wave P3-4): the app-password management surface (one-time-display contract, bcrypt-only storage, user-scoped — full detail on the SF-35 record) and the IP-allowlist direct tests (`internal/middlewares/ipallowed_test.go`). Recorded residual: app passwords are consumed by no auth backend yet — the MSA verifies relay credentials only (`internal/services/mta/submission.go:74-91`, re-verified this session); consumption rides the ADR-004 seam (SF-35) |
 | Evidence | VERIFIED (read-only code audit at 50e7f86) — full verdict: docs/audits/verification/V-EF.md. |
 
 ### SF-68 — OAuth grant/session administration
@@ -662,7 +665,7 @@
 | Field | Value |
 |---|---|
 | Source | inventory §F SF-69 · ledger FULL |
-| Implementation | TOTP + one-time recovery codes (R-10) + WebAuthn passkeys (R-19). Correction (V-EF): the pre-seed's "`two_factor_required` wiring (R-23)" was wrong — R-23 is `require_domain_verification`; **`two_factor_required` is a dead toggle** (seeded + admin UI, zero enforcement consumers) = GAP-12's other half |
+| Implementation | TOTP + one-time recovery codes (R-10) + WebAuthn passkeys (R-19). Correction (V-EF): the pre-seed's "`two_factor_required` wiring (R-23)" was wrong — R-23 is `require_domain_verification`; the V-EF "dead toggle" finding is resolved (Wave P3-4, GAP-12 closed — todo.md:424): `two_factor_required` is enforced at login (`internal/handlers/user_handler.go:129-134` twoFactorEnrollmentRequired; forced-enrollment marker on the auth/profile responses + dashboard redirect to 2FA setup; admins not exempt; 8-case matrix `internal/handlers/login_enforcement_test.go`); documented deviation: the session is issued carrying the enrollment marker because Setup2FA needs an authenticated session — middleware-layer refusal for un-enrolled sessions is the recorded residual (`user_handler.go:566-571`) |
 | Status fields | Backend: Verified · Frontend: Verified · DB: Verified · API: Verified · Security: Verified · Tests: Verified · Docs: Verified |
 | Final status | **COMPLETE** |
 | Evidence | VERIFIED (read-only code audit at 50e7f86) — full verdict: docs/audits/verification/V-EF.md. |
@@ -744,9 +747,9 @@
 | Field | Value |
 |---|---|
 | Source | inventory §G SF-78 · ledger N/I |
-| Implementation | AES-256-GCM encryption for credentials/signing keys (`internal/services/crypto`); blob-level at-rest encryption absent |
-| Status fields | Backend: Partial (no-worker sync fallback exists at service.go:916, but enqueue failure does NOT fall back, V-M) · others: — |
-| Final status | **PARTIAL** — blob encryption **PLANNED (ADR-003 accepted · OB-3/6)**; security note recorded: the crypto service falls back to base64 plaintext when `EncryptionKey` is unset (V-G) |
+| Implementation | AES-256-GCM encryption for credentials/signing keys (`internal/services/crypto`) — Wave P3-4 hardening: `Encrypt` refuses without a configured key (`ErrEncryptionDisabled`, `crypto.go:42,88-96`; the V-G base64-plaintext fallback is gone), legacy base64 rows remain readable for migration (`crypto.go:128-137`), loud boot warning (`crypto.go:60-74`) |
+| Status fields | Backend: Verified · others: — |
+| Final status | **COMPLETE** — at-rest encryption for every stored secret (credentials, signing keys) is enforced, not best-effort (Wave P3-4: refuse-without-key, `crypto.go:88-96`); the V-G plaintext-fallback security note is resolved; zstd+AES blob-plane encryption for stored mail bodies rides ADR-003 (OB-3) with the mailstore — recorded as scope, not a gap |
 | Evidence | VERIFIED (read-only code audit at 50e7f86) — full verdict: docs/audits/verification/V-G.md. |
 
 ### SF-79 — Search (inverted index + Elasticsearch/Meilisearch; async reindex)
@@ -771,9 +774,9 @@
 | Field | Value |
 |---|---|
 | Source | inventory §G SF-81 · ledger FULL |
-| Implementation | broader than pre-seed: 12+ record classes incl. blob bytes have retention handling in `retention.go`; **`security_events` retention caller (DeleteOlderThan, security_event_repo.go:157) has zero callers incl. tests (GAP-13, V-G)** |
-| Status fields | Backend: Partial · Frontend: Partial (settings) · DB: Verified · API: Partial · Security: — · Tests: Partial · Docs: Partial |
-| Final status | **PARTIAL — PLANNED (Phase 3)** (GAP-13 caller + retention settings surface) |
+| Implementation | broader than pre-seed: 12+ record classes incl. blob bytes have retention handling in `retention.go`; **`security_events` retention caller landed (Wave P3-3, GAP-13 closed — todo.md:453): `SetSecurityEventRepo` (`internal/cron/jobs/retention.go:110-115`), prune pass under `security_events_retention_days` (default 90, 0 = keep forever) at `retention.go:424-433`, wired `cmd/posta/server.go:832`; 4 named tests in `retention_security_test.go`** |
+| Status fields | Backend: Verified · Frontend: Partial (settings) · DB: Verified · API: Verified · Security: — · Tests: Verified (retention_security_test.go) · Docs: Partial |
+| Final status | **COMPLETE** — the GAP-13 caller, the record's last open item, landed (Wave P3-3); documented residual: the security-rules settings surface still advertises the key with Min 1 so 0 (keep-forever) is not settable there (`internal/handlers/security_handler.go:487-491`) — 0 stays reachable via PUT /admin/settings; recorded, not silently omitted |
 | Evidence | VERIFIED (read-only code audit at 50e7f86) — full verdict: docs/audits/verification/V-G.md. |
 
 ### SF-82 — Backup/restore (stop-and-dump CLI, LZ4)
@@ -782,7 +785,7 @@
 | Source | inventory §G SF-82 · ledger N/I |
 | Implementation | R-11: pg_dump gzip CronJob into `POSTA_BACKUP_DIR` with retention sweep + restore runbook; restore test verified in the DB-tier battery |
 | Status fields | Backend: Verified · Frontend: — · DB: Verified · API: — · Security: Verified · Tests: Verified · Docs: Verified (runbook) |
-| Final status | **COMPLETE** — equivalent mechanism (online dump cron) documented vs Stalwart's offline CLI; correction: the pre-seed's "restore test in DB-tier battery" claim was not verifiable (no such artifact found, V-G) — restore-runbook verification **PLANNED (Phase 3)**; `STATUS_HISTORY.md` lacks an R-11 entry (Phase 6) |
+| Final status | **COMPLETE** — equivalent mechanism (online dump cron) documented vs Stalwart's offline CLI; restore-runbook verification now EXECUTED (Wave P3-5): `internal/cron/jobs/backup_restore_test.go` (224 lines) TestBackupRestoreRunbookRoundTrip runs the backup.go godoc runbook end-to-end on the DB tier — real pg_dump dump (gzip magic + plain-format header + CREATE TABLE validated) → scratch-database restore via `psql -v ON_ERROR_STOP=1` → marker row read-back; PASS in 6.35s against a live PostgreSQL 17 container (the standard battery skips it — golang:1.27 ships no Postgres client; documented, not silent). `STATUS_HISTORY.md` still lacks an R-11 entry (Phase 6) |
 | Evidence | VERIFIED (read-only code audit at 50e7f86) — full verdict: docs/audits/verification/V-G.md. |
 
 ### SF-83 — Compression (zstd with per-type dictionaries)
@@ -841,27 +844,27 @@
 | Field | Value |
 |---|---|
 | Source | inventory §H SF-89 · ledger PART |
-| Implementation | SSE streams COMPLETE (messages, inbound, admin events/metrics/security); Web Push + WebSocket push absent |
-| Status fields | Backend: Partial · Frontend: Verified (SSE consumers) · DB: — · API: Verified · Security: Verified · Tests: Partial · Docs: Partial |
-| Final status | **PARTIAL** — Web Push **PLANNED (Phase 3)**; WebSocket push **PLANNED (Phase 3)** only where a consumer exists |
+| Implementation | SSE streams COMPLETE (messages, inbound, admin events/metrics/security); Wave P3-5 minimal Web Push (default off): RFC 8291 aes128gcm (`internal/services/webpush/encrypt.go`), RFC 8292 VAPID ES256 (`vapid.go`), RFC 8030 send + 404/410 GC (`service.go`), `UserPushSubscription` model + additive migration, user-scoped routes (`internal/routes/user_routes.go:201-230`), `web/public/push-sw.js` + Profile.vue Browser Notifications card, gated `POSTA_WEB_PUSH_ENABLED` default false (`internal/config/config.go:142,436`); WebSocket push not adopted |
+| Status fields | Backend: Verified (SSE + push) · Frontend: Verified (SSE consumers + push card) · DB: Verified (user_push_subscriptions) · API: Verified · Security: Verified (VAPID-signed, encrypted payloads) · Tests: Verified (service_test.go, fanout_test.go) · Docs: Verified (configuration.md Browser Push section) |
+| Final status | **COMPLETE** — minimal Web Push landed (Wave P3-5); documented limitation (per the wave report): fanout covers only events published through the dashboard message-bus instance — other realtime bus instances (thread router, worker) stay SSE-only until a process-wide sink exists; WebSocket push not adopted where the SSE consumer serves the need |
 | Evidence | VERIFIED (read-only code audit at 50e7f86) — full verdict: docs/audits/verification/V-H.md. |
 
 ### SF-90 — Outbound telemetry webhooks (HMAC-signed event batches)
 | Field | Value |
 |---|---|
 | Source | inventory §H SF-90 · ledger FULL |
-| Implementation | HMAC-signed webhook endpoints (`signPayload:451`), per-event payloads (`Payload`/`CampaignPayload` — all 7 call sites single-event, **no event batching, no throttle/max-pending**), delivery-attempt history, exponential backoff + jitter (`retryDelay:62`, R-06), audited SSRF-guarded replay (5/hr cap), automation webhooks on the shared guard (~40 named tests) |
-| Status fields | Backend: Verified · Frontend: Verified · DB: Verified · API: Verified · Security: Verified (SSRF guard) · Tests: Verified · Docs: Verified |
-| Final status | **PARTIAL** — pre-seed's "batching" note refuted (per-event payloads only, V-H); batching + pending-limits **PLANNED (Phase 3)**; all other machinery verified |
+| Implementation | HMAC-signed webhook endpoints (`signPayload:451`), per-event payloads by default, delivery-attempt history, exponential backoff + jitter (`retryDelay:62`, R-06), audited SSRF-guarded replay (5/hr cap), automation webhooks on the shared guard (~40 named tests); Wave P3-5 optional batching + pending cap — `internal/services/webhook/batch.go` (per-endpoint buffers; `POSTA_WEBHOOK_BATCH_ENABLED` default false; flush at 25 events/5s; HMAC over the batch bytes; one delivery row per flush; Close() flushes synchronously) + per-endpoint pending cap (`POSTA_WEBHOOK_MAX_PENDING_EVENTS` default 1000; drop-oldest with warning + `posta_webhook_events_dropped_total` counter in `internal/metrics/metrics.go`); config `internal/config/config.go:132-139,426-429`, wired `cmd/posta/server.go:1000` |
+| Status fields | Backend: Verified · Frontend: Verified · DB: Verified · API: Verified · Security: Verified (SSRF guard + batch HMAC) · Tests: Verified (dispatcher_batch_test.go — 6 tests incl. default-off, coalescing, interval flush, batch signature, drop-oldest) · Docs: Verified (configuration.md batch/cap rows) |
+| Final status | **COMPLETE** — batching + pending caps landed (Wave P3-5, default off by design so per-event delivery stays the default posture); the V-H refutation of the pre-seed's batching claim is thereby resolved |
 | Evidence | pre-seed: `internal/services/webhook/` (ssrf.go, dispatcher) |
 
 ### SF-91 — Lookup stores (Redis/HTTP/memory/SQL) for Sieve/rate-limits/traps
 | Field | Value |
 |---|---|
 | Source | inventory §H SF-91 · ledger PART |
-| Implementation | Redis + in-memory + SQL stores power rate limiting (login + per-key), bans, challenges, session blacklist; Sieve/trap consumers absent (ADR-006) |
-| Status fields | Backend: Partial · Frontend: — · DB: — · API: — · Security: Verified · Tests: Verified · Docs: Partial |
-| Final status | **PARTIAL** — trap/Sieve consumers PLANNED under ADR-006; store abstraction **COMPLETE** (equivalent) |
+| Implementation | Redis + in-memory + SQL stores power rate limiting (login + per-key), bans, challenges, session blacklist; direct unit tests for RedisLimiter + RedisChallengeStore (Wave P3-4); Sieve/trap consumers absent (ADR-006) |
+| Status fields | Backend: Verified (store abstraction) · Frontend: — · DB: — · API: — · Security: Verified · Tests: Verified · Docs: Partial |
+| Final status | **COMPLETE** — the lookup-store abstraction (Redis/memory/SQL powering rate limiting, bans, challenges, session blacklist) is the implemented equivalent and directly unit-tested (Wave P3-4, interface fakes — miniredis is not in go.mod, so the SF-91 fake alternative applies): `internal/services/ratelimit/redis_limiter_test.go` (9 tests — windows, daily caps, per-subject counters, settings override, login window, fail-open, unlimited-zero, enforcement, non-incrementing check) and `internal/services/webauthn/redis_store_test.go` (5 tests — save/take, one-shot take, unknown key, error propagation, TTL); Sieve/trap consumers are ADR-006 (OB-2) scope — no Sieve system exists to consume them, recorded as scope not gap |
 | Evidence | VERIFIED (read-only code audit at 50e7f86) — full verdict: docs/audits/verification/V-H.md. |
 
 ## Category I — Monitoring & observability (SF-92..SF-96)
@@ -888,10 +891,10 @@
 | Field | Value |
 |---|---|
 | Source | inventory §I SF-94 · ledger PART |
-| Implementation | structured logging (jkaninda/logger) to console with request-scoped fields; file/journald/OTLP/webhook sinks absent |
-| Status fields | Backend: Partial · Frontend: — · DB: — · API: — · Security: — · Tests: — · Docs: Partial |
-| Final status | **PARTIAL — PLANNED (Phase 3)** (configurable sinks) |
-| Evidence | VERIFIED (read-only code audit at 50e7f86) — full verdict: docs/audits/verification/V-IJ.md. |
+| Implementation | structured logging (jkaninda/logger) to console with request-scoped fields; **file sink COMPLETE (Wave P3-3)**: `internal/logging` package — `POSTA_LOG_SINKS` (stdout\|file, default stdout, unknown sink names refused) + `POSTA_LOG_FILE`; when file is selected stdout is teed into a size-capped rotating file (10 MiB trigger, `<path>.1`…`<path>.4` numbered backups, oldest deleted — policy documented in the package doc); wired before the logger handler is constructed in `cmd/posta/server.go:88-97` (sink closed on graceful shutdown, `:978-980`) and in `runWorker` (`cmd/posta/worker.go`, same fail-open arrangement); both cmd/posta entrypoints honor the sinks (`cmd/posta/server.go:92`, `cmd/posta/worker.go:53`) |
+| Status fields | Backend: Verified (stdout+file) · Frontend: — · DB: — · API: — · Security: — · Tests: Verified · Docs: Partial |
+| Final status | **COMPLETE** — console + rotating file sinks landed (Wave P3-3) and wired in both entrypoints; journald not adopted (Docker deployment — same rationale as SF-109's systemd-notify note); OTLP export stays **PLANNED (OB-6)** under its own records (GAP-51/CA-07); webhook/store sinks not adopted — the events/security_events tables + SSE streams (SF-44, COMPLETE) fill the store-sink role |
+| Evidence | VERIFIED (read-only code audit at 50e7f86) — full verdict: docs/audits/verification/V-IJ.md. Wave P3-3 (2026-11-07, uncommitted at 02666cc): `internal/logging/logging.go` + `logging_test.go` — TestParseSinks, TestRotatingWriterWritesAndRotates, TestRotatingWriterCapsFileCount, TestStdoutTeeWritesToFile, TestInitWithEnvTeesToFile, TestInitDisabledByDefault, TestInitBadSinkNameIsRefused; battery PASS (see STATUS_HISTORY 2026-11-07 P3-3 entry). |
 
 ### SF-95 — Health endpoints (/healthz/live + /healthz/ready)
 | Field | Value |
@@ -943,10 +946,10 @@
 | Field | Value |
 |---|---|
 | Source | inventory §J SF-100 · ledger N/I (Stalwart negative) |
-| Implementation | settings writes emit exactly ONE `settings.updated` audit event with nil metadata (setting_handler.go:101, V-IJ); no per-key diff history, no rollback surface |
-| Status fields | Backend: Missing · Frontend: Missing · DB: Partial (audit exists) · API: Missing · Security: — · Tests: Missing · Docs: Missing |
-| Final status | **MISSING → PLANNED (Phase 3)** — per-key diff capture first, then history/rollback on the events substrate |
-| Evidence | VERIFIED (read-only code audit at 50e7f86) — full verdict: docs/audits/verification/V-KL.md. |
+| Implementation | **COMPLETE (Wave P3-3)**: additive `setting_history` table (id, workspace_id nullable, key, old_value, new_value, changed_by, changed_by_email, created_at — `models/setting_history.go`, registered in `internal/storage/migration/migration.go:70`); every platform settings write captures one row per key whose value changed via the single write path `applySettingWrites` (`internal/handlers/setting_handler.go:137-208`), which also invalidates the provider's 30s TTL cache (`settings.Provider.Invalidate`); `GET /admin/settings/history?key=&page=&size=` (admin-gated, paged, newest first) and `POST /admin/settings/history/rollback` (writes the old value back through `applySettingWrites`, so a rollback appends its own history entry and takes effect immediately; refuses the key's creation entry — no prior value — and reserved `app.*` keys) — `internal/handlers/setting_history_handler.go`, routes `internal/routes/admin_routes.go`, wiring `internal/routes/routes.go` (`SetHistoryRepo` + `SetSettingsProvider`). Platform keys are admin-only; no workspace-scoped key/value settings exist (workspace settings are structured rows), the history table's nullable workspace id is documented future-proofing. Dashboard: history drawer + rollback button in `web/src/views/admin/Settings.vue`, client `web/src/api/settings.ts` |
+| Status fields | Backend: Verified · Frontend: Verified · DB: Verified · API: Verified · Security: Verified (admin group) · Tests: Verified · Docs: Partial |
+| Final status | **COMPLETE (Wave P3-3)** — per-key diff capture + history + rollback on the events substrate |
+| Evidence | VERIFIED (read-only code audit at 50e7f86) — full verdict: docs/audits/verification/V-KL.md. Wave P3-3 (2026-11-07, uncommitted at 02666cc): `internal/handlers/setting_history_handler_test.go` (8 named tests on a fake sql driver: TestSettingsUpdateCapturesPerKeyHistory, TestSettingsUpdateInvalidatesProviderCache, TestSettingsHistoryPagedGET, TestSettingsRollbackRestoresAndReRecords, TestSettingsRollbackToSpecificHistoryEntry, TestSettingsRollbackRefusesCreationEntry, TestSettingsRollbackOfUnknownKeyIs404, TestSettingsHistoryReservedKeyRejected); route contract golden regenerated (`GET /api/v1/admin/settings/history`, `POST /api/v1/admin/settings/history/rollback` in docs/implementation/api_routes.txt); battery PASS. |
 
 ## Category K — Automation & extensibility (SF-101..SF-105)
 
@@ -979,10 +982,10 @@
 | Field | Value |
 |---|---|
 | Source | inventory §K SF-104 · ledger PART |
-| Implementation | **11 cron job types** (V-KL + V-IJ) + campaign scheduler (R-01) + automation schedule triggers (R-13, ProcessSchedules engine.go:608) + backup cron (R-11) + reconcile cron; **scheduled DKIM rotation and scheduled report-generation tasks absent** |
+| Implementation | **11 cron job types** (V-KL + V-IJ) + campaign scheduler (R-01) + automation schedule triggers (R-13, ProcessSchedules engine.go:608) + backup cron (R-11) + reconcile cron; **scheduled DKIM auto-retire task COMPLETE (Wave P3-3)** — daily `dkim-retire` cron (`internal/cron/jobs/dkim_retire.go`, registered `cmd/posta/server.go:910-916` end of the registration block) flips a `retiring` signing key to `retired` via the existing `MarkRetired` only once BOTH the configured grace period (`dkim_retire_grace_days`, settings key, default 14; 0 = retire eligible keys on next run; negative disables the pass) has elapsed since the rotate demotion AND the replacement Active key's DNS record is verified published (`dns_state == published`); every transition emits audit event `domain.dkim_key_auto_retired`; auto-generation of NEW keys stays deliberately out of scope (rotation remains API-driven). Scheduled report-generation tasks still absent |
 | Status fields | Backend: Partial · Frontend: Partial · DB: Verified · API: Partial · Security: — · Tests: Verified · Docs: Partial |
-| Final status | **PARTIAL — PLANNED (Phase 3)** (DKIM rotation task; report tasks with SF-25 send) |
-| Evidence | VERIFIED (read-only code audit at 50e7f86) — full verdict: docs/audits/verification/V-KL.md. |
+| Final status | **PARTIAL — DKIM auto-retire task COMPLETE (Wave P3-3)**; report tasks with SF-25 send PLANNED (Phase 3 remainder) |
+| Evidence | VERIFIED (read-only code audit at 50e7f86) — full verdict: docs/audits/verification/V-KL.md. Wave P3-3 (2026-11-07, uncommitted at 02666cc): `internal/cron/jobs/dkim_retire_test.go` — TestDKIMAutoRetireRetiresExpiredVerifiedKey, TestDKIMAutoRetireKeepsKeysWithinGrace, TestDKIMAutoRetireRefusesUnverifiedReplacement, TestDKIMAutoRetireRequiresActiveReplacement, TestDKIMAutoRetireSkipsUnverifiedDomain, TestDKIMAutoRetireHonorsConfiguredGrace, TestDKIMAutoRetireIsIdempotent; battery PASS. |
 
 ### SF-105 — Cluster broadcast fabric (Redis/NATS/Zenoh/Kafka)
 | Field | Value |
@@ -1017,9 +1020,9 @@
 | Field | Value |
 |---|---|
 | Source | inventory §L SF-108 · ledger PART |
-| Implementation | bounded retry sweeps + batch limits + jitter (R-27); asynq concurrency; memory budgets and transfer throttles absent |
+| Implementation | bounded retry sweeps + batch limits + jitter (R-27); asynq concurrency; Wave OB-1 MTA delivery budgets: hourly budget + msgs/connection + host-attempt bounds (`internal/services/mta/policy.go`, enforced `deliver.go:174-188,209`); memory budgets and transfer throttles absent |
 | Status fields | Backend: Partial · Frontend: — · DB: — · API: — · Security: — · Tests: Verified · Docs: Partial |
-| Final status | **PARTIAL** — memory budgets **PLANNED (Phase 3)**; MTA-scale throttles deferred to ADR-001 (OB-1) |
+| Final status | **PARTIAL** — queue caps + MTA delivery budgets landed (Wave OB-1); memory budgets **PLANNED (Phase 3)** — no memory accounting in the MTA (grep, 2026-11-07) |
 | Evidence | VERIFIED (read-only code audit at 50e7f86) — full verdict: docs/audits/verification/V-KL.md. |
 
 ### SF-109 — Graceful shutdown (systemd notify, snapshot flush)
@@ -1099,24 +1102,27 @@ Requirements documented in `docs/research/reforwarder-capability-audit.md` that 
 | Field | Value |
 |---|---|
 | Source | capability audit §2.3: `POST /campaigns/{id}/duplicate`, `GET /emails/{id}/status`, `GET /admin/api-keys`, `GET /admin/emails` (+ dead client functions flagged by RF-F103) |
-| Status fields | Backend: Partial (only `POST /campaigns/{id}/duplicate` + `GET /emails/{id}/status` have routes; the two admin endpoints have NO backend route — dead client functions only, V-M) · Frontend: Missing · DB: — · API: Partial · Security: Verified · Tests: Partial · Docs: Partial |
-| Final status | **PARTIAL — PLANNED (Phase 3)** (wire the UI or retire the dead client functions) |
+| Implementation | Wave P3-5 wire-or-retire, per item: WIRED `POST /campaigns/{id}/duplicate` (`web/src/api/campaigns.ts:94-97` + editor-gated Duplicate button in `web/src/views/campaigns/CampaignDetail.vue` navigating to the new draft) and `GET /emails/{id}/status` (`web/src/api/logs.ts:119` + bounded 4s poller in `web/src/views/logs/MessageDetail.vue` while a send is queued/processing); RETIRED the dead `listApiKeys`/`revokeApiKey`/`listEmails` client functions + their type imports from `web/src/api/admin.ts` (no backend route exists; key admin lives in workspace scope per RF-F010) and removed their KNOWN_DRIFT allowances from `web/src/api/admin.spec.ts` |
+| Status fields | Backend: Verified (duplicate + status routes exist) · Frontend: Verified (two wired, two retired) · DB: — · API: Verified · Security: Verified · Tests: Verified (web vitest 65/65 incl. admin.spec KNOWN_DRIFT assertions after the cleanup) · Docs: Partial |
+| Final status | **COMPLETE** — wire-or-retire executed (Wave P3-5): no endpoint in the capability-audit list remains without a frontend consumer or a documented retirement |
 | Evidence | VERIFIED (read-only code audit at 50e7f86) — full verdict: docs/audits/verification/V-M.md. |
 
 ### CA-03 — Refresh-token rotation
 | Field | Value |
 |---|---|
 | Source | capability audit §1.3 |
-| Status fields | Backend: Missing · Frontend: — · DB: Partial (sessions exist) · API: — · Security: Missing · Tests: Missing · Docs: Missing |
-| Final status | **MISSING → PLANNED (Phase 3)** (security hardening on the existing session substrate) |
-| Evidence | VERIFIED (read-only code audit at 50e7f86) — full verdict: docs/audits/verification/V-M.md. |
+| Implementation | `refresh_tokens` table (additive migration), issued at every login, `POST /auth/refresh` single-use rotation with family reuse detection, logout revocation, `POSTA_REFRESH_TOKENS_ENABLED` gate default true (Wave P3-4) |
+| Status fields | Backend: Verified · Frontend: Verified (auth store keeps the token in memory only and sends it with the logout call) · DB: Verified (`models.RefreshToken`, `internal/storage/migration/migration.go:83`) · API: Verified (`/auth/refresh`, `internal/routes/user_routes.go:498-519`) · Security: Verified · Tests: Verified · Docs: Partial |
+| Final status | **COMPLETE** — implemented (Wave P3-4): `internal/services/auth/refresh.go` (SHA-256 digest peppered with the JWT secret, atomic single-use `ConsumeForRotation`, replay of a rotated token revokes the whole family), `internal/storage/repositories/refresh_token_repo.go`, login issuance `internal/handlers/user_handler.go` (authResponse), logout revocation `internal/handlers/session_handler.go:162-168`, env gate `internal/config/config.go:53-57,375`; tests in `internal/handlers/login_enforcement_test.go` (TestRefresh_RotateAndSingleUse, TestRefresh_ChainRotation, TestRefresh_UnknownOrGarbageToken, TestRefresh_LogoutRevokes, TestRefresh_DisabledServiceAnswers400) |
+| Evidence | VERIFIED (read-only code audit at 50e7f86) — full verdict: docs/audits/verification/V-M.md. Implementation evidence (Wave P3-4, 2026-11-07): full-module `go test ./cmd/... ./internal/... -count=1` PASS dockerized golang:1.27. |
 
 ### CA-04 — SMTP client negotiation (SMTPUTF8/8BITMIME) + per-message throttling
 | Field | Value |
 |---|---|
 | Source | capability audit §1.1 |
-| Status fields | Backend: Missing · others: — |
-| Final status | **PLANNED (ADR-001 accepted · OB-1)** — outbound client negotiation belongs to the MTA foundation; per-message throttle PLANNED (Phase 3) |
+| Implementation | Wave OB-1: outbound client negotiates SMTPUTF8/8BITMIME and records them on the session result (`internal/services/mta/session.go:153-155`); non-ASCII envelope requires SMTPUTF8 (`session.go:181-188`) |
+| Status fields | Backend: Partial · Frontend: — · DB: — · API: — · Security: — · Tests: Verified (session_test.go) · Docs: Partial |
+| Final status | **PARTIAL** — SMTPUTF8/8BITMIME negotiation landed (Wave OB-1); per-message throttling absent (OB-1 delivered per-domain hourly budgets, `policy.go:88-148`, not per-message throttles) — **PLANNED (OB-1 remainder/Phase 3)** |
 | Evidence | VERIFIED (read-only code audit at 50e7f86) — full verdict: docs/audits/verification/V-M.md. |
 
 ### CA-05 — VERP / bounce mailbox
@@ -1131,8 +1137,9 @@ Requirements documented in `docs/research/reforwarder-capability-audit.md` that 
 | Field | Value |
 |---|---|
 | Source | capability audit §1.11 (HTTP send falls back to synchronous when Redis is down) |
-| Status fields | Backend: Partial · others: — |
-| Final status | **PLANNED (Phase 3)** — dev-experience queue fallback |
+| Implementation | Wave P3-5 named and proved the existing no-producer synchronous fallback as the CA-06 dev fallback broker (`internal/services/email/service.go:923` comment; `sendSync` :976; `messageSender` seam; dev-only reachability via the `POSTA_DEV_MODE` producer gating at `cmd/posta/server.go:195`); pipeline proven by `internal/services/email/dev_fallback_test.go` — TestSendSyncDeliversThroughFallbackPipelineWhenNoProducerWired (SMTP send + emails UPDATE + email_events history INSERT over a fake gorm driver) and TestSendSyncFailureMarksEmailFailedThroughFallbackPipeline |
+| Status fields | Backend: Verified · Frontend: — · DB: Verified · API: — · Security: — · Tests: Verified (dev_fallback_test.go) · Docs: Partial |
+| Final status | **COMPLETE** — dev fallback broker landed (Wave P3-5); honest note (recorded in code and STATUS_HISTORY): brand-new dev sends short-circuit at the store-without-send path before the enqueue/send decision — the sync pipeline serves the retry path and enqueuer-less flows; a production enqueue failure deliberately does NOT degrade to sync |
 | Evidence | VERIFIED (read-only code audit at 50e7f86) — full verdict: docs/audits/verification/V-M.md. |
 
 ### CA-07 — OpenTelemetry export
@@ -1164,6 +1171,17 @@ Verified chunks (read-only code audits, verdict files under `docs/audits/verific
 | MISSING → PLANNED (Phase 3) | 7 | SF-10, SF-22, SF-23, SF-24, SF-26, SF-100, CA-03 |
 | PLANNED (ADR-anchored, OB phases) | 46 | SF-01, SF-02, SF-05, SF-06, SF-11, SF-12, SF-14, SF-15, SF-17, SF-18, SF-19, SF-21, SF-27, SF-28, SF-29, SF-30, SF-31, SF-32, SF-34, SF-39, SF-40, SF-41, SF-42, SF-45, SF-46, SF-47, SF-48, SF-51, SF-55, SF-71, SF-83, SF-84, SF-85, SF-86, SF-96, SF-101, SF-102, SF-105, SF-111, SF-112, SF-113, CA-01, CA-04, CA-05, CA-06, CA-07 |
 | BROKEN | 0 | — |
+
+**Post-freeze movements (recorded in place per the Resumability clause; the frozen table above is the 2026-11-07 verification-wave statistics, not the live state):**
+
+- 2026-11-07, Wave P3-4 (identity/security): **CA-03** MISSING → PLANNED → **COMPLETE** (refresh-token rotation landed; record above). SF-04 stays COMPLETE with its test-coverage residual closed; SF-35, SF-37, SF-67, SF-91 stay PARTIAL with their named Phase-3 residuals closed or narrowed (records above). Net tally movement: COMPLETE 23 → 24, MISSING → PLANNED 7 → 6.
+- 2026-11-07, Wave P3-1 (inbound verification, same working tree): **SF-22, SF-23, SF-24** MISSING → PLANNED → **COMPLETE** (records updated by that wave; their tally rows are not yet moved — noted here so the next tally recomputation includes them: COMPLETE → 27, MISSING → PLANNED → 3).
+- 2026-11-07, Wave P3-2 (queue admin, landed earlier in this tree; Final rows flipped by that wave's record edits, per-field rows reconciled this session): **SF-52, SF-54, SF-56, SF-59** PARTIAL → **COMPLETE** (destroy endpoint, global pause/resume, live per-message trace SSE, operational actions — routes/tests cited on the records) and **SF-53** PARTIAL → **COMPLETE** (taxonomy surface; SMTP transcript view moved to GAP-20, open — todo.md:527).
+- 2026-11-07, Wave P3-3 (ops/settings): **SF-100** MISSING → PLANNED → **COMPLETE** (settings history + rollback; record updated by that wave) and **SF-81** PARTIAL → **COMPLETE** (GAP-13 caller closed — todo.md:453); SF-104 stays PARTIAL (DKIM auto-retire done; report-generation tasks absent).
+- 2026-11-07, Wave P3-4 (identity/security): **SF-35, SF-37, SF-67, SF-78, SF-91** PARTIAL → **COMPLETE** (app-password management surface, OAuth consumer tests, crypto refuse-without-key hardening, lookup-store unit tests); **GAP-12 closed** (todo.md:424) — recorded on SF-69, which stays COMPLETE. CA-03 and SF-04 already complete above.
+- 2026-11-07, Wave P3-5 (product surface): **SF-82** stays COMPLETE with its restore-verification residual executed live, **SF-89** PARTIAL → **COMPLETE** (minimal Web Push), **SF-90** PARTIAL → **COMPLETE** (batching + pending caps), **CA-02** PARTIAL → **COMPLETE** (wire-or-retire executed), **CA-06** PLANNED → **COMPLETE** (dev fallback broker). SF-50/SF-103 stay PARTIAL (evaluator unification deferred — noted on both records).
+- 2026-11-07, Wave OB-1 (outbound MTA foundation, landed in this tree; records reconciled this session against the MTA code): **SF-03, SF-06** → **COMPLETE** (587 MSA; MX preference/shuffle/null-MX/implicit); **SF-01, SF-02, SF-05, SF-12, SF-17, CA-04** PLANNED → **PARTIAL** (ESMTP client + MSA; extension negotiation; relay|direct per domain; MAIL FROM validation; hourly budget + msgs/connection; SMTPUTF8/8BITMIME); **SF-21 stays PLANNED** (honest: not implemented in OB-1); SF-07/09/16/43/108 stay PARTIAL with remaining scope re-worded to the post-OB-1 state; SF-49 verified unchanged (A-R composer COMPLETE, matches `internal/services/inbound/verify/authres.go` + its persistence/merge sites).
+- **Live tally after all recorded movements (uncommitted at 02666cc):** COMPLETE 46 · PARTIAL 37 · MISSING → PLANNED (Phase 3) 2 (SF-10, SF-26) · PLANNED (ADR-anchored, OB phases) 38 · BROKEN 0 — of 123 records. The frozen table above remains the 2026-11-07 verification-wave statistics; this line is the live state.
 
 
 ## Verification record (Phase 1 waves — executed 2026-11-07)

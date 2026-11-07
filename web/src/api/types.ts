@@ -44,6 +44,29 @@ export interface User {
 export interface AuthResponse {
   token: string
   user: User
+  // CA-03: the single-use refresh token. Empty when refresh tokens are
+  // disabled for the deployment.
+  refresh_token?: string
+  // GAP-12: the two_factor_required policy applies and this account has no
+  // second factor yet — the dashboard must land the user on the 2FA setup card.
+  two_factor_enrollment_required?: boolean
+}
+
+// SF-35/SF-67: one stored app password (metadata only — the plaintext is
+// returned exactly once at generation and never again).
+export interface AppPassword {
+  id: number
+  name: string
+  created_at: string
+  last_used_at?: string | null
+  revoked_at?: string | null
+}
+
+// The one-time view of a freshly generated app password.
+export interface AppPasswordCreated {
+  app_password: AppPassword
+  password: string
+  notice: string
 }
 
 export interface Email {
@@ -70,6 +93,29 @@ export interface Email {
   sent_at: string | null
   scheduled_at: string | null
   provider?: string
+}
+
+// CA-02: lightweight delivery-status view returned by
+// GET /workspaces/current/emails/{id}/status (handlers.EmailStatusResponse).
+// MessageDetail.vue polls it while a send is queued or processing.
+export interface EmailStatusView {
+  id: string
+  status: Email['status']
+  error_message?: string
+  retry_count: number
+  created_at: string
+  sent_at?: string
+}
+
+// SF-89: one browser Web Push subscription as the backend stores it.
+export interface PushSubscriptionRow {
+  id: number
+  user_id: number
+  endpoint: string
+  p256dh: string
+  auth: string
+  user_agent?: string
+  created_at: string
 }
 
 export type InboundEmailStatus = 'received' | 'forwarded' | 'failed' | 'rejected' | 'quarantined'
@@ -811,6 +857,19 @@ export interface AdminSettingInput {
   type: string
 }
 
+// One per-key entry of the platform settings change history (SF-100). A null
+// old_value marks the key's creation — such an entry cannot be rolled back.
+export interface AdminSettingHistoryEntry {
+  id: number
+  workspace_id?: number | null
+  key: string
+  old_value?: string | null
+  new_value: string
+  changed_by: number
+  changed_by_email: string
+  created_at: string
+}
+
 export interface UserSettings {
   id: number
   user_id: number
@@ -867,6 +926,9 @@ export interface UserProfile extends User {
   require_verified_domain: boolean
   scheduled_deletion_at: string | null
   email_verification_required: boolean
+  // GAP-12: true while the two_factor_required policy applies and the account
+  // has no second factor configured yet.
+  two_factor_enrollment_required?: boolean
   default_workspace_id: number | null
   // R-20 impersonation: set while the session acts as another user via the
   // admin impersonation flow. The dashboard banners "Viewing as …" off it.
@@ -1696,6 +1758,15 @@ export interface EmailEventRecord {
   created_at: string
 }
 
+/** GET /workspaces/current/logs/classifications payload (SF-53). */
+export interface ClassificationBreakdown {
+  /** R-05 classification → recorded email_event count ("(none)" included). */
+  counts: Record<string, number>
+  total: number
+  from?: string
+  to?: string
+}
+
 /**
  * List row of a stored incoming webhook payload — the raw body itself is only
  * served by the detail endpoint.
@@ -2009,6 +2080,8 @@ export interface QueueStats {
   processed: number
   failed: number
   latency_ms: number
+  /** True while the queue is paused (no tasks handed to workers). */
+  paused?: boolean
 }
 
 /** GET /admin/queues payload. */
@@ -2039,6 +2112,30 @@ export interface QueueTaskPage {
   page: number
   size: number
   total: number
+}
+
+/** Per-queue outcome of POST /admin/queue/pause or /admin/queue/resume. */
+export interface QueuePauseState {
+  queue: string
+  paused: boolean
+  /** False when the queue was already in the requested state. */
+  changed: boolean
+}
+
+/** POST /admin/queue/pause and /admin/queue/resume payload. */
+export interface QueuePauseResult {
+  paused: boolean
+  queues: QueuePauseState[]
+}
+
+/** POST /admin/queue/actions/{action} payload. */
+export interface QueueActionResponse {
+  action: 'requeue_stuck' | 'purge_archived_before'
+  /** Emails the reconcile sweep re-enqueued (requeue_stuck). */
+  requeued: number
+  /** Dead-lettered tasks deleted (purge_archived_before). */
+  purged: number
+  queues: string[]
 }
 
 // ---- Managed DKIM signing keys (workspace domains) ----

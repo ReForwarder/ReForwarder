@@ -92,7 +92,15 @@ func SeedDefaultSettings(repo *repositories.SettingRepository) {
 		{Key: "security_ban_tier_2_hours", Value: "24", Type: models.SettingTypeInt},
 		{Key: "security_ban_tier_3_hours", Value: "168", Type: models.SettingTypeInt},
 		{Key: "security_ban_tier_4_hours", Value: "720", Type: models.SettingTypeInt},
-		{Key: "security_events_retention_days", Value: "30", Type: models.SettingTypeInt},
+		// GAP-13: the security-event retention window consumed by the
+		// retention cron (0 = keep forever). Aligned with the provider
+		// default (90) now that the key has its first consumer.
+		{Key: "security_events_retention_days", Value: "90", Type: models.SettingTypeInt},
+		// SF-104: grace period after DKIM rotation before the scheduled
+		// retire task may flip a `retiring` key to `retired` (only once the
+		// replacement key's DNS record is verified). Negative disables the
+		// pass; 0 retires on the next run.
+		{Key: "dkim_retire_grace_days", Value: "14", Type: models.SettingTypeInt},
 	}
 
 	for i := range defaults {

@@ -162,6 +162,14 @@ async function handleLogin() {
       notification.info('Please enter your two-factor authentication code.')
       return
     }
+    // GAP-12: the two_factor_required policy demands enrollment before this
+    // account may proceed. The session is live; land the user on the 2FA
+    // setup card.
+    if (err?.requires2FASetup) {
+      notification.info('Two-factor authentication must be set up before you can continue.')
+      router.push({ path: '/profile', query: { setup: '2fa' } })
+      return
+    }
     // Check for 2FA required response (401 with requires_2fa flag)
     if (err?.response?.status === 401 && err?.response?.data?.data?.requires_2fa) {
       requires2FA.value = true
@@ -221,6 +229,12 @@ async function finishPasskeyLogin(assertion: SerializedCredential) {
     await auth.passkeyLogin({ email: email.value.trim(), assertion })
     goAfterLogin()
   } catch (err: any) {
+    if (err?.requires2FASetup) {
+      // GAP-12: the account owes its forced 2FA enrollment.
+      notification.info('Two-factor authentication must be set up before you can continue.')
+      router.push({ path: '/profile', query: { setup: '2fa' } })
+      return
+    }
     if (err?.response?.status === 401 && err?.response?.data?.data?.requires_2fa) {
       passkeyPendingToken.value = err.response.data.data.pending_token || ''
       requires2FA.value = true

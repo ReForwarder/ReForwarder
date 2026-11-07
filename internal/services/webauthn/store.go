@@ -125,11 +125,14 @@ const challengeKeyPrefix = "webauthn:challenge:"
 // RedisChallengeStore keeps ceremony state in Redis, so challenges survive a
 // process restart and multi-instance deployments share one state.
 type RedisChallengeStore struct {
-	redis *redis.Client
+	// redis is the redis.Cmdable surface (the go-redis interface *redis.Client
+	// satisfies). The interface keeps the store unit-testable with an
+	// in-process fake (SF-91) without adding a Redis test dependency.
+	redis redis.Cmdable
 }
 
 // NewRedisChallengeStore builds the Redis-backed store.
-func NewRedisChallengeStore(client *redis.Client) *RedisChallengeStore {
+func NewRedisChallengeStore(client redis.Cmdable) *RedisChallengeStore {
 	return &RedisChallengeStore{redis: client}
 }
 

@@ -61,7 +61,8 @@ const dmrTestWorkspace = "3"
 
 var dmrColumns = map[string][]string{
 	"domains": {"id", "user_id", "workspace_id", "domain", "ownership_verified", "spf_verified",
-		"dkim_verified", "dmarc_verified", "verification_token", "created_at"},
+		"dkim_verified", "dmarc_verified", "verification_token", "created_at",
+		"delivery_mode", "outbound_bind_ip", "max_msgs_per_connection", "hourly_budget"},
 	"dmarc_reports": {"id", "user_id", "workspace_id", "domain_id", "inbound_id", "domain",
 		"reporter", "reporter_email", "report_id", "source_ip", "window_start", "window_end",
 		"count", "dkim_aligned", "spf_aligned", "disposition", "header_from", "created_at"},
@@ -79,6 +80,10 @@ var dmrDefaults = map[string]map[string]func() driver.Value{
 		"dmarc_verified":     func() driver.Value { return false },
 		"workspace_id":       func() driver.Value { return nil },
 		"verification_token": func() driver.Value { return "tok" },
+		"delivery_mode":      func() driver.Value { return "relay" },
+		"outbound_bind_ip":   func() driver.Value { return "" },
+		"max_msgs_per_connection": func() driver.Value { return int64(0) },
+		"hourly_budget":      func() driver.Value { return int64(0) },
 	},
 	"dmarc_reports": {
 		"workspace_id":   func() driver.Value { return nil },

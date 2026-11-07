@@ -169,8 +169,13 @@ func (s *session) Data(r io.Reader) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	clientIP := s.remote
+	if host, _, err := net.SplitHostPort(s.remote); err == nil {
+		clientIP = host
+	}
+
 	recipients := append([]string(nil), s.to...)
-	_, ierr := s.backend.svc.IngestRaw(ctx, raw, s.from, recipients, models.InboundSourceSMTP)
+	_, ierr := s.backend.svc.IngestRaw(ctx, raw, s.from, recipients, models.InboundSourceSMTP, clientIP)
 	switch {
 	case ierr == nil:
 		return nil

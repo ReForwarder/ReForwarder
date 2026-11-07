@@ -22,12 +22,16 @@ package handlers
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	cronjobs "github.com/goposta/posta/internal/cron/jobs"
 	"github.com/goposta/posta/internal/metrics"
 	"github.com/goposta/posta/internal/queues"
+	"github.com/goposta/posta/internal/services/audit"
 	"github.com/hibiken/asynq"
 	"github.com/jkaninda/okapi"
+	"gorm.io/gorm"
 )
 
 // QueueInspector is the narrow slice of *asynq.Inspector the queue
@@ -36,6 +40,7 @@ import (
 // a database service but no Redis harness for handler tests.
 type QueueInspector interface {
 	GetQueueInfo(queue string) (*asynq.QueueInfo, error)
+	GetTaskInfo(queue, id string) (*asynq.TaskInfo, error)
 	ListPendingTasks(queue string, page, size int) ([]*asynq.TaskInfo, error)
 	ListActiveTasks(queue string, page, size int) ([]*asynq.TaskInfo, error)
 	ListScheduledTasks(queue string, page, size int) ([]*asynq.TaskInfo, error)
@@ -44,6 +49,8 @@ type QueueInspector interface {
 	DeleteTask(queue, id string) error
 	RunTask(queue, id string) error
 	ArchiveTask(queue, id string) error
+	PauseQueue(queue string) error
+	UnpauseQueue(queue string) error
 }
 
 // AsynqQueueInspector adapts *asynq.Inspector to QueueInspector, translating
@@ -59,6 +66,10 @@ func NewAsynqQueueInspector(insp *asynq.Inspector) *AsynqQueueInspector {
 
 func (a *AsynqQueueInspector) GetQueueInfo(queue string) (*asynq.QueueInfo, error) {
 	return a.insp.GetQueueInfo(queue)
+}
+
+func (a *AsynqQueueInspector) GetTaskInfo(queue, id string) (*asynq.TaskInfo, error) {
+	return a.insp.GetTaskInfo(queue, id)
 }
 
 func (a *AsynqQueueInspector) ListPendingTasks(queue string, page, size int) ([]*asynq.TaskInfo, error) {
@@ -93,6 +104,14 @@ func (a *AsynqQueueInspector) ArchiveTask(queue, id string) error {
 	return a.insp.ArchiveTask(queue, id)
 }
 
+func (a *AsynqQueueInspector) PauseQueue(queue string) error {
+	return a.insp.PauseQueue(queue)
+}
+
+func (a *AsynqQueueInspector) UnpauseQueue(queue string) error {
+	return a.insp.UnpauseQueue(queue)
+}
+
 // adminQueues are the queues the send pipeline consumes (mirrors the weights
 // in the asynq server configs). Anything else is answered 404 rather than
 // probed in Redis.
@@ -119,6 +138,7 @@ type QueueStats struct {
 	Processed int    `json:"processed"`
 	Failed    int    `json:"failed"`
 	LatencyMS int64  `json:"latency_ms"`
+	Paused    bool   `json:"paused"`
 }
 
 // QueuesOverview is the response of GET /admin/queues.
@@ -180,6 +200,7 @@ func queueStatsOf(info *asynq.QueueInfo) QueueStats {
 		Processed: info.Processed,
 		Failed:    info.Failed,
 		LatencyMS: info.Latency.Milliseconds(),
+		Paused:    info.Paused,
 	}
 }
 
@@ -365,4 +386,277 @@ func (h *AdminHandler) queueTaskAction(c *okapi.Context, req *QueueTaskActionReq
 			event, fmt.Sprintf("%s %s: %s", message, req.Queue, req.TaskID), nil)
 	}
 	return ok(c, okapi.M{"message": message, "queue": req.Queue, "task_id": req.TaskID})
+}
+
+// ---------- SF-52: REST destroy ----------
+
+// DestroyQueueTask deletes a pending/scheduled/retrying/archived task outright
+// (admin only) — the REST-shaped destroy verb beside POST /cancel. It is the
+// same asynq.DeleteTask the cancel endpoint ends in, but it carries its own
+// audit event (admin.queue.task_destroyed) so a deliberate destroy is
+// distinguishable in the trail from a cancel. Active tasks cannot be deleted;
+// asynq answers that with an error, surfaced as 409.
+//
+// PATCH of a task's options (next process time, max retry, queue) is
+// deliberately not offered: asynq v0.26.0's Inspector has no API to modify a
+// task's options in place — only UpdateTaskPayload (scheduled tasks only, and
+// the payload here is the worker's internal {"email_id":N} reference, not an
+// operator-tunable option). The supported adjustment path is cancel +
+// re-enqueue (or run/archive on the existing task).
+func (h *AdminHandler) DestroyQueueTask(c *okapi.Context, req *QueueTaskActionRequest) error {
+	return h.queueTaskAction(c, req, "destroy", func(q, id string) error {
+		return h.queueInspector.DeleteTask(q, id)
+	}, "admin.queue.task_destroyed", "destroyed queue task")
+}
+
+// ---------- SF-54: global queue pause / resume ----------
+
+// QueuePauseState is the per-queue outcome of a pause/resume operation.
+type QueuePauseState struct {
+	Queue   string `json:"queue"`
+	Paused  bool   `json:"paused"`
+	Changed bool   `json:"changed"`
+}
+
+// QueuePauseResult is the response of POST /admin/queue/pause and
+// POST /admin/queue/resume.
+type QueuePauseResult struct {
+	Paused bool              `json:"paused"`
+	Queues []QueuePauseState `json:"queues"`
+}
+
+// PauseQueues pauses task processing on every managed send pipeline queue
+// (transactional, bulk, low) at once (admin only). A queue that is already
+// paused is reported unchanged rather than failed — the operation is
+// idempotent from the operator's point of view. Delivery workers keep their
+// connections; asynq simply stops handing out tasks until ResumeQueues.
+//
+// Per-domain email suspension is explicitly out of scope (ADR-001): pausing is
+// a deployment-wide delivery switch, not a tenancy control.
+func (h *AdminHandler) PauseQueues(c *okapi.Context) error {
+	return h.setQueuesPaused(c, true, "admin.queue.paused", "paused delivery queues")
+}
+
+// ResumeQueues unpauses every managed queue (admin only); the mirror of
+// PauseQueues. An already-running queue is reported unchanged.
+func (h *AdminHandler) ResumeQueues(c *okapi.Context) error {
+	return h.setQueuesPaused(c, false, "admin.queue.resumed", "resumed delivery queues")
+}
+
+func (h *AdminHandler) setQueuesPaused(c *okapi.Context, pause bool, event, message string) error {
+	if h.queueInspector == nil {
+		return c.AbortServiceUnavailable("queue inspection is not available (no worker configured)")
+	}
+
+	states := make([]QueuePauseState, 0, len(adminQueues))
+	var failures []string
+	for _, name := range adminQueues {
+		// Read the current state first: pause/resume of an already-there queue
+		// is reported as unchanged instead of surfacing asynq's "already
+		// paused/not paused" error. A queue Redis has never seen is simply not
+		// paused.
+		currentlyPaused := false
+		if info, err := h.queueInspector.GetQueueInfo(name); err == nil {
+			currentlyPaused = info.Paused
+		}
+		state := QueuePauseState{Queue: name, Paused: currentlyPaused}
+		if currentlyPaused != pause {
+			var err error
+			if pause {
+				err = h.queueInspector.PauseQueue(name)
+			} else {
+				err = h.queueInspector.UnpauseQueue(name)
+			}
+			if err != nil {
+				// One queue refusing to flip must not leave the operator
+				// believing the platform is paused: collect and report 409.
+				failures = append(failures, fmt.Sprintf("%s: %v", name, err))
+				continue
+			}
+			state.Paused = pause
+			state.Changed = true
+		}
+		states = append(states, state)
+	}
+	if len(failures) > 0 {
+		return c.AbortConflict(fmt.Sprintf("failed to change queue state: %s", strings.Join(failures, "; ")))
+	}
+
+	if h.audit != nil {
+		h.audit.Log(uint(c.GetInt("user_id")), c.GetString("email"), c.RealIP(), event, message, nil)
+	}
+	return ok(c, QueuePauseResult{Paused: pause, Queues: states})
+}
+
+// ---------- SF-59: operational actions ----------
+
+// QueueOpsHandler serves the operational queue actions (SF-59,
+// POST /admin/queue/actions/{action}). It sits beside AdminHandler rather than
+// on it because the requeue_stuck action needs the send producer, which only
+// exists when the deployment runs a worker — the handler is wired in
+// routes.InitRoutes under that same condition and the routes are only
+// registered when it is present.
+type QueueOpsHandler struct {
+	db             *gorm.DB
+	producer       cronjobs.SendEnqueuer
+	inspector      cronjobs.SendTaskInspector
+	queueInspector QueueInspector
+	audit          *audit.Logger
+}
+
+// NewQueueOpsHandler wires the operational actions. queueInspector backs the
+// archive purge; producer and inspector back requeue_stuck.
+func NewQueueOpsHandler(db *gorm.DB, producer cronjobs.SendEnqueuer, inspector cronjobs.SendTaskInspector, queueInspector QueueInspector) *QueueOpsHandler {
+	return &QueueOpsHandler{
+		db:             db,
+		producer:       producer,
+		inspector:      inspector,
+		queueInspector: queueInspector,
+	}
+}
+
+// SetAuditLogger wires the platform audit logger. Nil (default) disables
+// auditing; the endpoints still work.
+func (h *QueueOpsHandler) SetAuditLogger(a *audit.Logger) {
+	h.audit = a
+}
+
+// QueueActionRequest addresses one operational action. For
+// purge_archived_before, body.before is the cutoff (RFC3339 or YYYY-MM-DD):
+// dead-lettered tasks that failed (or were parked) at or before it are
+// deleted. An absent cutoff means now — i.e. the whole dead-letter set.
+type QueueActionRequest struct {
+	Action string `param:"action"`
+	Body   struct {
+		Before string `json:"before"`
+	} `json:"body"`
+}
+
+// QueueActionResponse reports what one operational action did.
+type QueueActionResponse struct {
+	Action   string   `json:"action"`
+	Requeued int      `json:"requeued"`
+	Purged   int      `json:"purged"`
+	Queues   []string `json:"queues"`
+}
+
+// queuePurgeWalkCap bounds one purge sweep: 50 pages of 100 archived tasks per
+// queue. A backlog larger than that simply needs another sweep.
+const queuePurgeWalkCap = 50
+
+// queuePurgePageSize is the asynq list page size used while walking the
+// archived set.
+const queuePurgePageSize = 100
+
+// RunAction executes one operational action (admin only, audited):
+//
+//	requeue_stuck          — runs the queue-reconcile sweep (the same
+//	                       guard-railed logic the cron tick runs, see
+//	                       cron/jobs.QueueReconcileJob) to re-enqueue emails
+//	                       stuck in queued whose asynq task was lost.
+//	purge_archived_before  — deletes dead-lettered (archived) tasks that
+//	                       reached the archive at or before body.before.
+//	                       asynq v0.26.0 has no ArchiveCleanup-style API, so
+//	                       the sweep lists the archived set per queue and
+//	                       deletes matching tasks individually.
+func (h *QueueOpsHandler) RunAction(c *okapi.Context, req *QueueActionRequest) error {
+	switch req.Action {
+	case "requeue_stuck":
+		return h.runRequeueStuck(c)
+	case "purge_archived_before":
+		return h.runPurgeArchived(c, req)
+	default:
+		return c.AbortBadRequest("unknown action: use requeue_stuck or purge_archived_before")
+	}
+}
+
+func (h *QueueOpsHandler) runRequeueStuck(c *okapi.Context) error {
+	if h.db == nil || h.producer == nil || h.inspector == nil {
+		return c.AbortServiceUnavailable("queue actions are not available (no worker configured)")
+	}
+	job := cronjobs.NewQueueReconcileJob(h.db, h.producer, h.inspector)
+	requeued, err := job.ReconcileOnce(c.Request().Context())
+	if err != nil {
+		return c.AbortInternalServerError(fmt.Sprintf("requeue sweep failed: %v", err))
+	}
+	h.auditAction(c, "requeue_stuck", requeued, 0)
+	return ok(c, QueueActionResponse{
+		Action:   "requeue_stuck",
+		Requeued: requeued,
+		Queues:   []string{queues.Transactional},
+	})
+}
+
+func (h *QueueOpsHandler) runPurgeArchived(c *okapi.Context, req *QueueActionRequest) error {
+	if h.queueInspector == nil {
+		return c.AbortServiceUnavailable("queue actions are not available (no worker configured)")
+	}
+	cutoff, okTime := parseQueueActionCutoff(req.Body.Before)
+	if !okTime {
+		return c.AbortBadRequest("invalid before: expected RFC3339 or YYYY-MM-DD")
+	}
+
+	purged := 0
+	for _, name := range adminQueues {
+		for page := 0; page < queuePurgeWalkCap; page++ {
+			tasks, err := h.queueInspector.ListArchivedTasks(name, page, queuePurgePageSize)
+			if err != nil {
+				if errors.Is(err, asynq.ErrQueueNotFound) {
+					break // the queue has no archived set at all
+				}
+				return c.AbortInternalServerError(fmt.Sprintf("failed to list archived tasks of %s: %v", name, err))
+			}
+			for _, t := range tasks {
+				// A task with a zero last-failed timestamp (manually archived
+				// without a failure) counts as older than any cutoff — it has
+				// no newer timestamp to offer.
+				if t.LastFailedAt.After(cutoff) {
+					continue
+				}
+				if err := h.queueInspector.DeleteTask(name, t.ID); err != nil {
+					if errors.Is(err, asynq.ErrTaskNotFound) {
+						continue // gone since the listing: not purged by us
+					}
+					return c.AbortConflict(fmt.Sprintf("failed to delete archived task %s of %s: %v", t.ID, name, err))
+				}
+				purged++
+			}
+			if len(tasks) < queuePurgePageSize {
+				break
+			}
+		}
+	}
+
+	h.auditAction(c, "purge_archived_before", 0, purged)
+	return ok(c, QueueActionResponse{
+		Action: "purge_archived_before",
+		Purged: purged,
+		Queues: append([]string(nil), adminQueues...),
+	})
+}
+
+// parseQueueActionCutoff accepts RFC3339 or a date-only value (whole day
+// included); an empty value means now.
+func parseQueueActionCutoff(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Now(), true
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t, true
+	}
+	if t, err := time.Parse("2006-01-02", raw); err == nil {
+		return t.Add(24 * time.Hour), true
+	}
+	return time.Time{}, false
+}
+
+func (h *QueueOpsHandler) auditAction(c *okapi.Context, action string, requeued, purged int) {
+	if h.audit == nil {
+		return
+	}
+	h.audit.Log(uint(c.GetInt("user_id")), c.GetString("email"), c.RealIP(),
+		"admin.queue.action_run",
+		fmt.Sprintf("ran queue action %s (requeued=%d, purged=%d)", action, requeued, purged),
+		map[string]any{"action": action, "requeued": requeued, "purged": purged})
 }

@@ -1,6 +1,6 @@
 import api from './client'
 import type {
-  ApiResponse, PaginatedResponse, User, ApiKey, Email, Event, AdminMetrics,
+  ApiResponse, PaginatedResponse, User, Event, AdminMetrics,
   UserDetailMetrics, CronJob, AdminWorkspace, UpdateInfo,
   Domain, AdminDomainRow, AdminDomainDetail, AdminDomainVerifyResult,
   AdminWorkspaceRow, AdminWorkspaceDetail,
@@ -8,6 +8,7 @@ import type {
   SecurityEventRecord, SecurityRule, SecurityRuleInput,
   AllowlistEntry, SecurityAllowlistInput,
   QueueStats, QueueTask, QueuesOverview, QueueTaskPage,
+  QueuePauseResult, QueueActionResponse,
   ImpersonationResponse,
 } from './types'
 import type { Announcement, AnnouncementInput } from './inbox'
@@ -103,15 +104,11 @@ export const adminApi = {
   getUserWorkspaces(id: number) {
     return api.get<ApiResponse<AdminWorkspace[]>>(`/admin/users/${id}/workspaces`)
   },
-  listApiKeys(page = 0, size = 20) {
-    return api.get<PaginatedResponse<ApiKey>>('/admin/api-keys', { params: { page, size } })
-  },
-  revokeApiKey(id: number) {
-    return api.delete(`/admin/api-keys/${id}`)
-  },
-  listEmails(page = 0, size = 20) {
-    return api.get<PaginatedResponse<Email>>('/admin/emails', { params: { page, size } })
-  },
+  // CA-02: the dead admin/api-keys and admin/emails client functions were
+  // removed (2026-11-07) — no backend routes exist for them and no view ever
+  // called them (RF-F103). Admin key management lives in the workspace-scoped
+  // apikeys.ts surface; admin email inspection lives in logs.ts.
+
   getMetrics() {
     return api.get<ApiResponse<AdminMetrics>>('/admin/metrics')
   },
@@ -144,6 +141,17 @@ export const adminApi = {
   },
   archiveQueueTask(queue: string, taskId: string) {
     return api.post<ApiResponse<{ message: string }>>(`/admin/queues/${queue}/tasks/${encodeURIComponent(taskId)}/archive`)
+  },
+  // ---- Global queue pause / resume (SF-54) ----
+  pauseQueues() {
+    return api.post<ApiResponse<QueuePauseResult>>('/admin/queue/pause')
+  },
+  resumeQueues() {
+    return api.post<ApiResponse<QueuePauseResult>>('/admin/queue/resume')
+  },
+  // ---- Operational queue actions (SF-59) ----
+  runQueueAction(action: 'requeue_stuck' | 'purge_archived_before', before?: string) {
+    return api.post<ApiResponse<QueueActionResponse>>(`/admin/queue/actions/${action}`, before ? { before } : {})
   },
   getUpdate() {
     return api.get<ApiResponse<UpdateInfo>>('/admin/update')
