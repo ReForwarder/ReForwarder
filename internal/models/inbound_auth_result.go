@@ -59,6 +59,24 @@ type InboundAuthResult struct {
 	DMARCPolicyDomain string `json:"dmarc_policy_domain,omitempty" gorm:"size:255"`
 	DMARCPolicy       string `json:"dmarc_policy,omitempty" gorm:"size:20"`
 
+	// ARC seal-chain validation (SF-27, ADR-002 decision 6): result is
+	// none|pass|fail (RFC 8617 §5.2 vocabulary); ARCDomain is the d= of the
+	// most recent seal. Empty result = the engine did not run
+	// (POSTA_INBOUND_ARC_ENABLED defaults to false); "none" = it ran and the
+	// message carried no ARC set. Annotate-only: never affects disposition.
+	// Column names are pinned (gorm would derive arc_result correctly but
+	// ip_rev_result from IPRev*).
+	ARCResult string `json:"arc_result,omitempty" gorm:"column:arc_result;size:20;not null;default:''"`
+	ARCDomain string `json:"arc_domain,omitempty" gorm:"column:arc_domain;size:255"`
+
+	// iprev forward-confirmed reverse DNS (SF-32 partial, ADR-002 decision
+	// 6): pass|fail|none|temperror|permerror with the confirming (or
+	// examined) PTR host. Empty result = engine did not run
+	// (POSTA_INBOUND_IPREV_ENABLED defaults to false). Guidance-grade:
+	// never a rejection input by itself.
+	IPRevResult string `json:"iprev_result,omitempty" gorm:"column:iprev_result;size:20;not null;default:''"`
+	IPRevPTR    string `json:"iprev_ptr,omitempty" gorm:"column:iprev_ptr;size:255"`
+
 	// AuthResultsHeader is the composed RFC 8601 Authentication-Results
 	// value under the instance authserv-id — the authoritative record of the
 	// injected header.

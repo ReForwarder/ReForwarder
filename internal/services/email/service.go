@@ -935,6 +935,139 @@ func (s *Service) Send(ctx context.Context, userID, apiKeyID uint, workspaceID *
 	return s.sendSync(em, userID, workspaceID, req)
 }
 
+// SystemForwardRequest describes one inbound-forwarding re-send (OB-2,
+// ADR-002 decision 2). The inbound forwarding executor is the only caller.
+type SystemForwardRequest struct {
+	UserID      uint
+	WorkspaceID *uint
+	// From is the receiving address on the tenant-verified domain the copy is
+	// sent from — DKIM signing resolves its domain's keys at delivery time
+	// (ADR-001 path). Never a client-supplied authority: the executor derives
+	// it from the durable inbound record.
+	From string
+	To   []string
+	// Subject/Text/HTML carry the copy's content. Headers are system headers
+	// (Message-ID threading, X-Posta-Forwarded-For loop evidence) — never
+	// accepted from external input.
+	Subject     string
+	Text        string
+	HTML        string
+	Headers     map[string]string
+	Attachments []models.Attachment
+	// Metadata lands on the copy's "forwarded" email_events row: the inbound
+	// message's identity, the route that matched and the hop count.
+	Metadata map[string]any
+}
+
+// SendSystemForward enqueues a system_forward copy of a durably stored inbound
+// message through the standard outbound pipeline (OB-2, ADR-002 decision 2):
+// the row is created with models.EmailProvenanceSystemForward, the pipeline's
+// send worker signs it per ADR-001/domain_signing_keys at delivery time and
+// retries with the standard backoff, and a "forwarded" email_events row marks
+// the forwarding provenance on the copy's timeline.
+//
+// Deliberately narrower than Send: forwarding is NOT a marketing-send path
+// (ADR-002 non-negotiable), so this path never consults or mutates
+// suppression, unsubscribe, or consent layers, and never consumes the
+// tenant's marketing rate limit — the forwarding executor applies its own
+// per-target abuse caps. Verified-domain sending is structural here: the
+// caller hands over the verified domain's receiving address.
+func (s *Service) SendSystemForward(ctx context.Context, req *SystemForwardRequest) (*SendResponse, error) {
+	if req == nil || len(req.To) == 0 {
+		return nil, fmt.Errorf("system forward: no target recipient")
+	}
+	if err := validateAddresses(req.From, req.To); err != nil {
+		return nil, err
+	}
+	// R-24: CR/LF/NUL never reach the message builder, on the system path too.
+	if err := validateSendHeaders(req.Subject, req.Headers); err != nil {
+		return nil, fmt.Errorf("header validation: %w", err)
+	}
+	if s.settings != nil && s.settings.MaintenanceMode() {
+		return nil, fmt.Errorf("maintenance: email sending is temporarily disabled")
+	}
+
+	// System headers always apply (outboundHeaders): custom headers are not
+	// involved on this path.
+	headers := outboundHeaders(&SendRequest{SystemHeaders: req.Headers}, false)
+	headersJSON := ""
+	if len(headers) > 0 {
+		b, _ := json.Marshal(headers)
+		headersJSON = string(b)
+	}
+
+	attachmentsJSON, err := s.persistAttachments(ctx, fmt.Sprintf("%d", time.Now().UnixNano()), req.Attachments)
+	if err != nil {
+		return nil, err
+	}
+	if req.Text == "" && req.HTML != "" {
+		req.Text = HTMLToText(req.HTML)
+	}
+
+	em := &models.Email{
+		UUID:            uuid.NewString(),
+		UserID:          req.UserID,
+		WorkspaceID:     req.WorkspaceID,
+		Sender:          req.From,
+		Recipients:      req.To,
+		Subject:         req.Subject,
+		HTMLBody:        req.HTML,
+		TextBody:        req.Text,
+		AttachmentsJSON: attachmentsJSON,
+		HeadersJSON:     headersJSON,
+		// OB-2 provenance stamp: the re-send copy a forwarding executor
+		// enqueued — the mark operators and queries distinguish forwarded
+		// mail from tenant/API-originated sends.
+		Provenance: models.EmailProvenanceSystemForward,
+		Status:     models.EmailStatusPending,
+		Provider:   ClassifyRecipients(req.To),
+	}
+	if err := s.emailRepo.Create(em); err != nil {
+		return nil, fmt.Errorf("failed to store email: %w", err)
+	}
+
+	// ADR-002 decision 2: the forwarding is recorded on the copy's
+	// message-history timeline. Recording failures never fail the enqueue.
+	emailhistory.RecordForwarded(s.recorder, em, req.Metadata)
+
+	// CA-06 dev fallback: without a wired producer the copy is stored and
+	// marked sent without delivery, exactly like the API send path's
+	// brand-new-send dev short-circuit (store-without-send).
+	if s.devMode {
+		em.Status = models.EmailStatusSent
+		now := time.Now()
+		em.SentAt = &now
+		_ = s.emailRepo.Update(em)
+		logger.Info("dev mode: system forward stored but not sent", "id", em.UUID)
+		return &SendResponse{ID: em.UUID, Status: em.Status}, nil
+	}
+
+	if s.enqueuer != nil {
+		em.Status = models.EmailStatusQueued
+		_ = s.emailRepo.Update(em)
+		if err := s.enqueuer.EnqueueEmailSend(em.ID, ""); err != nil {
+			em.Status = models.EmailStatusFailed
+			em.ErrorMessage = fmt.Sprintf("failed to enqueue: %v", err)
+			_ = s.emailRepo.Update(em)
+			emailhistory.RecordFailed(s.recorder, em, em.ErrorMessage, nil)
+			return nil, fmt.Errorf("failed to enqueue system forward: %w", err)
+		}
+		return &SendResponse{ID: em.UUID, Status: em.Status}, nil
+	}
+
+	// No producer wired (enqueuer-less flow): synchronous delivery through the
+	// same pipeline Send's fallback uses.
+	return s.sendSync(em, req.UserID, req.WorkspaceID, &SendRequest{
+		From:        req.From,
+		To:          req.To,
+		Subject:     req.Subject,
+		HTML:        req.HTML,
+		Text:        req.Text,
+		Attachments: req.Attachments,
+		Headers:     headers,
+	})
+}
+
 // applyTracking rewrites the HTML body of a not-yet-tracked email with signed
 // open/click tracking URLs keyed on the email UUID, and persists the row. It
 // is a no-op when tracking is not configured or disabled, when the body is

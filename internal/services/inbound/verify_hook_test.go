@@ -49,7 +49,8 @@ import (
 var arColumns = []string{"id", "user_id", "workspace_id", "inbound_id", "message_id",
 	"client_ip", "envelope_from", "spf_result", "spf_domain", "spf_reason",
 	"dkim_result", "dkim_domain", "dkim_selector", "dmarc_result", "dmarc_disposition",
-	"dmarc_policy_domain", "dmarc_policy", "auth_results_header", "created_at"}
+	"dmarc_policy_domain", "dmarc_policy", "arc_result", "arc_domain",
+	"iprev_result", "iprev_ptr", "auth_results_header", "created_at"}
 
 type arState struct {
 	mu   sync.Mutex
@@ -553,17 +554,135 @@ func TestInboundVerifyNilVerifierIsNoop(t *testing.T) {
 	svc.processVerification(arTestInbound(), arFixtureRaw, "alice@example.test", "192.0.2.10") // must not panic
 }
 
+// ---------- ARC / iprev gating + persistence (ADR-002 decision 6) ----------
+
+// Both optional engines are OFF by default: the row keeps the empty "not
+// evaluated" markers and the composed header carries no arc=/iprev= fields —
+// byte-identical to the pre-feature value.
+func TestInboundVerifyARCIPRevDisabledByDefault(t *testing.T) {
+	state := newArState()
+	dns := arDNSWith("v=spf1 ip4:192.0.2.0/24 -all", "v=DMARC1; p=none")
+	p := arProcessor(t, arGorm(t, state), dns)
+	if p.arcEnabled || p.iprevEnabled {
+		t.Fatal("ARC/iprev must default to disabled")
+	}
+
+	p.run(arTestInbound(), arFixtureRaw, "alice@example.test", "192.0.2.10")
+	if got := state.count(); got != 1 {
+		t.Fatalf("stored %d rows, want 1", got)
+	}
+	for col, want := range map[string]driver.Value{
+		"arc_result":   "",
+		"arc_domain":   "",
+		"iprev_result": "",
+		"iprev_ptr":    "",
+	} {
+		if got := state.value(col); got != want {
+			t.Errorf("inbound_auth_results.%s = %v, want %q (not evaluated)", col, got, want)
+		}
+	}
+	header, _ := state.value("auth_results_header").(string)
+	if strings.Contains(header, "; arc=") || strings.Contains(header, "; iprev=") {
+		t.Errorf("disabled engines annotated the header: %q", header)
+	}
+}
+
+// Enabled engines with a plain (chain-free) message: arc=none is an
+// evaluated verdict, iprev passes over the fake PTR data, and the columns
+// persist both.
+func TestInboundVerifyARCIPRevEnabledAnnotates(t *testing.T) {
+	state := newArState()
+	dns := arDNSWith("v=spf1 ip4:192.0.2.0/24 -all", "v=DMARC1; p=none")
+	dns.ptr["192.0.2.10"] = []string{"mail.example.test."}
+	dns.ip["mail.example.test."] = []net.IP{net.ParseIP("192.0.2.10")}
+
+	svc := &Service{}
+	t.Setenv("POSTA_INBOUND_ARC_ENABLED", "true")
+	t.Setenv("POSTA_INBOUND_IPREV_ENABLED", "true")
+	svc.EnableVerification(arGorm(t, state), "posta.test")
+	svc.verifier.lookupTXT = dns.LookupTXT
+	svc.verifier.lookupIP = dns.LookupIP
+	svc.verifier.lookupAddr = dns.LookupAddr
+	svc.verifier.lookupMX = dns.LookupMX
+	if !svc.verifier.arcEnabled || !svc.verifier.iprevEnabled {
+		t.Fatal("ARC/iprev must be enabled by their env flags")
+	}
+
+	svc.verifier.run(arTestInbound(), arFixtureRaw, "alice@example.test", "192.0.2.10")
+	if got := state.count(); got != 1 {
+		t.Fatalf("stored %d rows, want 1", got)
+	}
+	for col, want := range map[string]driver.Value{
+		"arc_result":   "none", // evaluated: the fixture carries no ARC set
+		"iprev_result": "pass",
+		"iprev_ptr":    "mail.example.test",
+	} {
+		if got := state.value(col); got != want {
+			t.Errorf("inbound_auth_results.%s = %v, want %q", col, got, want)
+		}
+	}
+	header, _ := state.value("auth_results_header").(string)
+	for _, want := range []string{"arc=none", "iprev=pass policy.iprev.ptr=mail.example.test"} {
+		if !strings.Contains(header, want) {
+			t.Errorf("auth_results_header %q missing %q", header, want)
+		}
+	}
+}
+
+// An enabled ARC engine over a malformed chain annotates arc=fail (the
+// crypto round-trips live in the verify package tests; this pins the wiring
+// through the hook and the row).
+func TestInboundVerifyARCEnabledBrokenChainAnnotatesFail(t *testing.T) {
+	state := newArState()
+	dns := arDNSWith("v=spf1 ip4:192.0.2.0/24 -all", "v=DMARC1; p=none")
+	p := arProcessor(t, arGorm(t, state), dns)
+	p.arcEnabled = true
+
+	// An ARC-Seal missing its cv= tag breaks the chain structure.
+	broken := []byte("ARC-Seal: i=1; a=ed25519-sha256; d=forwarder.test; s=k; b=AAAA\r\n" +
+		string(arFixtureRaw))
+
+	p.run(arTestInbound(), broken, "alice@example.test", "192.0.2.10")
+	if got := state.count(); got != 1 {
+		t.Fatalf("stored %d rows, want 1", got)
+	}
+	if got := state.value("arc_result"); got != "fail" {
+		t.Errorf("arc_result = %v, want fail", got)
+	}
+	header, _ := state.value("auth_results_header").(string)
+	if !strings.Contains(header, "arc=fail") {
+		t.Errorf("auth_results_header %q missing arc=fail", header)
+	}
+}
+
+// Explicitly spelled-off flags keep the engines off.
+func TestInboundVerifyARCIPRevExplicitOff(t *testing.T) {
+	t.Setenv("POSTA_INBOUND_ARC_ENABLED", "false")
+	t.Setenv("POSTA_INBOUND_IPREV_ENABLED", "0")
+	svc := &Service{}
+	svc.EnableVerification(arGorm(t, newArState()), "posta.test")
+	if svc.verifier.arcEnabled || svc.verifier.iprevEnabled {
+		t.Fatal("false/0 must keep ARC/iprev disabled")
+	}
+}
+
 // ---------- fake DNS for the hook tests ----------
 
 type arFakeDNS struct {
 	txt map[string][]string
+	ip  map[string][]net.IP
+	ptr map[string][]string
 }
 
 func newArFakeDNS(spfRecord, dmarcRecord string) *arFakeDNS {
-	return &arFakeDNS{txt: map[string][]string{
-		"example.test":        {spfRecord},
-		"_dmarc.example.test": {dmarcRecord},
-	}}
+	return &arFakeDNS{
+		txt: map[string][]string{
+			"example.test":        {spfRecord},
+			"_dmarc.example.test": {dmarcRecord},
+		},
+		ip:  map[string][]net.IP{},
+		ptr: map[string][]string{},
+	}
 }
 
 func (f *arFakeDNS) LookupTXT(_ context.Context, name string) ([]string, error) {
@@ -574,10 +693,16 @@ func (f *arFakeDNS) LookupTXT(_ context.Context, name string) ([]string, error) 
 }
 
 func (f *arFakeDNS) LookupIP(_ context.Context, name string) ([]net.IP, error) {
+	if addrs, ok := f.ip[name]; ok {
+		return addrs, nil
+	}
 	return nil, &net.DNSError{Err: "no such host", Name: name, IsNotFound: true}
 }
 
 func (f *arFakeDNS) LookupAddr(_ context.Context, addr string) ([]string, error) {
+	if names, ok := f.ptr[addr]; ok {
+		return names, nil
+	}
 	return nil, &net.DNSError{Err: "no such host", Name: addr, IsNotFound: true}
 }
 

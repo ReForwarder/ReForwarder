@@ -21,6 +21,7 @@ package settings
 
 import (
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -169,6 +170,38 @@ func (p *Provider) TrackingEventRetentionDays() int {
 // (GAP-13). 0 keeps them forever; the default is 90 days.
 func (p *Provider) SecurityEventsRetentionDays() int {
 	return p.GetInt("security_events_retention_days", 90)
+}
+
+// InboundQuarantineRetentionDays is how long an inbound quarantine record —
+// and a message still held pending on it — is kept (OB-2, ADR-002 §3; the
+// data lifecycle follows ADR-008). Retention expiry on a pending hold is an
+// automatic permanent deletion of the held message. 0 keeps them forever;
+// the default is 30 days.
+func (p *Provider) InboundQuarantineRetentionDays() int {
+	return p.GetInt("inbound_quarantine_retention_days", 30)
+}
+
+// SpamScoreQuarantine / SpamScoreReject are the ADR-006 disposition
+// thresholds (settings keys spam_score_quarantine / spam_score_reject).
+// The filter quarantines at ≥ quarantine and rejects at ≥ reject; the
+// scorer clamps a reject threshold below the quarantine one, so the safe
+// direction of an admin mistake is "more quarantine", never "more deliver".
+// The method names are the shape of the spamfilter.ThresholdSource seam.
+func (p *Provider) SpamScoreQuarantine() float64 {
+	return parseSpamThreshold(p.GetString("spam_score_quarantine", "5"), 5)
+}
+func (p *Provider) SpamScoreReject() float64 {
+	return parseSpamThreshold(p.GetString("spam_score_reject", "10"), 10)
+}
+
+// parseSpamThreshold parses a threshold setting; a missing or invalid value
+// falls back to the shipped default instead of disabling dispositioning.
+func parseSpamThreshold(raw string, fallback float64) float64 {
+	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || v < 0 {
+		return fallback
+	}
+	return v
 }
 
 // DKIMRetireGraceDays is how long a DKIM key stays in the `retiring` state

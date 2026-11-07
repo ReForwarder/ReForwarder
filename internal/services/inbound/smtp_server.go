@@ -56,11 +56,27 @@ type Backend struct {
 	limiter        *IPRateLimiter
 	sec            *security.Engine
 	securityPort   int
+	// router validates recipients against the inbound routing rules at RCPT
+	// time (OB-2, ADR-002); nil until SetRouter, and RCPT then behaves
+	// exactly as before (verified-domain check only).
+	router *Router
+	// verp accepts VERP bounce recipients through the dedicated return-path
+	// allowlist (OB-2, ADR-002 decision 4); nil or disabled until SetVerp,
+	// and RCPT then behaves exactly as before.
+	verp *Verp
 }
 
 func NewBackend(svc *Service, domainRepo *repositories.DomainRepository, maxMessageSize int64) *Backend {
 	return &Backend{svc: svc, domainRepo: domainRepo, maxMessageSize: maxMessageSize}
 }
+
+// SetRouter wires the routing engine for RCPT-time recipient validation
+// (setter-injection convention).
+func (b *Backend) SetRouter(r *Router) { b.router = r }
+
+// SetVerp wires the return-path allowlist for VERP bounce recipients
+// (OB-2, ADR-002 decision 4; setter-injection convention).
+func (b *Backend) SetVerp(v *Verp) { b.verp = v }
 
 // SetRateLimiter enables per-IP rate limiting for new SMTP sessions.
 func (b *Backend) SetRateLimiter(l *IPRateLimiter) { b.limiter = l }
@@ -125,21 +141,61 @@ func (s *session) Mail(from string, _ *smtp.MailOptions) error {
 }
 
 // Rcpt rejects recipients whose domain is not ownership-verified, saving bandwidth
-// by failing before DATA.
+// by failing before DATA. With routing enabled (OB-2, ADR-002) it additionally
+// requires an enabled route — exact, sub-address base, or catch-all — for the
+// recipient BEFORE the receiver accepts responsibility for the message: a
+// verified-domain recipient with neither gets an explicit 550. A route-store
+// failure is a temporary error (451), never a policy reject.
 func (s *session) Rcpt(to string, _ *smtp.RcptOptions) error {
 	s.guard.MarkCommand()
 	addr := to
 	if parsed, err := mail.ParseAddress(to); err == nil {
 		addr = parsed.Address
 	}
+	// OB-2 (ADR-002 decision 4): VERP bounce recipients are system addresses,
+	// not user mailboxes — accepted through the dedicated return-path
+	// allowlist before ordinary recipient validation (the bounce host is not
+	// a tenant mailbox domain, so the verified-domain check below would
+	// reject them). Invalid or forged bounce addresses fall through to that
+	// ordinary chain and are rejected there like any unknown recipient.
+	if vp := s.backend.verp; vp != nil && vp.LooksLikeBounce(addr) {
+		if uuid, ok := vp.Decode(addr); ok {
+			if _, host, hok := splitAddress(addr); hok {
+				if parent, pok := vp.BounceParentDomain(host); pok {
+					if _, derr := s.backend.domainRepo.FindVerifiedByName(parent); derr == nil {
+						_ = uuid
+						s.to = append(s.to, addr)
+						return nil
+					}
+				}
+			}
+		}
+	}
 	domain := extractDomain(addr)
 	if domain == "" {
 		s.guard.RecordMalformed("rcpt_rejected")
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 1, 3}, Message: "malformed recipient"}
 	}
-	if _, err := s.backend.domainRepo.FindVerifiedByName(domain); err != nil {
+	d, err := s.backend.domainRepo.FindVerifiedByName(domain)
+	if err != nil {
 		s.guard.RecordMalformed("rcpt_rejected")
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 1, 1}, Message: "relay not permitted"}
+	}
+	if rt := s.backend.router; rt != nil {
+		_, _, rerr := rt.ResolveRecipient(d, addr)
+		switch {
+		case rerr == nil:
+			// matched: the chosen action is carried into ingest from the
+			// recipient list (re-resolved there against the same rules).
+		case errors.Is(rerr, ErrNoRoute):
+			s.guard.RecordMalformed("rcpt_rejected")
+			return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 1, 1}, Message: "recipient not accepted"}
+		default:
+			// Route store unavailable — do not turn an infra failure into a
+			// permanent rejection.
+			logger.Error("inbound route resolution failed", "rcpt_domain", domain, "error", rerr)
+			return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 4, 3}, Message: "temporary routing failure"}
+		}
 	}
 	s.to = append(s.to, addr)
 	return nil
@@ -181,6 +237,11 @@ func (s *session) Data(r io.Reader) error {
 		return nil
 	case errors.Is(ierr, ErrUnverifiedDomain):
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 1, 1}, Message: "relay not permitted"}
+	case errors.Is(ierr, ErrNoRoute):
+		// OB-2: routing was re-evaluated at ingest (rules changed between
+		// RCPT and DATA, or the route store recovered differently) — the
+		// explicit reject, persisted by IngestRaw.
+		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 1, 1}, Message: "recipient not accepted"}
 	case errors.Is(ierr, ErrSizeExceeded):
 		return &smtp.SMTPError{Code: 552, EnhancedCode: smtp.EnhancedCode{5, 3, 4}, Message: "message too large"}
 	case errors.Is(ierr, ErrSenderSuppressed):

@@ -101,6 +101,12 @@ func SeedDefaultSettings(repo *repositories.SettingRepository) {
 		// replacement key's DNS record is verified). Negative disables the
 		// pass; 0 retires on the next run.
 		{Key: "dkim_retire_grace_days", Value: "14", Type: models.SettingTypeInt},
+		// ADR-006 spam disposition thresholds (OB-2 Phase 2): the filter
+		// quarantines at ≥ spam_score_quarantine and rejects at ≥
+		// spam_score_reject. Float scores; the scorer clamps reject below
+		// quarantine to the safe direction.
+		{Key: "spam_score_quarantine", Value: "5", Type: models.SettingTypeString},
+		{Key: "spam_score_reject", Value: "10", Type: models.SettingTypeString},
 	}
 
 	for i := range defaults {

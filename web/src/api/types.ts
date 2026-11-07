@@ -121,6 +121,90 @@ export interface PushSubscriptionRow {
 export type InboundEmailStatus = 'received' | 'forwarded' | 'failed' | 'rejected' | 'quarantined'
 export type InboundSource = 'smtp' | 'webhook'
 
+export type InboundQuarantineStatus = 'pending' | 'released' | 'deleted'
+
+// Review summary of the referenced inbound message (absent when the message
+// was permanently deleted — the quarantine row is the surviving record).
+export interface InboundQuarantineMessageSummary {
+  uuid: string
+  sender: string
+  recipients: string[]
+  subject: string
+  size: number
+  status: string
+}
+
+export interface InboundQuarantine {
+  id: number
+  user_id: number
+  workspace_id?: number | null
+  domain_id: number
+  inbound_email_id: number
+  route_id?: number | null
+  reason: string
+  score?: number | null
+  status: InboundQuarantineStatus
+  received_at: string
+  reviewed_by?: number | null
+  reviewed_at?: string | null
+  created_at: string
+  updated_at: string
+  inbound?: InboundQuarantineMessageSummary
+}
+
+// Inbound routing rules (OB-2, ADR-002 decision 1): per-verified-domain
+// recipient patterns evaluated first-match-wins by priority. The catch-all
+// pattern is "@domain"; exact and sub-address patterns always beat it, and a
+// recipient matching nothing is rejected.
+export type InboundRouteAction = 'deliver' | 'forward' | 'webhook' | 'quarantine'
+
+export interface InboundRoute {
+  id: number
+  user_id: number
+  workspace_id?: number | null
+  domain_id: number
+  pattern: string
+  action: InboundRouteAction
+  // Action-specific: the destination address for forward, the webhook event
+  // name for webhook; empty for deliver/quarantine.
+  target?: string
+  priority: number
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface InboundRouteInput {
+  domain_id: number
+  pattern: string
+  action: InboundRouteAction
+  target?: string
+  priority: number
+  enabled: boolean
+}
+
+// One confirmed forwarding destination (OB-2, ADR-002 decision 2). Forward
+// rules only run to an address whose single-use confirmation link was used;
+// confirmed_at is absent until then. The token itself is never returned —
+// only its hash is stored server-side.
+export interface InboundForwardTarget {
+  id: number
+  user_id: number
+  workspace_id?: number | null
+  target: string
+  confirmed_at?: string | null
+  created_at: string
+  updated_at: string
+}
+
+// Result of registering a forward target: the row plus the one-time
+// plain-text confirmation URL, which the operator sends to the target
+// mailbox manually. The URL is shown exactly once.
+export interface InboundCreatedForwardTarget {
+  target: InboundForwardTarget
+  confirm_url: string
+}
+
 export interface InboundAttachmentMeta {
   filename: string
   content_type: string

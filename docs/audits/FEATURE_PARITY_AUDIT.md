@@ -155,9 +155,10 @@
 | Field | Value |
 |---|---|
 | Source | inventory §A SF-11 · ledger N/V — **resolved**: no forwarding/auto-forwarding exists in ReForwarder (confirmed by prior audits); inbound aliases/forwarding/catch-all are Option B Phase 2 scope |
-| Status fields | Backend: Missing · others: — |
-| Final status | **PLANNED (ADR-002 accepted · OB-2)** |
-| Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-A1.md. |
+| Implementation | Wave OB-2 (W1+W2+W7): workspace-scoped `inbound_routes` (pattern exact-address \| `@domain` catch-all \| sub-address spec; actions deliver/forward/webhook/quarantine; priority lower-first) + durable `inbound_forward_tasks` queue (unique per inbound email; additive migration) — `internal/models/inbound_route.go`, `internal/models/inbound_forward_task.go`, repos `internal/storage/repositories/inbound_route_repo.go` / `inbound_forward_task_repo.go` (parameterized throughout). Routing engine `internal/services/inbound/router.go:90` ResolveRecipient: first-match-wins by priority, exact beats a higher-priority catch-all, `user+tag@host` resolves to the base rule, recipient host must equal the caller-verified domain (fail closed), unknown recipient → explicit 550 default-reject. RCPT-time validation before responsibility is accepted (`internal/services/inbound/smtp_server.go:192,244` — 550 5.1.1 no matching route; store failure 451 4.4.3); post-ingest execution after durable persist (`internal/services/inbound/route_action.go:96`). Forward executor `internal/services/inbound/forwarder.go:285` RunOnce — R-26 CAS claim, system_forward re-send copy stamped `provenance=system_forward` (`internal/models/email.go:44`), `forwarded` email_event, standard backoff retry budget; loop/abuse protection: MaxForwardHops=3 with X-Posta-Forwarded-For hop accounting (`forwarder.go:70`), per-target hourly/daily rate caps, confirmation gate (`inbound_forward_targets` + single-use `GET /inbound/forward-confirm/{token}`, `internal/routes/inbound_forward_routes.go:79`); the original inbound row is never deleted or rewritten (durable-first). Dashboard rules/forward-target UI `web/src/views/inbound/InboundRoutes.vue` |
+| Status fields | Backend: Verified · Frontend: Partial (rules + forward-targets UI landed; backend rules-CRUD handler unregistered — see residual) · DB: Verified (inbound_routes, inbound_forward_tasks, inbound_forward_targets — all additive) · API: Partial (forward-targets + confirm routes landed and contract-golden; `/inbound-routes` CRUD recorded KNOWN_DRIFT in `web/src/api/admin.spec.ts`) · Security: Verified (confirmation gate, hop limit, rate caps; SSRF/HMAC webhook seams untouched) · Tests: Verified (21 W1 + 17 W2 named tests; docker battery exit 0) · Docs: Partial (STATUS_HISTORY wave notes) |
+| Final status | **COMPLETE** — forwarding chain via the documented no-Sieve routing evaluator (Wave OB-2): sub-addressing/catch-all/aliases = `inbound_routes` + durable forward executor. Recorded residuals (honest, not silent): the per-rules REST CRUD handler is not yet registered (the Routes UI is spec-tested against repo conventions, KNOWN_DRIFT until it lands — one integration pass), and list expansion (mailing lists) is not adopted — routes carry no list semantics |
+| Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-A1.md. Wave OB-2 (2026-11-07, this tree): files + checks per the **OB-2 wave evidence** section (W1/W2/W7). |
 
 ### SF-12 — Envelope rewriting (MAIL FROM / RCPT TO)
 | Field | Value |
@@ -288,17 +289,19 @@
 | Field | Value |
 |---|---|
 | Source | inventory §B SF-26 · ledger N/I |
-| Status fields | Backend: Missing · others: — |
-| Final status | **MISSING → PLANNED (Phase 3)** — depends on SF-22/23 |
+| Implementation | dependencies landed (SF-22/23/24 verification engines COMPLETE, Wave P3-1; A-R composer persists verdicts, SF-49) — ARF report generation/dispatch itself remains unbuilt |
+| Status fields | Backend: Missing (ARF report generation) · others: — |
+| Final status | **PARTIAL** — note (Wave OB-2 close, 2026-11-07): the record's dependencies are COMPLETE but **ARF auth-failure reports are still absent** — no RFC 5965/6591 report builder or dispatcher exists in the tree; carried open, not waved through |
 | Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-B1.md. |
 
 ### SF-27 — ARC verification (no sealing)
 | Field | Value |
 |---|---|
 | Source | inventory §B SF-27 · ledger N/A |
-| Status fields | Backend: Missing · others: — |
-| Final status | **PLANNED (ADR-002 accepted · OB-2)** |
-| Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-B1.md. |
+| Implementation | Wave OB-2 (W6): RFC 8617 §5.2 chain validator `internal/services/inbound/verify/arc.go:101` Verify — structure enforcement (exactly one AAR+AMS+AS per instance, contiguous 1..N, ≤50 sets, full cv= matrix), most-recent ARC-Message-Signature verified as a DKIM signature (h= must cover From, MUST NOT cover Authentication-Results/ARC headers, `l=` rejected as insecure), every ARC-Seal verified newest→oldest over the §5.1.1 input; RFC 6376 primitives in `verify/dkimutil.go` (tag-value lists, simple/relaxed canon pinned to the RFC's published empty-body SHA-256 vectors, ≥1024-bit RSA + Ed25519, rsa-sha1 rejected per RFC 8301). Annotate-only: `arc=<r> header.d=<d>` appended by the A-R composer (`verify/authres.go`), persisted in additive columns `arc_result`/`arc_domain` (`internal/models/inbound_auth_result.go` — empty = engine off, distinct from `none`); gate `POSTA_INBOUND_ARC_ENABLED` default off (`verify_hook.go`); result vocabulary exactly none\|pass\|fail. **No sealing anywhere** |
+| Status fields | Backend: Verified (verify + annotate) · Frontend: — · DB: Verified (additive columns via the existing AutoMigrate row) · API: — · Security: Verified (annotation never a rejection input; no key material added) · Tests: Verified (27 ARC tests incl. tampered-seal/instance-gap/canon-vector cases; battery) · Docs: Partial |
+| Final status | **COMPLETE** — ARC verification, annotate-only, landed (Wave OB-2 W6); sealing is never (by design — see the OB-2 tracker row) |
+| Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-B1.md. Wave OB-2 (2026-11-07, this tree): files + checks per the **OB-2 wave evidence** section (W6). |
 
 ### SF-28 — DKIM2 verification (chained) + forged-DSN protection
 | Field | Value |
@@ -336,9 +339,10 @@
 | Field | Value |
 |---|---|
 | Source | inventory §B SF-32 · ledger N/A |
-| Status fields | Backend: Missing · others: — |
-| Final status | **PLANNED (ADR-002 accepted · OB-1 PTR guidance, OB-2 iprev)** |
-| Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-B1.md. |
+| Implementation | Wave OB-2 (W6) annotate slice: forward-confirmed reverse DNS `internal/services/inbound/verify/iprev.go:65` Check — PTR lookup, forward-resolve each PTR name (bounded 10), pass when any forward answer equals the connecting IP, fail on unconfirming PTRs, none with no PTR/client IP, temperror/permerror on transient/invalid input; guidance-grade annotate-only (`iprev=<r> policy.iprev.ptr=<name>` in the A-R composer, additive columns `iprev_result`/`iprev_ptr`), gate `POSTA_INBOUND_IPREV_ENABLED` default off; **never a rejection input** |
+| Status fields | Backend: Partial (annotate slice Verified; full validation absent) · Frontend: — · DB: Verified (additive columns) · API: — · Security: — · Tests: Verified (12 iprev forward-confirmation cases) · Docs: Partial |
+| Final status | **PARTIAL** — iprev annotate slice COMPLETE (Wave OB-2 W6); full iprev validation **PLANNED (OB-6)** |
+| Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-B1.md. Wave OB-2 (2026-11-07, this tree): files + checks per the **OB-2 wave evidence** section (W6). |
 
 ### SF-33 — TLS server stack (STARTTLS, SNI wildcard fallback)
 | Field | Value |
@@ -421,9 +425,10 @@
 | Field | Value |
 |---|---|
 | Source | inventory §B SF-42 · ledger N/A |
-| Status fields | Backend: Missing · others: — |
-| Final status | **PLANNED (ADR-006 accepted · OB-2)** |
-| Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-B2.md. |
+| Implementation | Wave OB-2 (W5) GTUBE slice: the standard GTUBE marker `internal/services/spamfilter/gtube.go:40` GTUBEString scores 1000 in the ADR-006 baseline scorer (`scorer.go`) → instant reject disposition, end-to-end proven by the worker quarantine test |
+| Status fields | Backend: Partial (GTUBE slice Verified) · others: — · Tests: Verified (GTUBE in the scorer threshold matrix + the worker end-to-end test) |
+| Final status | **PARTIAL** — GTUBE self-test slice COMPLETE (Wave OB-2 W5); Pyzor, spam traps, attachment blocklists and external rule feeds **PLANNED (ADR-006 · OB-6)** |
+| Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-B2.md. Wave OB-2 (2026-11-07, this tree): files + checks per the **OB-2 wave evidence** section (W5). |
 
 ### SF-43 — Connection/DoS budgets (memory accounting, session reservations)
 | Field | Value |
@@ -447,9 +452,10 @@
 | Field | Value |
 |---|---|
 | Source | inventory §B SF-45 · ledger N/A |
-| Status fields | Backend: Missing · others: — |
-| Final status | **PLANNED (ADR-006 accepted · OB-2)** — documented alternative: automation filter nodes |
-| Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-B2.md. |
+| Implementation | **No-Sieve alternative (the documented one), Wave OB-2:** policy hooks at the SMTP/ingest stages ride the inbound routing evaluator + the ADR-006 filter chain, not a Sieve interpreter — RCPT-time route validation before responsibility is accepted (`internal/services/inbound/smtp_server.go:192,244`: no matching enabled route → 550 5.1.1; route-store failure → 451 4.4.3), post-ingest route actions after durable persist (`route_action.go:96`), spam/malware dispositions applied after durable ingest (`internal/services/inbound/filter.go` ApplyFilterDisposition → quarantine/reject + `inbound.spam_flagged`/`inbound.malware_detected`, never a silent drop), and the external filter consult webhook (`internal/services/webhook/filter_consult.go:62` ConsultFilter — synchronous, timeout-bounded, fail-open, escalate-only, HMAC + SSRF-guarded) |
+| Status fields | Backend: Verified (documented no-Sieve alternative) · Frontend: — · DB: Verified (spam_score/spam_reasons/threat_signature + route stamp columns) · API: Partial (disposition thresholds ride the admin-gated settings endpoints) · Security: Verified (consult never rescues a local flag; SSRF guard untouched) · Tests: Verified (53 W5 named tests + W1's routing battery) · Docs: Partial (`docs/docs/getting-started/configuration.md` Spam & Malware Filtering section) |
+| Final status | **COMPLETE** — via the documented no-Sieve alternative: policy hooks at the SMTP stages = the routing evaluator + ADR-006 filter chain (the Sieve interpreter itself stays its own record, SF-46, PLANNED) |
+| Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-B2.md. Wave OB-2 (2026-11-07, this tree): files + checks per the **OB-2 wave evidence** section (W1/W5). |
 
 ## Category C — Message filtering & policy (SF-46..SF-51)
 
@@ -473,9 +479,10 @@
 | Field | Value |
 |---|---|
 | Source | inventory §C SF-48 · ledger N/A |
-| Status fields | Backend: Missing · others: — |
-| Final status | **PLANNED (ADR-006 accepted · OB-2/5)** |
-| Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-CD.md. |
+| Implementation | **No-Sieve equivalent, Wave OB-2:** per-recipient delivery policy at final delivery = workspace-scoped `inbound_routes` rule actions (deliver/forward/webhook/quarantine, priority-ordered, first-match-wins) resolved per recipient at RCPT (`internal/services/inbound/router.go:90`) and executed post-ingest after the durable persist (`route_action.go:96`); release-from-quarantine re-runs the same evaluator and re-executes the matched action (`internal/services/inbound/quarantine.go`), failing closed |
+| Status fields | Backend: Verified (routing-evaluator equivalent) · Frontend: Partial (rules UI landed; rules-CRUD handler unregistered — same residual as SF-11) · DB: Verified · API: Partial (same `/inbound-routes` KNOWN_DRIFT residual as SF-11) · Security: Verified (workspace-scoped, fail-closed) · Tests: Verified (W1 routing battery + W3 release tests) · Docs: Partial |
+| Final status | **COMPLETE** — the documented no-Sieve equivalent is implemented: per-recipient final-delivery policy via the routing evaluator, not per-account Sieve scripts (per-account granularity arrives with ADR-003/004 accounts; SF-46 stays PLANNED as its own record) |
+| Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-CD.md. Wave OB-2 (2026-11-07, this tree): files + checks per the **OB-2 wave evidence** section (W1/W3/W7). |
 
 ### SF-49 — Header inspection/transformation (editheader, milter, hooks, A-R injection)
 | Field | Value |
@@ -499,9 +506,10 @@
 | Field | Value |
 |---|---|
 | Source | inventory §C SF-51 · ledger N/A |
-| Status fields | Backend: Missing · others: — |
-| Final status | **PLANNED (ADR-002/003/006 accepted · OB-2/3)** — quarantine design co-owned by ADR-002 (`inbound_quarantine` designed, table not yet built; V-CD) |
-| Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-CD.md. |
+| Implementation | Wave OB-2 (W3 — the table W3 was designed for is now built): `inbound_quarantine` model + workspace-scoped repo (status pending\|released\|deleted, reviewed_by/reviewed_at) additive-migrated (`internal/models/inbound_quarantine.go`, `internal/storage/repositories/inbound_quarantine_repo.go`); `QuarantineService` fills the W1 seam (`internal/services/inbound/quarantine.go:96` — idempotent per pending message; the message itself never moves, durable-first); release re-runs routing at the post-ingest point and re-executes the matched action (deliver/forward/webhook/quarantine), failing closed on no-route or lost domain verification; delete is permanent + audited (blobs + inbound row destroyed, tombstone to `deleted`, `inbound.quarantine_deleted` event). REST surface: `GET /workspaces/current/inbound-quarantine`, `POST .../{id}/release`, `DELETE .../{id}` (`internal/routes/inbound_quarantine_routes.go:42`) with requireEdit-gated mutations, scope-checked reads and envelope DTOs (`internal/handlers/inbound_quarantine_handler.go`); dashboard `web/src/views/inbound/Quarantine.vue` (+7 vitest specs, canEdit-gated, 422 fail-closed). Retention: `inbound_quarantine_retention_days` (default 30, 0 = forever) purging expired holds in `internal/cron/jobs/retention.go`. Wave W5 routes spam/malware dispositions into the same store (nil-route-safe, `quarantine.go:96-126`) |
+| Status fields | Backend: Verified · Frontend: Verified · DB: Verified (additive migration) · API: Verified (3 routes; contract golden regenerated, docs/implementation/api_routes.txt) · Security: Verified (edit-gated mutations, cross-workspace 404, conflicts 409, policy 422) · Tests: Verified (15 Go quarantine/retention tests + 7 vitest) · Docs: Partial |
+| Final status | **COMPLETE** — quarantine landed (Wave OB-2 W3): route-action holds and spam/malware holds share one review store with release (re-routes) / permanent delete. Known limitation recorded by W3: list summaries do one FindByID per row (page-size-bounded N+1; batch load noted for later) |
+| Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-CD.md. Wave OB-2 (2026-11-07, this tree): files + checks per the **OB-2 wave evidence** section (W3/W5/W7). |
 
 ## Category D — Queue & delivery administration (SF-52..SF-59)
 
@@ -1129,9 +1137,10 @@ Requirements documented in `docs/research/reforwarder-capability-audit.md` that 
 | Field | Value |
 |---|---|
 | Source | capability audit §1.1; todo.md reinstates INF-020 under Option B |
-| Status fields | Backend: Missing · others: — |
-| Final status | **PLANNED under ADR-002 (OB-2 return-path processing)** |
-| Evidence | VERIFIED (read-only code audit at 50e7f86) — full verdict: docs/audits/verification/V-M.md. |
+| Implementation | Wave OB-2 (W4): signed VERP return-path codec `internal/services/inbound/verp.go:115` EnvelopeFrom / `:139` Decode — `bounce+<uuid-hex>=<sig20hex>@<subdomain>.<sending-domain>`, sig = first 20 hex of HMAC-SHA256 over the full address (constant-time compare), 60-octet local part within RFC 5321's 64, forged payload/signature/host refused, feature-off = fully inert; gates `POSTA_RETURN_PATH_SUBDOMAIN` + `POSTA_RETURN_PATH_SECRET` (`internal/config/config.go`, empty subdomain = feature off). Envelope seam on **direct-to-MX** deliveries (`internal/worker/handler.go` envelopeSender; wired in both `cmd/posta/server.go` and `cmd/posta/worker.go`); signed bounce recipients accepted at RCPT before normal routing (`internal/services/inbound/smtp_server.go:161` allowlist — the bounce host is deliberately not a tenant mailbox domain; forged addresses fall through to the ordinary 550). Receiver side: durable-first system-bounce ingest, RFC 3464 DSN parse (`internal/services/inbound/dsn.go:115` ParseDSN — multipart/report, 8 MiB message / 1 MiB part caps, 100 recipient records, `ErrNotDSN` otherwise) and match-back (`internal/services/inbound/bounce.go`): failed → `bounced` email_event + hard Bounce row + the existing suppression chain; delivered → `delivered` event; delayed → transient, no event; idempotent per DSN record |
+| Status fields | Backend: Verified · Frontend: — · DB: Verified (reuses inbound_emails/emails/email_events/bounces/suppressions — no migration needed) · API: — · Security: Verified (HMAC-signed, forged refused, suppression layers reused unchanged) · Tests: Verified (31 W4 named tests across verp/dsn/bounce/handler; docker battery exit 0) · Docs: Verified (`docs/docs/getting-started/configuration.md` documents both env vars) |
+| Final status | **COMPLETE** — VERP + return-path processing landed (Wave OB-2 W4) with RFC 3464 DSN match-back. Documented residuals: relay-mode sends keep the upstream provider's envelope (ADR-001 — Posta is the responsible MTA only direct-to-MX), and DSN match-back scale tests remain (OB-2 tracker row) |
+| Evidence | VERIFIED (read-only code audit at 50e7f86) — full verdict: docs/audits/verification/V-M.md. Wave OB-2 (2026-11-07, this tree): files + checks per the **OB-2 wave evidence** section (W4). |
 
 ### CA-06 — Fallback broker in dev
 | Field | Value |
@@ -1181,8 +1190,42 @@ Verified chunks (read-only code audits, verdict files under `docs/audits/verific
 - 2026-11-07, Wave P3-4 (identity/security): **SF-35, SF-37, SF-67, SF-78, SF-91** PARTIAL → **COMPLETE** (app-password management surface, OAuth consumer tests, crypto refuse-without-key hardening, lookup-store unit tests); **GAP-12 closed** (todo.md:424) — recorded on SF-69, which stays COMPLETE. CA-03 and SF-04 already complete above.
 - 2026-11-07, Wave P3-5 (product surface): **SF-82** stays COMPLETE with its restore-verification residual executed live, **SF-89** PARTIAL → **COMPLETE** (minimal Web Push), **SF-90** PARTIAL → **COMPLETE** (batching + pending caps), **CA-02** PARTIAL → **COMPLETE** (wire-or-retire executed), **CA-06** PLANNED → **COMPLETE** (dev fallback broker). SF-50/SF-103 stay PARTIAL (evaluator unification deferred — noted on both records).
 - 2026-11-07, Wave OB-1 (outbound MTA foundation, landed in this tree; records reconciled this session against the MTA code): **SF-03, SF-06** → **COMPLETE** (587 MSA; MX preference/shuffle/null-MX/implicit); **SF-01, SF-02, SF-05, SF-12, SF-17, CA-04** PLANNED → **PARTIAL** (ESMTP client + MSA; extension negotiation; relay|direct per domain; MAIL FROM validation; hourly budget + msgs/connection; SMTPUTF8/8BITMIME); **SF-21 stays PLANNED** (honest: not implemented in OB-1); SF-07/09/16/43/108 stay PARTIAL with remaining scope re-worded to the post-OB-1 state; SF-49 verified unchanged (A-R composer COMPLETE, matches `internal/services/inbound/verify/authres.go` + its persistence/merge sites).
-- **Live tally after all recorded movements (uncommitted at 02666cc):** COMPLETE 46 · PARTIAL 37 · MISSING → PLANNED (Phase 3) 2 (SF-10, SF-26) · PLANNED (ADR-anchored, OB phases) 38 · BROKEN 0 — of 123 records. The frozen table above remains the 2026-11-07 verification-wave statistics; this line is the live state.
+- 2026-11-07, Wave OB-2 (inbound routing per ADR-002, all seven waves landed in this tree; Programme Tracker row → VERIFIED): **SF-11, SF-27, SF-45, SF-48, SF-51** PLANNED → **COMPLETE** (forwarding chain via inbound_routes + durable forwarder; ARC verify annotate-only; no-Sieve policy hooks via the routing evaluator + ADR-006 filter consult; per-recipient delivery-policy equivalent; quarantine) and **CA-05** PLANNED → **COMPLETE** (VERP + return-path with RFC 3464 DSN match-back); **SF-26** MISSING → PLANNED → **PARTIAL** (dependencies landed; ARF report generation still absent — noted on the record); **SF-32, SF-42** PLANNED → **PARTIAL** (iprev annotate slice / GTUBE slice complete; remainders OB-6); **GAP-47 closed** (ClamAV clamd INSTREAM hook — todo.md:544; GAP rows are tracked in todo.md / docs/project/FEATURE_GAP_ANALYSIS.md, not in this 123-record register, so they do not enter the tally) and **GAP-02 residual closed** (VERP bounce/return-path signal ingestion + DSN match-back — todo.md:427; scale tests remain on the tracker row). Full wave evidence: the **OB-2 wave evidence** section below. Known integration item recorded on SF-11/SF-48: the `/inbound-routes` rules-CRUD handler is not yet registered server-side (frontend client + UI landed, recorded KNOWN_DRIFT in `web/src/api/admin.spec.ts`).
+- **Live tally after all recorded movements (OB-2 landed, uncommitted):** COMPLETE 52 · PARTIAL 40 · MISSING → PLANNED (Phase 3) 1 (SF-10) · PLANNED (ADR-anchored, OB phases) 30 · BROKEN 0 — of 123 records. The frozen table above remains the 2026-11-07 verification-wave statistics; this line is the live state.
 
+
+
+## Programme Tracker (Option B execution — master tracker)
+
+**Vocabulary (mandated by the programme directive):** `PLANNED → IN PROGRESS → IMPLEMENTED → TESTING → VERIFIED → COMPLETE`. A record is COMPLETE only when its code, tests, migration, security posture, and independent verification all hold and its commit reference is recorded. Interrupted waves resume from this table's recorded state; the per-field statuses above remain the evidence layer.
+
+| Unit (ADR) | Scope | Programme status | Waves | Commit | Remaining work |
+|---|---|---|---|---|---|
+| OB-0 ADR gate (ADR-001..009) | 9 ADRs + 7 programme docs | COMPLETE | Phase 0 | `50e7f86` | — |
+| Phase-3 relay gaps (P3-1..P3-5) | SF-10/22/23/24/26/49/52/53/54/56/59/81/94/100/104, GAP-12/13/45, CA-02/03/06, SF-90/89/82/78/35/37/91/04 | VERIFIED | waves P3-1..P3-5 + verification V-A1..V-M | `02666cc`, `1552059` | SF-50/103 unification deferred (noted) |
+| OB-1 Outbound MTA (ADR-001) | SF-01/02/03/05/06/12/17/21 slices, CA-04 | VERIFIED | wave OB-1 + coordinator route wiring | `1552059` | pools/warm-up → OB-6; VERP → OB-2; MT-PRIORITY PLANNED |
+| OB-2 Inbound routing (ADR-002) | SF-11/14/26/27/32/45/48/51, CA-05, GAP-02 residual + GAP-47 | VERIFIED | W1 routing · W2 forwarding · W3 quarantine · W4 VERP/DSN · W5 spam/clamav · W6 ARC/iprev · W7 frontend — all waves landed (see OB-2 wave evidence below) | — *(left for the committer's hash)* | DSN match-back scale tests; ARC sealing never (by design) |
+| OB-3 Mailstore (ADR-003) | SF-14/75/77/78/79/80/83/112, GAP-45 | PLANNED | waves per ADR-003 §Decision | — | after OB-2 |
+| OB-4 IMAP/POP3 (ADR-004) | SF-85/86 | PLANNED | waves per ADR-004 §Decision | — | after OB-3 |
+| OB-5 Webmail (ADR-005) | CA-01 + admin surfaces | PLANNED | waves per ADR-005 §Decision | — | after OB-4 |
+| OB-6 Convergence (ADR-007/008/009) | SF-19/21/28/29/30/31/34/39-42/61/66/71/72/96/105/106/111/113 | PLANNED | waves per the three ADRs | — | after OB-5 |
+| Final reconciliation | register close-out, docs, battery+visual, FINAL_VERIFICATION_REPORT | PLANNED | coordinator | — | after OB-6 |
+
+**Recovery rule:** a wave killed by provider quota/concurrency leaves its state here; the relaunching run reads this table (plus the workflow journal) and continues from the first unfinished task — never from scratch.
+
+## OB-2 wave evidence (2026-11-07 — all seven waves landed in this tree)
+
+The OB-2 tracker row above is marked VERIFIED with its Commit cell deliberately left for the committer's hash. Per-wave scope, files, and checks as reported by the waves (each wave ran the named battery over the real tree itself; wave notes are also appended to `docs/project/STATUS_HISTORY.md` and `docs/project/BACKLOG.md` per the OB-1 precedent):
+
+- **W1 — routing foundation:** models `internal/models/inbound_route.go` + `internal/models/inbound_forward_task.go` (additive migration `internal/storage/migration/migration.go`), repos `internal/storage/repositories/inbound_route_repo.go` / `inbound_forward_task_repo.go` (parameterized, no SQL concatenation), engine `internal/services/inbound/router.go` (ResolveRecipient: first-match-wins, exact beats higher-priority catch-all, sub-address → base rule, verified-domain fail-closed, unknown → explicit default-reject), RCPT/DATA validation in `internal/services/inbound/smtp_server.go` (550 5.1.1 / 451 4.4.3; ingest re-check in `internal/services/inbound/service.go`), post-ingest actions `internal/services/inbound/route_action.go` (deliver/forward/webhook/quarantine; events route.matched, inbound.rejected, inbound.forward_queued, inbound.quarantined), route stamp `RouteID`/`RouteAction` on `internal/models/inbound_email.go`; guard in `internal/worker/inbound_handler.go` (route-owned actions skip the chained email.inbound dispatch). 21 named tests (`router_test.go`, `route_action_test.go`); `gofmt` drift fixed on 3 own files; ledger note appended to `docs/project/STATUS_HISTORY.md` (RF-F040/RF-B119 deliberately left To-do at W1 — no routes-CRUD surface yet).
+- **W2 — forwarding executor:** `internal/services/inbound/forwarder.go` (RunOnce with R-26 CAS claim + stale-running requeue R-03; system_forward re-send via the SystemMailer seam adapter in `internal/routes/routes.go` onto `internal/services/email/service.go` SendSystemForward — provenance stamped, `internal/services/email/system_forward_test.go`; `forwarded` event `internal/models/email_event.go` + `internal/services/emailhistory/{hooks,service}.go`; R-06 backoff, hop limit 3 with X-Posta-Forwarded-For accounting, per-target hourly/daily rate caps, confirmation gate `internal/models/inbound_forward_target.go` + `inbound_forward_target_repo.go`); routes `internal/routes/inbound_forward_routes.go` + `internal/handlers/inbound_forward_target_handler.go` (forward-targets CRUD + public `GET /inbound/forward-confirm/{token}`); cron sweep `internal/cron/jobs/inbound_forward_queue.go`; contract golden regenerated (`docs/implementation/api_routes.txt` +4). 17 named tests PASS with -race.
+- **W3 — quarantine:** `internal/models/inbound_quarantine.go` + `internal/storage/repositories/inbound_quarantine_repo.go` (additive migration), `internal/services/inbound/quarantine.go` (W1 seam fill; idempotent holds; release re-runs routing + re-executes the action; fail-closed; audited permanent delete), `internal/handlers/inbound_quarantine_handler.go` + `internal/routes/inbound_quarantine_routes.go` (list / release / delete), dashboard `web/src/views/inbound/Quarantine.vue` + `Quarantine.spec.ts` (7 vitest cases) + `web/src/api/inbound.ts`/`types.ts`, retention `inbound_quarantine_retention_days` (`internal/cron/jobs/retention.go` + `retention_quarantine_test.go`, settings provider + seeder). Battery exit 0 (44 packages ok under -race); 15 Go + 7 vitest tests; frontend 72/72; contract golden regenerated.
+- **W4 — VERP/DSN (CA-05, GAP-02 residual):** `internal/services/inbound/verp.go` (signed bounce codec), `internal/services/inbound/dsn.go` (RFC 3464 parser with bounded reads), `internal/services/inbound/bounce.go` (match-back → bounced/delivered events + suppression chain, idempotent per DSN record), gates `POSTA_RETURN_PATH_SUBDOMAIN`/`SECRET` in `internal/config/config.go`, envelope seam `internal/worker/handler.go` + wiring `cmd/posta/server.go` / `cmd/posta/worker.go`, RCPT bounce allowlist `internal/services/inbound/smtp_server.go` (top of the Rcpt chain — documented deviation: the bounce host is deliberately not a tenant mailbox domain, so an end-of-chain check would 550 signed bounces first). 31 named tests (`verp_test.go`, `dsn_test.go`, `bounce_test.go`, `handler_verp_test.go`); battery exit 0 (44 packages, 0 FAIL); go vet clean on touched packages; env docs in `docs/docs/getting-started/configuration.md`.
+- **W5 — spam/malware (GAP-47, SF-42 GTUBE slice):** `internal/services/spamfilter/` — `filter.go`, `scorer.go` (SPF/DKIM/DMARC verdicts via `internal/services/inbound/service.go` WaitAuthResults, header heuristics, sender reputation `reputation.go`), `dnsbl.go` (allowlisted zones only, empty = off), `gtube.go` (score 1000 → instant reject), `clamav.go` (clamd INSTREAM, 25 MiB cap, fail mode open/closed); dispositions `internal/services/inbound/filter.go` (ApplyFilterDisposition → quarantine via W3's store / rejected status, spam_score + spam_reasons + threat_signature columns on `internal/models/inbound_email.go`), external filter consult `internal/services/webhook/filter_consult.go` (fail-open, escalate-only), worker `internal/worker/inbound_filter.go` + `inbound_handler.go`, wiring `cmd/posta/server.go` newInboundFilter + `cmd/posta/worker.go`, settings `internal/services/{settings/provider.go,seeder/settings.go}`. 53 named tests; battery 44/44 packages ok under -race. Honest notes (recorded in STATUS_HISTORY): the filter runs after W1's ingest-time route actions so it cannot veto an already-queued forward/webhook; reputation SQL proven against the fake database/sql driver only (no live Postgres in the battery environment).
+- **W6 — ARC/iprev (SF-27, SF-32 annotate slice):** `internal/services/inbound/verify/arc.go` (RFC 8617 §5.2 chain validation, annotate-only, no sealing), `verify/dkimutil.go` (RFC 6376 primitives; canon pinned to the RFC's published empty-body SHA-256 vectors), `verify/iprev.go` (forward-confirmed rDNS), composer `verify/authres.go` (+`arc=`/`iprev=`; byte-identical output when the engines are off), additive columns `arc_result`/`arc_domain`/`iprev_result`/`iprev_ptr` on `internal/models/inbound_auth_result.go` (registered via the existing AutoMigrate row), gates `POSTA_INBOUND_ARC_ENABLED`/`POSTA_INBOUND_IPREV_ENABLED` default off (`verify_hook.go`). 43 named tests in the verify package + 4 hook-wiring tests; W6-scoped batteries green (dockerized golang:1.27, -race); the final full battery's only failures were W4's three in-flight DSN tests (fixed by W4 before close).
+- **W7 — frontend:** `web/src/api/inboundRoutes.ts` (rules + forward-targets clients), `web/src/views/inbound/InboundRoutes.vue` (+10 vitest cases in `InboundRoutes.spec.ts`), additive types in `web/src/api/types.ts`, router entry `web/src/router/index.ts` + nav item `web/src/layouts/DashboardLayout.vue`; the quarantine surface was verified as W3's landed work and not duplicated. type-check exit 0; vitest 82/82 (18 files); full docker battery exit 0 (all `./internal/...` packages ok, zero FAIL — the green run used MSYS_NO_PATHCONV=1 after the wave caught a mangled `-w /app` path producing a false pass). Recorded integration item: no backend handler registers `/inbound-routes` (grep zero hits under `internal/`) — the rules client targets are recorded in `web/src/api/admin.spec.ts` KNOWN_DRIFT per that file's documented workflow; one integration pass when the rules-CRUD handler lands. Ledger consolidation left to phase close (concurrent in-flight ledgers).
+
+GAP ledger note: **GAP-47** (antivirus hook) and the **GAP-02 residual** (bounce/return-path signal ingestion) are tracked in `todo.md` (:544 and :427) and `docs/project/FEATURE_GAP_ANALYSIS.md` (P3-13 and the GAP-02 residual entry) — they are not rows of this 123-record register and do not enter the tally; their closure is recorded here, on the OB-2 tracker row, and in the wave reports.
 
 ## Verification record (Phase 1 waves — executed 2026-11-07)
 

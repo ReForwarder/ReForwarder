@@ -42,6 +42,7 @@ type RetentionCleanupJob struct {
 	whDeliveryAttemptRepo *repositories.WebhookDeliveryAttemptRepository
 	trackingRepo          *repositories.TrackingRepository
 	inboundEmailRepo      *repositories.InboundEmailRepository
+	inboundQuarantineRepo *repositories.InboundQuarantineRepository
 	messageRepo           *repositories.MessageRepository
 	formRepo              *repositories.FormRepository
 	notificationRepo      *repositories.NotificationRepository
@@ -72,6 +73,15 @@ func NewRetentionCleanupJob(
 // When nil, inbound emails are not subject to retention cleanup.
 func (j *RetentionCleanupJob) SetInboundEmailRepo(r *repositories.InboundEmailRepository) {
 	j.inboundEmailRepo = r
+}
+
+// SetInboundQuarantineRepo enables the quarantine family (OB-2, ADR-002 §3):
+// records (and messages still held pending on them) purge under
+// inbound_quarantine_retention_days — default 30, 0 keeps forever. Requires
+// the inbound email repo: a pending hold's message is purged together with
+// its record, so both repos must be wired for the family to run.
+func (j *RetentionCleanupJob) SetInboundQuarantineRepo(r *repositories.InboundQuarantineRepository) {
+	j.inboundQuarantineRepo = r
 }
 
 func (j *RetentionCleanupJob) SetMessageRepo(r *repositories.MessageRepository) {
@@ -429,6 +439,54 @@ func (j *RetentionCleanupJob) Run(_ context.Context, _ *asynq.Client) error {
 			logger.Error("retention cleanup: failed to delete old security events", "error", err)
 		} else if deleted > 0 {
 			logger.Info("retention cleanup: deleted old security events", "count", deleted, "older_than_days", securityRetention)
+		}
+	}
+
+	// Quarantine family (OB-2, ADR-002 §3; lifecycle per ADR-008): the
+	// inbound_quarantine_retention_days window (default 30, 0 = forever)
+	// bounds how long a held message and its review record live. A message
+	// still held pending is purged together with its record — retention
+	// expiry on a hold is an automatic permanent deletion — so its blobs and
+	// row go first, then every expired record (including review tombstones).
+	if j.inboundQuarantineRepo != nil && j.inboundEmailRepo != nil {
+		if qRetention := j.settings.InboundQuarantineRetentionDays(); qRetention > 0 {
+			before := time.Now().AddDate(0, 0, -qRetention)
+			if heldIDs, err := j.inboundQuarantineRepo.ExpiredPendingInboundEmailIDs(before, 500); err != nil {
+				logger.Error("retention cleanup: failed to list expired held messages", "error", err)
+			} else {
+				for _, id := range heldIDs {
+					rec, err := j.inboundEmailRepo.FindByID(id)
+					if err != nil {
+						// Already gone — the record deletion below still runs.
+						continue
+					}
+					if j.blobStore != nil {
+						if rec.AttachmentsJSON != "" {
+							var atts []models.InboundAttachmentMeta
+							if err := json.Unmarshal([]byte(rec.AttachmentsJSON), &atts); err == nil {
+								for _, a := range atts {
+									if a.StorageKey != "" {
+										_ = j.blobStore.Delete(context.Background(), a.StorageKey)
+									}
+								}
+							}
+						}
+						if rec.RawStorageKey != "" {
+							_ = j.blobStore.Delete(context.Background(), rec.RawStorageKey)
+						}
+					}
+					if err := j.inboundEmailRepo.Delete(id); err != nil {
+						logger.Error("retention cleanup: failed to delete expired held message", "inbound_id", id, "error", err)
+					}
+				}
+			}
+
+			deleted, err := j.inboundQuarantineRepo.DeleteOlderThan(before)
+			if err != nil {
+				logger.Error("retention cleanup: failed to delete old quarantine records", "error", err)
+			} else if deleted > 0 {
+				logger.Info("retention cleanup: deleted old quarantine records", "count", deleted, "older_than_days", qRetention)
+			}
 		}
 	}
 

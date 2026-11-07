@@ -27,6 +27,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	errorhandlers "github.com/goposta/posta/internal/error_handlers"
 	"github.com/goposta/posta/internal/storage"
@@ -200,6 +201,19 @@ type Config struct {
 	InboundSMTPRateLimit  int // per-IP max sessions per window; 0 disables
 	InboundSMTPRateWindow int // rate-limit window in seconds
 
+	// Spam & malware filtering (OB-2, ADR-006). Thresholds are
+	// admin-configurable platform settings (spam_score_quarantine /
+	// spam_score_reject); these environment keys gate the machinery itself.
+	SpamFilterEnabled       bool          // POSTA_SPAM_FILTER_ENABLED, default true
+	SpamDNSBLZones          string        // POSTA_SPAM_DNSBL_ZONES, allowlisted zones, empty disables
+	SpamExternalFilter      bool          // POSTA_SPAM_EXTERNAL_FILTER_ENABLED, default false
+	SpamExternalFilterEvent string        // POSTA_SPAM_EXTERNAL_FILTER_EVENT, default email.inbound.filter
+	SpamExternalFilterTO    time.Duration // POSTA_SPAM_EXTERNAL_FILTER_TIMEOUT seconds, default 5
+	ClamAVHost              string        // POSTA_CLAMAV_HOST, empty disables scanning
+	ClamAVPort              int           // POSTA_CLAMAV_PORT, default 3310
+	ClamAVTimeout           time.Duration // POSTA_CLAMAV_TIMEOUT seconds, default 30
+	ClamAVFailMode          string        // POSTA_CLAMAV_FAIL_MODE: open (default) | closed
+
 	// Web form message settings
 	MessagesEnabled           bool
 	MessagesMaxBodyBytes      int64
@@ -234,6 +248,17 @@ type Config struct {
 	// record matches the outbound bind IP (domain health surfaces the
 	// guidance). Delivery mode itself is per-domain configuration.
 	MTAEhloName string
+
+	// Return-path / VERP (OB-2, ADR-002 decision 4, CA-05). ReturnPathSubdomain
+	// is the subdomain label prepended to each sending domain to form the
+	// bounce host — e.g. "bounce" turns sender domain mail.example.com into
+	// bounce.mail.example.com. Empty (the default) keeps the feature fully
+	// off: outbound keeps today's envelope and the inbound receiver accepts
+	// no bounce addresses. ReturnPathSecret keys the HMAC that authenticates
+	// bounce addresses (they cannot be forged without it); the feature only
+	// activates when both values are set.
+	ReturnPathSubdomain string
+	ReturnPathSecret    string
 
 	// Submission listener (SF-03, gated): a standards-compliant MSA on port
 	// 587 that authenticates against SMTP relay credentials and feeds
@@ -485,6 +510,17 @@ func New() *Config {
 		InboundSMTPRateLimit:  goutils.EnvInt("POSTA_INBOUND_SMTP_RATE_LIMIT", 60),
 		InboundSMTPRateWindow: goutils.EnvInt("POSTA_INBOUND_SMTP_RATE_WINDOW", 60),
 
+		// Spam & malware filtering (OB-2, ADR-006).
+		SpamFilterEnabled:       goutils.EnvBool("POSTA_SPAM_FILTER_ENABLED", true),
+		SpamDNSBLZones:          goutils.Env("POSTA_SPAM_DNSBL_ZONES", ""),
+		SpamExternalFilter:      goutils.EnvBool("POSTA_SPAM_EXTERNAL_FILTER_ENABLED", false),
+		SpamExternalFilterEvent: goutils.Env("POSTA_SPAM_EXTERNAL_FILTER_EVENT", "email.inbound.filter"),
+		SpamExternalFilterTO:    time.Duration(goutils.EnvInt("POSTA_SPAM_EXTERNAL_FILTER_TIMEOUT", 5)) * time.Second,
+		ClamAVHost:              goutils.Env("POSTA_CLAMAV_HOST", ""),
+		ClamAVPort:              goutils.EnvInt("POSTA_CLAMAV_PORT", 3310),
+		ClamAVTimeout:           time.Duration(goutils.EnvInt("POSTA_CLAMAV_TIMEOUT", 30)) * time.Second,
+		ClamAVFailMode:          goutils.Env("POSTA_CLAMAV_FAIL_MODE", "open"),
+
 		MessagesEnabled:           goutils.EnvBool("POSTA_MESSAGES_ENABLED", false),
 		MessagesMaxBodyBytes:      int64(goutils.EnvInt("POSTA_MESSAGES_MAX_BODY_BYTES", 65536)),
 		MessagesMaxAttachSize:     int64(goutils.EnvInt("POSTA_MESSAGES_MAX_ATTACH_SIZE", 5242880)),
@@ -510,6 +546,11 @@ func New() *Config {
 
 		// Outbound MTA (OB-1): EHLO name for direct-to-MX sessions.
 		MTAEhloName: goutils.Env("POSTA_MTA_EHLO_NAME", ""),
+
+		// Return-path / VERP (OB-2, ADR-002 decision 4): empty subdomain =
+		// feature off (the default; zero behavior change).
+		ReturnPathSubdomain: strings.ToLower(strings.TrimSpace(goutils.Env("POSTA_RETURN_PATH_SUBDOMAIN", ""))),
+		ReturnPathSecret:    goutils.Env("POSTA_RETURN_PATH_SECRET", ""),
 
 		// Submission listener (SF-03): gated MSA on 587, off by default.
 		SubmissionEnabled:        goutils.EnvBool("POSTA_SUBMISSION_ENABLED", false),
