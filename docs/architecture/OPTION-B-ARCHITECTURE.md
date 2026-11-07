@@ -55,7 +55,7 @@ ReForwarder expands from an email-marketing control plane with relay-based sendi
 | 3 | Mailstore (folders/UIDs/flags, FTS, dedup+GC, encryption, quotas, retention) | 003, 008 | SF-75/78/79/80/83/112 + GAP-13/45 |
 | 4 | IMAP4rev1 + POP3 (app-password auth, TLS, limits, audit) | 004 | SF-85/86 |
 | 5 | Webmail + mailbox administration (Vue area + REST) | 005 | CA-01 + SF-65/72/80 admin surfaces |
-| 6 | Convergence (DNS automation, ACME, IP pools/warm-up/reputation, MTA-STS/TLS-RPT, roles/tenants/SCIM, JMAP evaluation, observability completion) | 007, 008, 009 | SF-28/29/31/34/39-42/61/66/71/72/96/105/106/113 + GAP-08/49/50 |
+| 6 | Convergence (DNS automation, ACME, IP pools/warm-up/reputation, MTA-STS/TLS-RPT, roles/tenants/SCIM, JMAP + groupware/file-storage evaluations, observability completion) | 007, 008, 009 | SF-28/29/31/34/39-42/61/66/71/72/96/105/106/111/112/113 + GAP-08/49/50 |
 
 Parallel track (not phase-gated): the **relay-architecture gaps** from the parity register's Phase-3 pool (SF-10 DSNs, SF-22/23/24 verification engines, SF-52/54/56 queue ops, SF-100 settings history, GAP-13/45, CA-02/03/06, …) — implemented alongside Phase 1 wherever file ownership allows (per the user's directive: "implement all features that can safely be completed within the existing relay architecture in parallel where dependencies permit").
 
