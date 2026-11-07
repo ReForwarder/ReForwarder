@@ -180,27 +180,29 @@ flowchart TD
 
 ## Phase 0 — Repository re-audit and architecture decisions (must happen first)
 
-- [ ] Inspect current branch, HEAD, working tree; reconcile the 7 audit docs with actual code (evidence-backed current-state matrix; include `7f445f2` + in-flight work per §0)
-- [ ] Verify existing SMTP relay, inbound receiver, queue, DKIM, provider-event ingestion, webhook behavior at HEAD
-- [ ] Record current migrations, message models, event contracts, tenant boundaries
-- [ ] Identify what is reusable vs must be isolated
-- [ ] ADR-001 — Outbound MTA (direct-to-MX + upstream relay modes, transport queues, retries, rate limits, IP pools, DKIM, TLS, deferrals, delivery events, ops admin)
-- [ ] ADR-002 — Inbound SMTP (acceptance, recipient validation, domain routing, aliases, forwarding, catch-all, spam/malware, quarantine, durable local delivery)
-- [ ] ADR-003 — Mailbox storage (message identity, MIME storage, folders, flags, quotas, concurrent access, expunge, search, attachments, retention, backup — **not** the transactional `Email` model)
-- [ ] ADR-004 — IMAP and POP3 (implementations, auth, TLS, connection limits, sync, client compatibility)
-- [ ] ADR-005 — Webmail (frontend boundaries, auth integration, compose/send, attachments, folders, search, sessions)
-- [ ] ADR-006 — Spam and malware (content-filtering boundary, quarantine, abuse detection — **distinct from the existing network security engine**)
-- [ ] ADR-007 — DNS and deliverability (MX, SPF, DKIM, DMARC, PTR, FCrDNS, TLS certificates, verification, warm-up, reputation)
-- [ ] ADR-008 — Data and event ownership (source of truth per entity/store)
-- [ ] ADR-009 — Deployment topology (single-node + future multi-node, health, restarts, upgrades, backups, DR)
-- [ ] Create `docs/architecture/OPTION-B-ARCHITECTURE.md` — target architecture and system boundaries
-- [ ] Create `docs/architecture/ADRs/ADR-001-outbound-mta.md` … `ADR-009-deployment.md` (9 files)
-- [ ] Create `docs/architecture/COMPONENT-MATRIX.md` — candidates, licenses, maturity, maintenance, integration costs, trade-offs
-- [ ] Create `docs/architecture/DATA-OWNERSHIP.md` — source of truth for every entity and store
-- [ ] Create `docs/architecture/MESSAGE-LIFECYCLE.md` — outbound, inbound, bounce, quarantine, mailbox-delivery flows (14 designs below)
-- [ ] Create `docs/architecture/MIGRATION-PLAN.md` — compatibility, migrations, rollback
-- [ ] Create `docs/architecture/IMPLEMENTATION-ROADMAP.md` — dependency-aware tickets + acceptance criteria
-- [ ] Create `docs/architecture/RISK-REGISTER.md` — reliability, security, deliverability, operational, licensing risks
+> **DONE 2026-11-07** (Option B programme authorized by the user; ADRs Accepted). ADRs live flat at `docs/architecture/ADR-001-outbound-mta.md` … `ADR-009-deployment-topology.md` (no `ADRs/` subfolder — noted deviation from the original path sketch). Repository re-audit evidence: `docs/audits/STALWART_FEATURE_PARITY_AUDIT.md` (115-record ledger, verification waves in flight) + `docs/audits/STALWART_SOURCE_REGISTER.md`.
+
+- [x] Inspect current branch, HEAD, working tree; reconcile the 7 audit docs with actual code (evidence-backed current-state matrix; include `7f445f2` + in-flight work per §0) — pre-flight `482d10b` recorded; reconciliation live in the parity register
+- [x] Verify existing SMTP relay, inbound receiver, queue, DKIM, provider-event ingestion, webhook behavior at HEAD — 2026-11-07 acceptance audit (commit `27c418a`) + verification waves V-B1/V-B2 at `482d10b`
+- [x] Record current migrations, message models, event contracts, tenant boundaries — `docs/architecture/DATA-OWNERSHIP.md` + source register
+- [x] Identify what is reusable vs must be isolated — `docs/architecture/COMPONENT-MATRIX.md` §2
+- [x] ADR-001 — Outbound MTA (direct-to-MX + upstream relay modes, transport queues, retries, rate limits, IP pools, DKIM, TLS, deferrals, delivery events, ops admin)
+- [x] ADR-002 — Inbound SMTP (acceptance, recipient validation, domain routing, aliases, forwarding, catch-all, spam/malware, quarantine, durable local delivery)
+- [x] ADR-003 — Mailbox storage (message identity, MIME storage, folders, flags, quotas, concurrent access, expunge, search, attachments, retention, backup — **not** the transactional `Email` model)
+- [x] ADR-004 — IMAP and POP3 (implementations, auth, TLS, connection limits, sync, client compatibility)
+- [x] ADR-005 — Webmail (frontend boundaries, auth integration, compose/send, attachments, folders, search, sessions)
+- [x] ADR-006 — Spam and malware (content-filtering boundary, quarantine, abuse detection — **distinct from the existing network security engine**)
+- [x] ADR-007 — DNS and deliverability (MX, SPF, DKIM, DMARC, PTR, FCrDNS, TLS certificates, verification, warm-up, reputation)
+- [x] ADR-008 — Data and event ownership (source of truth per entity/store)
+- [x] ADR-009 — Deployment topology (single-node + future multi-node, health, restarts, upgrades, backups, DR)
+- [x] Create `docs/architecture/OPTION-B-ARCHITECTURE.md` — target architecture and system boundaries
+- [x] Create the nine ADR files (see path note above)
+- [x] Create `docs/architecture/COMPONENT-MATRIX.md` — candidates, licenses, maturity, maintenance, integration costs, trade-offs
+- [x] Create `docs/architecture/DATA-OWNERSHIP.md` — source of truth for every entity and store
+- [x] Create `docs/architecture/MESSAGE-LIFECYCLE.md` — outbound, inbound, bounce, quarantine, mailbox-delivery flows (14 designs below)
+- [x] Create `docs/architecture/MIGRATION-PLAN.md` — compatibility, migrations, rollback
+- [x] Create `docs/architecture/IMPLEMENTATION-ROADMAP.md` — dependency-aware tickets + acceptance criteria
+- [x] Create `docs/architecture/RISK-REGISTER.md` — reliability, security, deliverability, operational, licensing risks
 
 **Exit criteria:** approved architecture, component-selection criteria, protocol boundaries, data ownership, migration plan. **No large feature implementation yet.**
 **Architecture-only rules:** no feature implementation, no production-code changes, no schema changes, no new dependencies, no destructive commands; cite exact files/symbols for current-state claims; label facts vs recommendations vs assumptions.
