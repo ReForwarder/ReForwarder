@@ -183,6 +183,39 @@ Where email attachments are stored. Leave `POSTA_BLOB_PROVIDER` empty to disable
 | `POSTA_INBOUND_SMTP_RATE_LIMIT` | `60` | Per-IP max SMTP sessions per window (`0` disables) |
 | `POSTA_INBOUND_SMTP_RATE_WINDOW` | `60` | Rate-limit window in seconds |
 
+## Return Path (VERP bounces)
+
+Off by default: with the subdomain unset, outbound keeps today's envelope and the
+receiver accepts no bounce addresses (zero behavior change). When enabled, direct-to-MX
+deliveries carry the signed VERP envelope `bounce+<message-uuid>+sig>@<subdomain>.<sending-domain>`;
+bounces arriving at those addresses are durably ingested as system messages, parsed as
+RFC 3464 delivery-status notifications, and matched back to the original message's
+timeline (`email_events` bounced/delivered truth; permanent failures feed the existing
+suppression chain).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `POSTA_RETURN_PATH_SUBDOMAIN` | — (off) | Subdomain label prepended to sending domains to form the bounce host (e.g. `bounce` → `bounce.mail.example.com`). Empty disables the feature entirely |
+| `POSTA_RETURN_PATH_SECRET` | — | HMAC secret authenticating bounce addresses (they cannot be forged without it). Required together with the subdomain for the feature to activate |
+
+## Spam & Malware Filtering
+
+Runs in the ingest worker after durable ingest (never in the SMTP session). Score
+thresholds are admin-configurable platform settings (`spam_score_quarantine`,
+default `5`; `spam_score_reject`, default `10`) rather than environment keys.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `POSTA_SPAM_FILTER_ENABLED` | `true` | Master toggle for the spam/malware step (ADR-006) |
+| `POSTA_SPAM_DNSBL_ZONES` | — (off) | Comma-separated DNSBL zones queried for the connecting IP. Only allowlisted zones are honored (`zen.spamhaus.org`, `bl.spamcop.net`, `b.barracudacentral.org`, `dnsbl.sorbs.net`, `psbl.surriel.com`); anything else is dropped at startup |
+| `POSTA_SPAM_EXTERNAL_FILTER_ENABLED` | `false` | Synchronously consult webhooks subscribed to the filter event before the disposition (fail-open; a reply can only escalate) |
+| `POSTA_SPAM_EXTERNAL_FILTER_EVENT` | `email.inbound.filter` | The webhook event the filter consult fires |
+| `POSTA_SPAM_EXTERNAL_FILTER_TIMEOUT` | `5` | Seconds to await the external filter reply |
+| `POSTA_CLAMAV_HOST` | — (off) | clamd TCP host; when unset, no malware scanning happens |
+| `POSTA_CLAMAV_PORT` | `3310` | clamd TCP port |
+| `POSTA_CLAMAV_TIMEOUT` | `30` | Per-scan timeout in seconds |
+| `POSTA_CLAMAV_FAIL_MODE` | `open` | What a scanner outage means: `open` (log and continue) or `closed` (quarantine unscanned content) |
+
 ## Web Form Messages
 
 | Variable | Default | Description |

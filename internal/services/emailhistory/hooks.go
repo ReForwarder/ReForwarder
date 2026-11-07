@@ -58,6 +58,16 @@ func RecordBounced(r *Recorder, em *models.Email, reason, providerEventID string
 	})
 }
 
+// RecordForwarded records the forwarding provenance event on a system_forward
+// copy's timeline (OB-2, ADR-002 decision 2): the inbound forwarding executor
+// enqueued this message as a re-send of a durably stored inbound original.
+func RecordForwarded(r *Recorder, em *models.Email, metadata map[string]any) {
+	r.recordFromEmail(em, EventInput{
+		Type:     models.EmailEventForwarded,
+		Metadata: metadata,
+	})
+}
+
 // providerTracking marks events recorded by the tracking pixel/redirect
 // handlers rather than by an ESP integration.
 const providerTracking = "tracking"

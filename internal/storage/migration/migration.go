@@ -44,6 +44,10 @@ func Run(db *gorm.DB) error {
 		&models.Email{},
 		&models.InboundEmail{},
 		&models.InboundAuthResult{},
+		&models.InboundRoute{},         // OB-2: routing rules (ADR-002 decision 1)
+		&models.InboundForwardTask{},   // OB-2: durable forwarding queue (ADR-002 decision 2)
+		&models.InboundForwardTarget{}, // OB-2: confirmed forward destinations (ADR-002 decision 2)
+		&models.InboundQuarantine{},    // OB-2: quarantine review (ADR-002 decision 3)
 		&models.DMARCReport{},
 		&models.StyleSheet{},
 		&models.Template{},

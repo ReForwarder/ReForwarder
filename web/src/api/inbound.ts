@@ -1,5 +1,5 @@
 import api from './client'
-import type { ApiResponse, PaginatedResponse, InboundEmail } from './types'
+import type { ApiResponse, PaginatedResponse, InboundEmail, InboundQuarantine } from './types'
 
 export interface InboundListParams {
   page?: number
@@ -53,5 +53,28 @@ export const inboundApi = {
   streamUrl() {
     const ws = workspaceParam()
     return `/api/v1/workspaces/current/inbound-stream${ws ? `?${ws}` : ''}`
+  },
+}
+
+export interface QuarantineListParams {
+  page?: number
+  size?: number
+  status?: string
+  domain_id?: number
+}
+
+// Quarantine review surface (OB-2, ADR-002 decision 3): held messages,
+// release (re-runs routing), permanent delete.
+export const inboundQuarantineApi = {
+  list(params: QuarantineListParams = {}) {
+    return api.get<PaginatedResponse<InboundQuarantine>>('/workspaces/current/inbound-quarantine', {
+      params: { page: 0, size: 20, ...params },
+    })
+  },
+  release(id: number) {
+    return api.post<ApiResponse<InboundQuarantine>>(`/workspaces/current/inbound-quarantine/${id}/release`)
+  },
+  delete(id: number) {
+    return api.delete<ApiResponse<InboundQuarantine>>(`/workspaces/current/inbound-quarantine/${id}`)
   },
 }

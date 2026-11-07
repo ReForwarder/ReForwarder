@@ -35,11 +35,13 @@ import (
 )
 
 // Message-level SPF/DKIM/DMARC verification (SF-22/SF-23/SF-24, ADR-002
-// Phase-3 slice). The engines run ASYNCHRONOUSLY after durable ingest — the
-// SMTP 250 and the webhook 202 never wait on DNS — and persist one verdict
-// row per message into inbound_auth_results. The DMARC disposition is a
-// RECOMMENDATION recorded for the ADR-002 routing engine; nothing here
-// rejects, bounces or quarantines mail.
+// Phase-3 slice) plus the optional ARC and iprev annotations (SF-27 / SF-32
+// partial, ADR-002 decision 6). The engines run ASYNCHRONOUSLY after durable
+// ingest — the SMTP 250 and the webhook 202 never wait on DNS — and persist
+// one verdict row per message into inbound_auth_results. The DMARC
+// disposition is a RECOMMENDATION recorded for the ADR-002 routing engine;
+// nothing here rejects, bounces or quarantines mail — ARC and iprev are
+// annotate-only by decision.
 //
 // Injection surface (SF-49 slice): the composed RFC 8601
 // Authentication-Results value (authserv-id = the instance hostname) is
@@ -55,16 +57,25 @@ import (
 // no inbound service is constructed, so nothing runs either way.
 const envInboundVerify = "POSTA_INBOUND_VERIFY"
 
+// envInboundARC / envInboundIPRev gate the optional ARC (SF-27) and iprev
+// (SF-32 partial) engines (ADR-002 decision 6). Both default to FALSE —
+// explicit opt-in — so an upgrade changes nothing for existing deployments.
+const (
+	envInboundARC   = "POSTA_INBOUND_ARC_ENABLED"
+	envInboundIPRev = "POSTA_INBOUND_IPREV_ENABLED"
+)
+
 // verificationTimeout bounds one message's DNS-heavy evaluation. SPF is
 // budget-limited to 10 lookups, DKIM to its selector lookups, DMARC to two;
 // the overall wall clock still needs a cap.
 const verificationTimeout = 30 * time.Second
 
-// EnableVerification attaches the SPF/DKIM/DMARC verification engines to the
-// service. db is the shared database handle the verdicts persist to;
-// authservID is the RFC 8601 Authentication-Results identifier (the instance
-// hostname — callers pass the inbound hostname). Safe to call twice; the
-// last handle wins. Mirrors EnableDMARC.
+// EnableVerification attaches the SPF/DKIM/DMARC verification engines (and
+// the optional ARC/iprev annotations) to the service. db is the shared
+// database handle the verdicts persist to; authservID is the RFC 8601
+// Authentication-Results identifier (the instance hostname — callers pass
+// the inbound hostname). Safe to call twice; the last handle wins. Mirrors
+// EnableDMARC.
 func (s *Service) EnableVerification(db *gorm.DB, authservID string) {
 	if db == nil {
 		return
@@ -77,9 +88,11 @@ func (s *Service) EnableVerification(db *gorm.DB, authservID string) {
 		}
 	}
 	s.verifier = &verifyProcessor{
-		db:         db,
-		authservID: authservID,
-		enabled:    verificationEnabled(),
+		db:           db,
+		authservID:   authservID,
+		enabled:      verificationEnabled(),
+		arcEnabled:   arcEnabled(),
+		iprevEnabled: iprevEnabled(),
 	}
 }
 
@@ -93,12 +106,33 @@ func verificationEnabled() bool {
 	}
 }
 
+// envExplicitlyOn parses an opt-in flag: only the affirmative spellings
+// enable the feature (default false).
+func envExplicitlyOn(env string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(env))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// arcEnabled reads POSTA_INBOUND_ARC_ENABLED (default false).
+func arcEnabled() bool { return envExplicitlyOn(envInboundARC) }
+
+// iprevEnabled reads POSTA_INBOUND_IPREV_ENABLED (default false).
+func iprevEnabled() bool { return envExplicitlyOn(envInboundIPRev) }
+
 // verifyProcessor owns one service's verification pipeline: DNS seams for
-// tests, the gorm handle for persistence, the authserv-id for A-R.
+// tests, the gorm handle for persistence, the authserv-id for A-R, and the
+// config gates for the optional ARC/iprev engines.
 type verifyProcessor struct {
 	db         *gorm.DB
 	authservID string
 	enabled    bool
+
+	arcEnabled   bool
+	iprevEnabled bool
 
 	// Test seams (nil → the Go default resolver).
 	lookupTXT  func(ctx context.Context, name string) ([]string, error)
@@ -139,6 +173,8 @@ func (v *verifyProcessor) run(rec *models.InboundEmail, raw []byte, envelopeFrom
 		EnvelopeFrom: envelopeFrom,
 		Raw:          raw,
 		SampleKey:    sampleKey,
+		ARCEnabled:   v.arcEnabled,
+		IPRevEnabled: v.iprevEnabled,
 	})
 	header := verify.AuthenticationResults(v.authservID, results)
 	v.persist(rec, results, header)
@@ -172,7 +208,9 @@ func (s seamResolver) LookupMX(ctx context.Context, name string) ([]*net.MX, err
 
 // persist stores the verdict row. The unique inbound_id index plus
 // ON CONFLICT DO NOTHING makes re-verification (or a racing re-ingest)
-// idempotent: first verdict wins, nothing is duplicated.
+// idempotent: first verdict wins, nothing is duplicated. ARC/iprev columns
+// stay empty ("") when those engines are disabled — an empty value is "not
+// evaluated", distinct from "none" (evaluated, nothing found).
 func (v *verifyProcessor) persist(rec *models.InboundEmail, results verify.Results, header string) {
 	row := &models.InboundAuthResult{
 		UserID:            rec.UserID,
@@ -191,12 +229,50 @@ func (v *verifyProcessor) persist(rec *models.InboundEmail, results verify.Resul
 		DMARCDisposition:  orNone(results.DMARC.Disposition),
 		DMARCPolicyDomain: trunc(results.DMARC.PolicyDomain, 255),
 		DMARCPolicy:       trunc(results.DMARC.Policy, 20),
+		ARCResult:         arcResult(results.ARC),
+		ARCDomain:         arcDomain(results.ARC),
+		IPRevResult:       iprevResult(results.IPRev),
+		IPRevPTR:          iprevPTR(results.IPRev),
 		AuthResultsHeader: header,
 	}
 	if err := v.db.Clauses(clause.OnConflict{DoNothing: true}).Create(row).Error; err != nil {
 		logger.Warn("inbound verification: failed to persist auth results",
 			"inbound_id", rec.UUID, "error", err)
 	}
+}
+
+// arcResult / iprevResult map a nil (not evaluated) verdict to "" and an
+// evaluated one through orNone — the empty column means "engine off",
+// distinct from "none" (engine ran, nothing found).
+func arcResult(v *verify.ARCVerdict) string {
+	if v == nil {
+		return ""
+	}
+	return orNone(v.Result)
+}
+
+func iprevResult(v *verify.IPRevVerdict) string {
+	if v == nil {
+		return ""
+	}
+	return orNone(v.Result)
+}
+
+// arcDomain extracts the most recent seal's d= from an evaluated ARC
+// verdict.
+func arcDomain(v *verify.ARCVerdict) string {
+	if v == nil {
+		return ""
+	}
+	return trunc(v.Domain, 255)
+}
+
+// iprevPTR extracts the confirming PTR host from an evaluated iprev verdict.
+func iprevPTR(v *verify.IPRevVerdict) string {
+	if v == nil {
+		return ""
+	}
+	return trunc(v.PTR, 255)
 }
 
 // storedHeader returns the persisted Authentication-Results header value for

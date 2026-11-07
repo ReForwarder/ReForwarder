@@ -77,6 +77,19 @@ type Service struct {
 	producer        Enqueuer
 	bus             *eventbus.EventBus
 	threadRouter    ThreadRouter
+	// router evaluates inbound routing rules (OB-2, ADR-002 decision 1);
+	// nil until SetRouter, and ingestion then behaves exactly as before
+	// (no route validation, everything delivers).
+	router *Router
+	// forwardTasks is the durable forwarding queue (ADR-002 decision 2);
+	// the forwarding executor (wave 2) consumes the rows.
+	forwardTasks ForwardTaskQueue
+	// webhooks dispatches route action=webhook through the existing HMAC
+	// webhook machinery.
+	webhooks WebhookDispatcher
+	// quarantine persists quarantine rows for route action=quarantine; nil
+	// until the quarantine wave wires a store.
+	quarantine QuarantineStore
 	// dmarc ingests RFC 7489 aggregate reports from the inbound pipeline
 	// (R-17); nil until EnableDMARC, and ingestion then behaves exactly as
 	// before.
@@ -84,7 +97,15 @@ type Service struct {
 	// verifier runs message-level SPF/DKIM/DMARC verification after durable
 	// ingest (SF-22/23/24); nil until EnableVerification, and ingestion then
 	// behaves exactly as before.
-	verifier      *verifyProcessor
+	verifier *verifyProcessor
+	// verp encodes/validates the VERP bounce addresses of the return-path
+	// feature (OB-2, ADR-002 decision 4); nil or disabled until SetVerp, and
+	// ingestion then behaves exactly as before (no bounce allowlist).
+	verp *Verp
+	// dsn matches RFC 3464 delivery reports back to the original outbound
+	// message (OB-2 decision 4); nil until EnableDSN, and bounce ingestion
+	// then behaves exactly as before (no match-back).
+	dsn           *dsnMatcher
 	maxMsgSize    int64
 	maxAttachSize int64
 	onReceived    func(source models.InboundSource)
@@ -127,6 +148,49 @@ func (s *Service) SetEventBus(b *eventbus.EventBus) { s.bus = b }
 // SetThreadRouter enables routing replies to thread addresses onto their
 // conversation instead of the generic inbound pipeline.
 func (s *Service) SetThreadRouter(r ThreadRouter) { s.threadRouter = r }
+
+// SetRouter enables ADR-002 recipient routing: recipients on verified domains
+// must resolve to an enabled route (exact, sub-address base, or catch-all)
+// before the receiver accepts responsibility, and the matched action is
+// executed after durable ingest. A nil router (the default) keeps the
+// pre-routing behavior: every verified-domain recipient delivers.
+func (s *Service) SetRouter(r *Router) { s.router = r }
+
+// SetForwardQueue attaches the durable forwarding queue (ADR-002 decision 2).
+// Wiring must always provide it when routing is enabled — a matched forward
+// route without a queue is an operator-visible gap, logged loudly.
+func (s *Service) SetForwardQueue(q ForwardTaskQueue) { s.forwardTasks = q }
+
+// SetWebhookDispatcher attaches the webhook machinery used by route
+// action=webhook (HMAC signing and the SSRF guard live inside it).
+func (s *Service) SetWebhookDispatcher(d WebhookDispatcher) { s.webhooks = d }
+
+// SetQuarantineStore attaches the quarantine row store (filled by the
+// quarantine wave). Until wired, the inbound row's quarantined status is the
+// only record of a quarantined message.
+func (s *Service) SetQuarantineStore(qs QuarantineStore) { s.quarantine = qs }
+
+// SetVerp enables the return-path feature (OB-2, ADR-002 decision 4): the
+// receiver then accepts VERP bounce addresses (bounce+<uuid+sig>@<subdomain>.
+// <sending-domain>) through a dedicated allowlist and ingests them as system
+// messages, and outbound direct delivery can stamp VERP envelope senders. A
+// nil or disabled codec keeps today's behavior unchanged.
+func (s *Service) SetVerp(v *Verp) { s.verp = v }
+
+// RouteOwnsNotification reports whether a route action carries the message's
+// own notification semantics, so the generic email.inbound process dispatch
+// (parse → process worker chain) must not also run for it: forward routes
+// queue the forwarding executor, webhook routes dispatch at ingest,
+// quarantined messages wait for review. Deliver (and an empty action, i.e.
+// no routing) keeps today's pipeline.
+func RouteOwnsNotification(action models.InboundRouteAction) bool {
+	switch action {
+	case models.InboundRouteActionForward, models.InboundRouteActionWebhook, models.InboundRouteActionQuarantine:
+		return true
+	default:
+		return false
+	}
+}
 
 // RouteThread offers rec to the thread router. When the email is attached to a
 // thread it is marked forwarded and the caller must not run the generic
@@ -208,6 +272,24 @@ func (s *Service) Ingest(ctx context.Context, p *ParsedEmail, source models.Inbo
 		return nil, err
 	}
 
+	recipients := p.To
+	if len(recipients) == 0 && recipient != "" {
+		recipients = []string{recipient}
+	}
+
+	// OB-2 (ADR-002 decision 1): recipient routing validation happens before
+	// the receiver accepts responsibility. A verified-domain recipient with
+	// no matching route and no catch-all is explicitly rejected — persisted
+	// like every other synchronous reject.
+	route, matchKind, rerr := s.resolveRoute(domain, recipients)
+	if errors.Is(rerr, ErrNoRoute) {
+		s.rejected("no_route")
+		return s.persistRejected(p, domain, source, "no matching inbound route"), ErrNoRoute
+	} else if rerr != nil {
+		// Route store unavailable: a temporary failure, not a policy reject.
+		return nil, rerr
+	}
+
 	// Suppression check — skip delivery (record as rejected) if sender is suppressed.
 	if s.suppressionRepo != nil && p.From != "" {
 		scope := repositories.ResourceScope{UserID: domain.UserID, WorkspaceID: domain.WorkspaceID}
@@ -224,11 +306,6 @@ func (s *Service) Ingest(ctx context.Context, p *ParsedEmail, source models.Inbo
 		} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			logger.Warn("failed to check message-id dedup", "error", err)
 		}
-	}
-
-	recipients := p.To
-	if len(recipients) == 0 && recipient != "" {
-		recipients = []string{recipient}
 	}
 
 	var dedupHash string
@@ -259,6 +336,10 @@ func (s *Service) Ingest(ctx context.Context, p *ParsedEmail, source models.Inbo
 		Status:      models.InboundStatusReceived,
 		Source:      source,
 		ReceivedAt:  time.Now().UTC(),
+		// OB-2: the routing decision rides on the record — the post-ingest
+		// executor reads the action from here, never from client input.
+		RouteID:     inboundRouteID(route),
+		RouteAction: inboundRouteAction(route),
 	}
 
 	if err := s.repo.Create(rec); err != nil {
@@ -303,6 +384,14 @@ func (s *Service) Ingest(ctx context.Context, p *ParsedEmail, source models.Inbo
 
 	routed := s.RouteThread(ctx, rec, recipients, p.Cc)
 
+	// OB-2: execute the matched route's action — only after the record is
+	// durably persisted (ADR-002 non-negotiable: durable path before any
+	// routing action). Thread-routed replies follow the thread router's
+	// semantics instead.
+	if !routed {
+		s.applyRouteActions(ctx, rec, route, matchKind)
+	}
+
 	// R-17: offer the stored message to the DMARC aggregate-report processor
 	// (a no-op unless EnableDMARC wired one). Never fails the ingestion.
 	s.processDMARC(ctx, rec)
@@ -314,7 +403,7 @@ func (s *Service) Ingest(ctx context.Context, p *ParsedEmail, source models.Inbo
 	// and DMARC still run over the raw message.
 	s.processVerification(rec, p.Raw, p.From, "")
 
-	if s.producer != nil && !routed {
+	if s.producer != nil && !routed && !RouteOwnsNotification(inboundRouteAction(route)) {
 		if err := s.producer.EnqueueInboundProcess(rec.ID); err != nil {
 			logger.Error("failed to enqueue inbound:process", "inbound_id", rec.ID, "error", err)
 		}
@@ -367,10 +456,31 @@ func (s *Service) IngestRaw(ctx context.Context, raw []byte, envelopeFrom string
 		return nil, ErrSizeExceeded
 	}
 
+	// OB-2 (ADR-002 decision 4): a VERP bounce recipient is a system address,
+	// not a user mailbox — resolved through the return-path allowlist to its
+	// parent tenant domain, never through routing rules, and never subject to
+	// the sender-suppression check (the sender is a remote mailer-daemon).
+	if d, bounceAddr, ok := s.resolveBounceRecipient(envelopeTo); ok {
+		return s.ingestSystemBounce(ctx, raw, envelopeFrom, envelopeTo, d, bounceAddr, source, clientIP)
+	}
+
 	domain, _, err := s.resolveDomain(envelopeTo)
 	if err != nil {
 		s.rejected("unverified_domain")
 		return nil, err
+	}
+
+	// OB-2 (ADR-002 decision 1): routing validation before acceptance — an
+	// enabled route (exact, sub-address base, or catch-all) must exist for a
+	// verified-domain recipient, else the message is explicitly rejected and
+	// persisted.
+	route, matchKind, rerr := s.resolveRoute(domain, envelopeTo)
+	if errors.Is(rerr, ErrNoRoute) {
+		s.rejected("no_route")
+		return s.persistRejectedRaw(raw, strings.ToLower(strings.TrimSpace(envelopeFrom)), envelopeTo, domain, source, "no matching inbound route"), ErrNoRoute
+	} else if rerr != nil {
+		// Route store unavailable: a temporary failure, not a policy reject.
+		return nil, rerr
 	}
 
 	sender := strings.ToLower(strings.TrimSpace(envelopeFrom))
@@ -393,6 +503,9 @@ func (s *Service) IngestRaw(ctx context.Context, raw []byte, envelopeFrom string
 		Source:      source,
 		ReceivedAt:  time.Now().UTC(),
 		RawContent:  raw,
+		// OB-2: the routing decision rides on the record (see Ingest).
+		RouteID:     inboundRouteID(route),
+		RouteAction: inboundRouteAction(route),
 	}
 	if err := s.repo.Create(rec); err != nil {
 		return nil, fmt.Errorf("persist inbound email: %w", err)
@@ -412,7 +525,15 @@ func (s *Service) IngestRaw(ctx context.Context, raw []byte, envelopeFrom string
 		}
 	}
 
-	if s.producer != nil {
+	// OB-2: execute the matched route's action — only after the durable
+	// record exists (ADR-002 non-negotiable), and before the parse task is
+	// enqueued so a quarantined record is never picked up for parsing.
+	s.applyRouteActions(ctx, rec, route, matchKind)
+
+	// Quarantined records are held unparsed — the quarantine wave's release
+	// re-runs routing and parsing; everything else proceeds to the parse
+	// worker.
+	if s.producer != nil && rec.Status == models.InboundStatusReceived {
 		if err := s.producer.EnqueueInboundParse(rec.ID); err != nil {
 			logger.Error("failed to enqueue inbound:parse", "inbound_id", rec.ID, "error", err)
 		}
@@ -429,6 +550,108 @@ func (s *Service) IngestRaw(ctx context.Context, raw []byte, envelopeFrom string
 	if s.onBytes != nil {
 		s.onBytes(rec.Size)
 	}
+	return rec, nil
+}
+
+// resolveBounceRecipient validates the envelope's recipients against the VERP
+// return-path allowlist (OB-2, ADR-002 decision 4): the first recipient that
+// decodes as a validly signed bounce address (bounce+<uuid+sig>@<subdomain>.)
+// on a tenant-verified parent domain wins. The signature is checked here —
+// forged addresses fall through to ordinary recipient handling, which rejects
+// them (the bounce host is not a tenant mailbox domain).
+func (s *Service) resolveBounceRecipient(recipients []string) (*models.Domain, string, bool) {
+	if !s.verp.Enabled() {
+		return nil, "", false
+	}
+	for _, r := range recipients {
+		addr := strings.ToLower(strings.TrimSpace(r))
+		if !s.verp.LooksLikeBounce(addr) {
+			continue
+		}
+		if _, ok := s.verp.Decode(addr); !ok {
+			continue
+		}
+		_, host, ok := splitAddress(addr)
+		if !ok {
+			continue
+		}
+		parent, ok := s.verp.BounceParentDomain(host)
+		if !ok {
+			continue
+		}
+		d, err := s.domainRepo.FindVerifiedByName(parent)
+		if err != nil {
+			continue
+		}
+		return d, addr, true
+	}
+	return nil, "", false
+}
+
+// ingestSystemBounce durably ingests a DSN bounce as a system message
+// (ADR-002 non-negotiable: durable path first), then matches the RFC 3464
+// report back to the original outbound message. It never runs routing rules
+// (bounces are not user mailboxes — no inbound_routes evaluation, no route
+// stamp) and never consults the suppression list for the remote sender. The
+// match-back is best effort: a DSN parse or match failure never fails the
+// ingest that already stored the message.
+func (s *Service) ingestSystemBounce(ctx context.Context, raw []byte, envelopeFrom string, envelopeTo []string, domain *models.Domain, bounceAddress string, source models.InboundSource, clientIP string) (*models.InboundEmail, error) {
+	start := time.Now()
+	defer func() {
+		if s.onIngestMs != nil {
+			s.onIngestMs(time.Since(start).Seconds())
+		}
+	}()
+
+	rec := &models.InboundEmail{
+		UserID:      domain.UserID,
+		WorkspaceID: domain.WorkspaceID,
+		DomainID:    domain.ID,
+		Sender:      strings.ToLower(strings.TrimSpace(envelopeFrom)),
+		Recipients:  envelopeTo,
+		Size:        int64(len(raw)),
+		Status:      models.InboundStatusReceived,
+		Source:      source,
+		ReceivedAt:  time.Now().UTC(),
+		RawContent:  raw,
+	}
+	if err := s.repo.Create(rec); err != nil {
+		return nil, fmt.Errorf("persist inbound bounce: %w", err)
+	}
+
+	if s.blobStore != nil {
+		rawKey := fmt.Sprintf("inbound/%s/raw.eml", rec.UUID)
+		if err := s.blobStore.Put(ctx, rawKey, bytes.NewReader(raw), "message/rfc822"); err == nil {
+			rec.RawStorageKey = rawKey
+			rec.RawContent = nil
+			if uerr := s.repo.Update(rec); uerr != nil {
+				logger.Warn("failed to clear inline raw after blob upload", "uuid", rec.UUID, "error", uerr)
+				rec.RawContent = raw
+			}
+		} else {
+			logger.Warn("failed to store raw inbound eml", "uuid", rec.UUID, "error", err)
+		}
+	}
+
+	// DSN match-back (OB-2 decision 4): parse the report and write the
+	// delivery truth onto the original message. Best effort — see above.
+	s.processBounce(ctx, rec, raw, bounceAddress)
+
+	// The bounce content still goes through the async parse worker so the
+	// record is fully searchable like any other inbound mail.
+	if s.producer != nil {
+		if err := s.producer.EnqueueInboundParse(rec.ID); err != nil {
+			logger.Error("failed to enqueue inbound:parse", "inbound_id", rec.ID, "error", err)
+		}
+	}
+
+	if s.onReceived != nil {
+		s.onReceived(source)
+	}
+	if s.onBytes != nil {
+		s.onBytes(rec.Size)
+	}
+	_ = clientIP // SPF is not evaluated for system bounces; the DSN carries the truth.
 	return rec, nil
 }
 
@@ -488,8 +711,12 @@ func (s *Service) ApplyParsed(ctx context.Context, rec *models.InboundEmail, p *
 	rec.TextBody = p.TextBody
 	rec.HTMLBody = p.HTMLBody
 	rec.HeadersJSON = string(headersJSON)
-	rec.Status = models.InboundStatusReceived
-	rec.ErrorMessage = ""
+	// OB-2: a record quarantined by its routing action keeps that status —
+	// the parse worker must not silently release it back to received.
+	if rec.Status != models.InboundStatusQuarantined {
+		rec.Status = models.InboundStatusReceived
+		rec.ErrorMessage = ""
+	}
 
 	attachments, uploadedKeys, err := s.persistAttachments(ctx, rec.UUID, p.Attachments)
 	if err != nil {
@@ -515,7 +742,9 @@ func (s *Service) ApplyParsed(ctx context.Context, rec *models.InboundEmail, p *
 	// the parsed record to the DMARC processor (a no-op unless wired).
 	s.processDMARC(ctx, rec)
 
-	if s.bus != nil {
+	// OB-2: a quarantined record is under review — it never emits the
+	// ordinary "received" event.
+	if s.bus != nil && rec.Status != models.InboundStatusQuarantined {
 		actor := rec.UserID
 		s.bus.PublishSimple(
 			models.EventCategoryEmail,
@@ -598,6 +827,46 @@ func (s *Service) resolveDomain(recipients []string) (*models.Domain, string, er
 		return d, addr, nil
 	}
 	return nil, "", ErrUnverifiedDomain
+}
+
+// resolveRoute resolves the routing rule for a message whose domain the
+// caller has already verified (OB-2, ADR-002 decision 1). Returns
+// (nil, "", nil) when routing is disabled — the pre-routing behavior. The
+// first recipient that resolves wins; ErrNoRoute means no enabled rule and
+// no catch-all matched any recipient on the verified domain (the explicit
+// default-reject policy).
+func (s *Service) resolveRoute(domain *models.Domain, recipients []string) (*models.InboundRoute, RouteMatchKind, error) {
+	if s.router == nil {
+		return nil, "", nil
+	}
+	for _, rcpt := range recipients {
+		route, kind, err := s.router.ResolveRecipient(domain, rcpt)
+		if err == nil {
+			return route, kind, nil
+		}
+		if !errors.Is(err, ErrNoRoute) {
+			return nil, "", err
+		}
+	}
+	return nil, "", ErrNoRoute
+}
+
+// inboundRouteID copies the matched route's ID for the inbound row stamp.
+func inboundRouteID(route *models.InboundRoute) *uint {
+	if route == nil {
+		return nil
+	}
+	id := route.ID
+	return &id
+}
+
+// inboundRouteAction copies the matched route's action for the inbound row
+// stamp (empty when routing is disabled or nothing matched).
+func inboundRouteAction(route *models.InboundRoute) models.InboundRouteAction {
+	if route == nil {
+		return ""
+	}
+	return route.Action
 }
 
 // persistAttachments stores attachment content in blob storage (or inline when

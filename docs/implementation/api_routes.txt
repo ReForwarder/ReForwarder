@@ -40,6 +40,8 @@ DELETE /api/v1/workspaces/current/domains/{id}
 DELETE /api/v1/workspaces/current/domains/{id}/signing-keys/{keyId}
 DELETE /api/v1/workspaces/current/forms/{id}
 DELETE /api/v1/workspaces/current/inbound-emails/{id}
+DELETE /api/v1/workspaces/current/inbound-quarantine/{id}
+DELETE /api/v1/workspaces/current/inbound/forward-targets/{id}
 DELETE /api/v1/workspaces/current/invitations/{invitation_id}
 DELETE /api/v1/workspaces/current/languages/{id}
 DELETE /api/v1/workspaces/current/localizations/{localizationId}
@@ -106,6 +108,7 @@ GET    /api/v1/emails/{id}
 GET    /api/v1/emails/{id}/status
 GET    /api/v1/f/{key}/nonce
 GET    /api/v1/inbound/attachments/{uuid}/{idx}
+GET    /api/v1/inbound/forward-confirm/{token}
 GET    /api/v1/info
 GET    /api/v1/invitations
 GET    /api/v1/users/me
@@ -164,7 +167,9 @@ GET    /api/v1/workspaces/current/inbound-emails
 GET    /api/v1/workspaces/current/inbound-emails/{id}
 GET    /api/v1/workspaces/current/inbound-emails/{id}/attachments/{idx}
 GET    /api/v1/workspaces/current/inbound-emails/{id}/raw
+GET    /api/v1/workspaces/current/inbound-quarantine
 GET    /api/v1/workspaces/current/inbound-stream
+GET    /api/v1/workspaces/current/inbound/forward-targets
 GET    /api/v1/workspaces/current/invitations
 GET    /api/v1/workspaces/current/languages
 GET    /api/v1/workspaces/current/logs/audit
@@ -322,6 +327,8 @@ POST   /api/v1/workspaces/current/gdpr/delete-contacts
 POST   /api/v1/workspaces/current/gdpr/delete-email-logs
 POST   /api/v1/workspaces/current/gdpr/delete-messages
 POST   /api/v1/workspaces/current/inbound-emails/{id}/retry
+POST   /api/v1/workspaces/current/inbound-quarantine/{id}/release
+POST   /api/v1/workspaces/current/inbound/forward-targets
 POST   /api/v1/workspaces/current/invitations
 POST   /api/v1/workspaces/current/languages
 POST   /api/v1/workspaces/current/message-filters

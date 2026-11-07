@@ -167,6 +167,8 @@ const navSections: NavSection[] = [
       // POSTA_INBOUND_ENABLED gates the whole inbound pipeline; when it is off
       // every inbound page errors, so the entry point is hidden (Section-11).
       { name: 'Inbound Emails', path: '/inbound-emails', icon: 'inbox', requiresInbound: true },
+      { name: 'Quarantine', path: '/inbound-quarantine', icon: 'shield', requiresInbound: true },
+      { name: 'Routes', path: '/inbound-routes', icon: 'layers', requiresInbound: true },
       {
         name: 'Messages',
         path: '/messages',

@@ -33,6 +33,7 @@ import (
 	"github.com/goposta/posta/internal/services/automation"
 	"github.com/goposta/posta/internal/services/email"
 	"github.com/goposta/posta/internal/services/emailhistory"
+	"github.com/goposta/posta/internal/services/inbound"
 	"github.com/goposta/posta/internal/services/mta"
 	"github.com/goposta/posta/internal/services/provider_events"
 	"github.com/goposta/posta/internal/services/webhook"
@@ -64,7 +65,12 @@ type EmailSendHandler struct {
 	// mta is the outbound MTA executor for domains with delivery_mode=direct
 	// (ADR-001, OB-1). Nil disables direct delivery: such emails fail closed
 	// with a clear message instead of silently falling back to the relay.
-	mta      *mta.Executor
+	mta *mta.Executor
+	// verp stamps VERP bounce envelope senders on direct-to-MX deliveries
+	// (OB-2, ADR-002 decision 4). Nil or disabled keeps today's envelope:
+	// MAIL FROM is the plain sender address and bounce handling stays with
+	// the relay upstream.
+	verp     *inbound.Verp
 	onSent   func()
 	onFailed func()
 }
@@ -152,6 +158,25 @@ func (h *EmailSendHandler) SetAutoSuppress(enabled bool) {
 // the only delivery path; a direct-mode email on such a worker fails closed.
 func (h *EmailSendHandler) SetMTAExecutor(e *mta.Executor) {
 	h.mta = e
+}
+
+// SetVerp enables the VERP return-path envelope on direct-to-MX deliveries
+// (OB-2, ADR-002 decision 4): MAIL FROM becomes the signed bounce address
+// bounce+<uuid+sig>@<subdomain>.<sender-domain>, so the inbound receiver can
+// match DSN bounces back to this exact message. Nil keeps today's envelope.
+func (h *EmailSendHandler) SetVerp(v *inbound.Verp) { h.verp = v }
+
+// envelopeSender is the SMTP MAIL FROM for em: the VERP bounce address when
+// the return-path feature is on and the message/sender allow one, else the
+// plain envelope address (the pre-VERP behavior, also the relay-path seam —
+// relay mode delegates the return path to the upstream provider).
+func (h *EmailSendHandler) envelopeSender(em *models.Email) string {
+	if h.verp != nil {
+		if addr, ok := h.verp.EnvelopeFrom(em.UUID, em.Sender); ok {
+			return addr
+		}
+	}
+	return email.EnvelopeAddress(em.Sender)
 }
 
 // OnSent sets a callback invoked after each successful email send.
@@ -539,7 +564,10 @@ func (h *EmailSendHandler) processDirect(ctx context.Context, em *models.Email, 
 	}
 
 	msg := email.BuildMessage(em.Sender, prep.recipients, em.Subject, em.HTMLBody, em.TextBody, prep.attachments, prep.headers, em.ListUnsubscribeURL, em.ListUnsubscribeMailto, em.ListUnsubscribePost)
-	envelopeFrom := email.EnvelopeAddress(em.Sender)
+	// OB-2 (ADR-002 decision 4): the VERP bounce address is the envelope
+	// sender when the return-path feature is on — bounces to it are matched
+	// back to this message by the inbound receiver's DSN processor.
+	envelopeFrom := h.envelopeSender(em)
 	senderDom := senderDomain(envelopeFrom)
 
 	// DKIM signing (R-02): sign the final message for the sender's domain,

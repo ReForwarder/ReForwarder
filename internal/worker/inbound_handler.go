@@ -71,11 +71,19 @@ type InboundParseHandler struct {
 	svc      *inbound.Service
 	producer *Producer
 	onParsed func()
+	// filter is the spam/malware step (OB-2, ADR-006); nil keeps the
+	// pre-filter behavior (no scoring, no scanning).
+	filter *InboundFilter
 }
 
 func NewInboundParseHandler(repo *repositories.InboundEmailRepository, svc *inbound.Service, producer *Producer) *InboundParseHandler {
 	return &InboundParseHandler{repo: repo, svc: svc, producer: producer}
 }
+
+// SetFilter attaches the spam/malware filter step. It runs after durable
+// ingest + parse (never in the SMTP session) and may stop the pipeline for
+// quarantined/rejected messages.
+func (h *InboundParseHandler) SetFilter(f *InboundFilter) { h.filter = f }
 
 // OnParsed sets a callback invoked after each successfully parsed record.
 func (h *InboundParseHandler) OnParsed(fn func()) { h.onParsed = fn }
@@ -123,6 +131,17 @@ func (h *InboundParseHandler) ProcessTask(ctx context.Context, t *asynq.Task) er
 		return fmt.Errorf("apply parsed inbound: %w", aerr)
 	}
 
+	// OB-2 (ADR-006): spam/malware filtering runs here — the worker, after
+	// durable ingest + parse. A quarantined/rejected disposition stops the
+	// pipeline: no thread routing, no notification dispatch; the record
+	// waits for review or operator attention.
+	if !h.filter.Run(ctx, rec) {
+		if h.onParsed != nil {
+			h.onParsed()
+		}
+		return nil
+	}
+
 	if h.svc.RouteThread(ctx, rec, envelope, rec.Recipients, parsed.Cc) {
 		if h.onParsed != nil {
 			h.onParsed()
@@ -130,7 +149,12 @@ func (h *InboundParseHandler) ProcessTask(ctx context.Context, t *asynq.Task) er
 		return nil
 	}
 
-	if h.producer != nil {
+	// OB-2 (ADR-002): a route-owned action carries the message's notification
+	// itself — forward routes queue the forwarding executor, webhook routes
+	// dispatched at ingest — so the generic email.inbound process dispatch
+	// must not also run for them (it would double-POST webhook routes and
+	// mark forward-queued mail "forwarded" before the executor ran).
+	if h.producer != nil && !inbound.RouteOwnsNotification(rec.RouteAction) {
 		if err := h.producer.EnqueueInboundProcess(rec.ID); err != nil {
 			logger.Error("failed to enqueue inbound:process", "inbound_id", rec.ID, "error", err)
 		}
@@ -151,6 +175,10 @@ type InboundProcessHandler struct {
 	hmacKey     []byte
 	onForwarded func()
 	onFailed    func()
+	// filter is the spam/malware step (OB-2, ADR-006) for webhook-ingested
+	// mail — the parse worker never sees this path; nil keeps the
+	// pre-filter behavior.
+	filter *InboundFilter
 }
 
 func NewInboundProcessHandler(
@@ -167,13 +195,17 @@ func NewInboundProcessHandler(
 	}
 }
 
+// SetFilter attaches the spam/malware filter step for webhook-ingested mail
+// (the parse worker never sees this path).
+func (h *InboundProcessHandler) SetFilter(f *InboundFilter) { h.filter = f }
+
 // OnForwarded sets a callback invoked after a successful inbound forward.
 func (h *InboundProcessHandler) OnForwarded(fn func()) { h.onForwarded = fn }
 
 // OnFailed sets a callback invoked after a permanently failed inbound forward.
 func (h *InboundProcessHandler) OnFailed(fn func()) { h.onFailed = fn }
 
-func (h *InboundProcessHandler) ProcessTask(_ context.Context, t *asynq.Task) error {
+func (h *InboundProcessHandler) ProcessTask(ctx context.Context, t *asynq.Task) error {
 	var payload InboundProcessPayload
 	if err := json.Unmarshal(t.Payload(), &payload); err != nil {
 		return fmt.Errorf("unmarshal inbound payload: %w", err)
@@ -182,6 +214,13 @@ func (h *InboundProcessHandler) ProcessTask(_ context.Context, t *asynq.Task) er
 	rec, err := h.repo.FindByID(payload.InboundEmailID)
 	if err != nil {
 		return fmt.Errorf("inbound email not found: %w", err)
+	}
+
+	// OB-2 (ADR-006): webhook-ingested mail is filtered here — this handler
+	// is its worker stage. A quarantined/rejected disposition stops the
+	// webhook dispatch (the message stays durably stored for review).
+	if !h.filter.Run(ctx, rec) {
+		return nil
 	}
 
 	headers := map[string]string{}

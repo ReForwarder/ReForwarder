@@ -112,6 +112,12 @@ func contractServer(t *testing.T) *okapi.TestServer {
 	inboundHandler := handlers.NewInboundHandler(
 		inbound.NewService(nil, nil, nil, inbound.Config{}), nil, nil, "", nil,
 	)
+	// OB-2 wave W2: the forward-target surface rides the inbound flag; nil
+	// store is fine — registration only captures the handler reference.
+	forwardTargetHandler := handlers.NewInboundForwardTargetHandler(inbound.NewForwardTargetService(nil), "")
+	// OB-2 wave W3: the quarantine review surface rides the inbound flag; nil
+	// stores are fine — registration only captures the handler reference.
+	quarantineHandler := handlers.NewInboundQuarantineHandler(inbound.NewQuarantineService(nil, nil, nil, nil))
 
 	r := &Router{
 		app: app.Okapi,
@@ -123,10 +129,12 @@ func contractServer(t *testing.T) *okapi.TestServer {
 		},
 		v1: app.Group("/api/v1"),
 		h: routerHandlers{
-			cron:       cronHandler,
-			formIngest: formIngest,
-			inbound:    inboundHandler,
-			queueOps:   queueOps,
+			cron:                 cronHandler,
+			formIngest:           formIngest,
+			inbound:              inboundHandler,
+			inboundQuarantine:    quarantineHandler,
+			inboundForwardTarget: forwardTargetHandler,
+			queueOps:             queueOps,
 		},
 	}
 	r.registerRoutes()
