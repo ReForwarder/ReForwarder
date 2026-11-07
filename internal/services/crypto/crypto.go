@@ -141,6 +141,42 @@ func IsEncrypted(s string) bool {
 	return strings.HasPrefix(s, encryptedPrefix)
 }
 
+// EncryptBytes encrypts raw binary with AES-256-GCM using the same key and
+// nonce||ciphertext layout as Encrypt, returning the bytes directly (no
+// "enc:" prefix, no base64 inflation). It is the bulk-content sibling of
+// Encrypt: OB-3's mailstore blob codec (ADR-003 decision 4) encrypts message
+// bodies and attachments that are far too large and too binary for the
+// base64 string form. Like Encrypt it refuses without a configured key (SF-78):
+// stored content is never written unprotected.
+func EncryptBytes(plaintext []byte) ([]byte, error) {
+	keyMu.RLock()
+	k := key
+	keyMu.RUnlock()
+	if k == nil {
+		return nil, ErrEncryptionDisabled
+	}
+	ct, err := aesGCMEncrypt(k, plaintext)
+	if err != nil {
+		return nil, fmt.Errorf("crypto: failed to encrypt bytes: %w", err)
+	}
+	return ct, nil
+}
+
+// DecryptBytes decrypts output of EncryptBytes (nonce||ciphertext).
+func DecryptBytes(data []byte) ([]byte, error) {
+	keyMu.RLock()
+	k := key
+	keyMu.RUnlock()
+	if k == nil {
+		return nil, fmt.Errorf("crypto: encrypted content found but no encryption key configured")
+	}
+	pt, err := aesGCMDecrypt(k, data)
+	if err != nil {
+		return nil, fmt.Errorf("crypto: failed to decrypt bytes: %w", err)
+	}
+	return pt, nil
+}
+
 // aesGCMEncrypt performs AES-256-GCM encryption, returning nonce||ciphertext.
 func aesGCMEncrypt(key, plaintext []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)

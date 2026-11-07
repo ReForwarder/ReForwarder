@@ -231,6 +231,7 @@ PATCH  /api/v1/workspaces/current/domains/{id}/delivery-mode
 POST   /api/v1/admin/announcements
 POST   /api/v1/admin/domains/{id}/verify
 POST   /api/v1/admin/impersonate/exit
+POST   /api/v1/admin/mailstore/search/reindex
 POST   /api/v1/admin/oauth/providers
 POST   /api/v1/admin/plans
 POST   /api/v1/admin/queue/actions/{action}

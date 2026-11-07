@@ -49,9 +49,16 @@ type Workspace struct {
 	// System marks the single built-in platform workspace. It owns
 	// platform-managed resources, is created on first boot, cannot be renamed or
 	// deleted, and admits only platform admins.
-	System    bool      `json:"system" gorm:"not null;default:false"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	System bool `json:"system" gorm:"not null;default:false"`
+	// MailQuotaBytes caps the aggregate mailstore bytes across all mailboxes
+	// of the workspace (OB-3, ADR-003 decision 5: workspace-level aggregate
+	// ceiling); 0 = unlimited. Enforced by the mailstore quota enforcer, which
+	// locks the workspace row before summing member-mailbox usage so
+	// concurrent appends cannot overshoot. Mailboxes without a workspace are
+	// not covered by any ceiling.
+	MailQuotaBytes int64     `json:"mail_quota_bytes" gorm:"not null;default:0"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 
 	Owner   User              `json:"-" gorm:"foreignKey:OwnerID"`
 	Plan    Plan              `json:"-" gorm:"foreignKey:PlanID"`

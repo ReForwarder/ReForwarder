@@ -22,10 +22,13 @@ package inbound
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/mailstore"
 	"github.com/jkaninda/logger"
 )
 
@@ -39,7 +42,9 @@ import (
 // Inbound audit events (W8 audit trail starts here): route.matched on any
 // match, inbound.rejected on the explicit no-route reject,
 // inbound.forward_queued and inbound.quarantined per action — published into
-// the events substrate (eventbus → events table).
+// the events substrate (eventbus → events table). OB-3 (flow F13) adds
+// inbound.mail_delivered for a deliver action that filed the message into a
+// hosted mailbox.
 
 // defaultRouteWebhookEvent is the event a webhook route dispatches when its
 // target is empty — the established inbound webhook event the parse worker
@@ -92,8 +97,11 @@ type InboundRouteWebhookPayload struct {
 // persisted inbound record. A nil route means routing is disabled or the
 // recipient was accepted without a rule (pre-ADR behavior) — nothing runs.
 // It never fails the ingestion: action errors are logged, the durable record
-// stands.
-func (s *Service) applyRouteActions(ctx context.Context, rec *models.InboundEmail, route *models.InboundRoute, kind RouteMatchKind) {
+// stands. raw is the RFC 5322 message bytes the mailbox-delivery seam (OB-3,
+// flow F13) files into the recipient's INBOX for a deliver action; the other
+// actions ignore it. Callers pass nil only when the raw bytes are genuinely
+// unavailable (a degraded LoadRaw on the release path).
+func (s *Service) applyRouteActions(ctx context.Context, rec *models.InboundEmail, route *models.InboundRoute, kind RouteMatchKind, raw []byte) {
 	if s == nil || route == nil || rec == nil {
 		return
 	}
@@ -104,8 +112,10 @@ func (s *Service) applyRouteActions(ctx context.Context, rec *models.InboundEmai
 	switch route.Action {
 	case models.InboundRouteActionDeliver:
 		// Today's archive/thread behavior: the durable record + the regular
-		// parse/notify pipeline that the caller already enqueues. No extra
-		// side effect.
+		// parse/notify pipeline that the caller already enqueues — plus, when
+		// the OB-3 seam is wired, a quota-enforced append into the recipient
+		// mailbox's INBOX (no mailbox → archive only, exactly as before).
+		s.deliverToMailbox(ctx, rec, route, raw)
 	case models.InboundRouteActionForward:
 		s.queueForward(rec, route)
 	case models.InboundRouteActionWebhook:
@@ -190,23 +200,83 @@ func (s *Service) dispatchRouteWebhook(rec *models.InboundEmail, route *models.I
 	s.webhooks.DispatchJSON(rec.UserID, rec.WorkspaceID, event, body, rec.Sender)
 }
 
+// deliverToMailbox runs the OB-3 ingestion seam (flow F13) for a matched
+// action=deliver: file the message into the recipient mailbox(es)' INBOX via
+// the MailboxDeliverer seam. A nil seam — the default — keeps the exact
+// pre-OB-3 behavior: the durable archive is the only copy. Outcomes:
+//   - over-quota append → the message is quarantined with the typed reason
+//     (QuarantineReasonMailboxQuota + the structured *mailstore.QuotaError
+//     fields) so the review/release path can recover the copy (ADR-002 §3);
+//   - any other append failure → logged, archive-only fallback (never lose a
+//     message: the record is already durable).
+func (s *Service) deliverToMailbox(ctx context.Context, rec *models.InboundEmail, route *models.InboundRoute, raw []byte) {
+	if s.mailDelivery == nil {
+		return
+	}
+	res, err := s.mailDelivery.DeliverToMailbox(ctx, rec, raw)
+	if err != nil {
+		var quotaErr *mailstore.QuotaError
+		if errors.As(err, &quotaErr) {
+			reason := fmt.Sprintf("%s (mailbox %d, scope %s, used %d, incoming %d, limit %d)",
+				QuarantineReasonMailboxQuota,
+				quotaErr.MailboxID, quotaErr.Scope, quotaErr.Used, quotaErr.Incoming, quotaErr.Limit)
+			logger.Warn("mailbox delivery refused: over quota; quarantining",
+				"inbound_id", rec.UUID, "reason", reason)
+			s.quarantineInboundReason(ctx, rec, route, reason)
+			return
+		}
+		logger.Error("mailbox delivery failed; message remains in the inbound archive",
+			"inbound_id", rec.UUID, "error", err)
+		return
+	}
+	if res == nil || len(res.Mailboxes) == 0 {
+		return // no-op seam or no mailbox (auto-provision off / no addressed mailbox): archive only
+	}
+	s.publishInboundEvent("inbound.mail_delivered", rec, route, map[string]any{
+		"mailboxes": res.Mailboxes,
+	})
+}
+
 // quarantineInbound moves the durably stored message into review: the inbound
 // row flips to the quarantined status and the quarantine row is created via
 // the QuarantineStore seam (wired by the quarantine wave).
 func (s *Service) quarantineInbound(ctx context.Context, rec *models.InboundEmail, route *models.InboundRoute) {
+	s.quarantineInboundReason(ctx, rec, route, "matched quarantine route")
+}
+
+// quarantineInboundReason is quarantineInbound with the cause spelled out —
+// the route-matched hold uses its fixed reason; the mailbox over-quota hold
+// (OB-3 flow F13) passes the typed quota reason.
+func (s *Service) quarantineInboundReason(ctx context.Context, rec *models.InboundEmail, route *models.InboundRoute, reason string) {
 	rec.Status = models.InboundStatusQuarantined
+	if s.repo == nil {
+		// Unreachable through the wiring (NewService always attaches the
+		// repo); the in-memory hold still applies so tests and future callers
+		// cannot silently pass a held message off as received.
+		logger.Error("no inbound repo wired; quarantine status not persisted",
+			"inbound_id", rec.UUID, "reason", reason)
+		return
+	}
 	if err := s.repo.Update(rec); err != nil {
 		logger.Error("failed to mark inbound email quarantined",
-			"inbound_id", rec.UUID, "route_id", route.ID, "error", err)
+			"inbound_id", rec.UUID, "route_id", routeIDForLog(route), "error", err)
 		return
 	}
 	if s.quarantine != nil {
-		if err := s.quarantine.Quarantine(ctx, rec, route, "matched quarantine route"); err != nil {
+		if err := s.quarantine.Quarantine(ctx, rec, route, reason); err != nil {
 			logger.Error("failed to create quarantine row",
-				"inbound_id", rec.UUID, "route_id", route.ID, "error", err)
+				"inbound_id", rec.UUID, "route_id", routeIDForLog(route), "error", err)
 		}
 	}
 	s.publishInboundEvent("inbound.quarantined", rec, route, nil)
+}
+
+// routeIDForLog keeps the log fields total when a hold is not route-driven.
+func routeIDForLog(route *models.InboundRoute) any {
+	if route == nil {
+		return nil
+	}
+	return route.ID
 }
 
 // publishInboundEvent publishes an inbound routing event into the events

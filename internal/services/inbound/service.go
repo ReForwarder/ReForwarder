@@ -90,6 +90,11 @@ type Service struct {
 	// quarantine persists quarantine rows for route action=quarantine; nil
 	// until the quarantine wave wires a store.
 	quarantine QuarantineStore
+	// mailDelivery is the OB-3 hosted-mailbox ingestion seam (ADR-003, flow
+	// F13): a matched route action=deliver additionally files the message
+	// into the recipient mailbox's INBOX, quota-enforced. nil (the default)
+	// keeps the exact pre-OB-3 behavior: archive only.
+	mailDelivery MailboxDeliverer
 	// dmarc ingests RFC 7489 aggregate reports from the inbound pipeline
 	// (R-17); nil until EnableDMARC, and ingestion then behaves exactly as
 	// before.
@@ -169,6 +174,12 @@ func (s *Service) SetWebhookDispatcher(d WebhookDispatcher) { s.webhooks = d }
 // quarantine wave). Until wired, the inbound row's quarantined status is the
 // only record of a quarantined message.
 func (s *Service) SetQuarantineStore(qs QuarantineStore) { s.quarantine = qs }
+
+// SetMailboxDeliverer attaches the OB-3 hosted-mailbox delivery seam
+// (ADR-003, flow F13): route action=deliver then files the message into the
+// recipient mailbox's INBOX, quota-enforced, over-quota quarantined with a
+// typed reason. A nil seam (the default) keeps archive-only behavior.
+func (s *Service) SetMailboxDeliverer(d MailboxDeliverer) { s.mailDelivery = d }
 
 // SetVerp enables the return-path feature (OB-2, ADR-002 decision 4): the
 // receiver then accepts VERP bounce addresses (bounce+<uuid+sig>@<subdomain>.
@@ -387,9 +398,10 @@ func (s *Service) Ingest(ctx context.Context, p *ParsedEmail, source models.Inbo
 	// OB-2: execute the matched route's action — only after the record is
 	// durably persisted (ADR-002 non-negotiable: durable path before any
 	// routing action). Thread-routed replies follow the thread router's
-	// semantics instead.
+	// semantics instead. The raw bytes ride along for the OB-3 mailbox
+	// delivery seam (flow F13).
 	if !routed {
-		s.applyRouteActions(ctx, rec, route, matchKind)
+		s.applyRouteActions(ctx, rec, route, matchKind, p.Raw)
 	}
 
 	// R-17: offer the stored message to the DMARC aggregate-report processor
@@ -403,7 +415,12 @@ func (s *Service) Ingest(ctx context.Context, p *ParsedEmail, source models.Inbo
 	// and DMARC still run over the raw message.
 	s.processVerification(rec, p.Raw, p.From, "")
 
-	if s.producer != nil && !routed && !RouteOwnsNotification(inboundRouteAction(route)) {
+	// OB-3 (flow F13): a deliver action whose mailbox append was refused for
+	// quota quarantines the record inside applyRouteActions — such a held
+	// record must not also run the generic process dispatch, exactly as for a
+	// route action=quarantine. Delivered / archive-only records keep it.
+	if s.producer != nil && !routed && !RouteOwnsNotification(inboundRouteAction(route)) &&
+		rec.Status == models.InboundStatusReceived {
 		if err := s.producer.EnqueueInboundProcess(rec.ID); err != nil {
 			logger.Error("failed to enqueue inbound:process", "inbound_id", rec.ID, "error", err)
 		}
@@ -527,8 +544,9 @@ func (s *Service) IngestRaw(ctx context.Context, raw []byte, envelopeFrom string
 
 	// OB-2: execute the matched route's action — only after the durable
 	// record exists (ADR-002 non-negotiable), and before the parse task is
-	// enqueued so a quarantined record is never picked up for parsing.
-	s.applyRouteActions(ctx, rec, route, matchKind)
+	// enqueued so a quarantined record is never picked up for parsing. The
+	// raw bytes ride along for the OB-3 mailbox delivery seam (flow F13).
+	s.applyRouteActions(ctx, rec, route, matchKind, raw)
 
 	// Quarantined records are held unparsed — the quarantine wave's release
 	// re-runs routing and parsing; everything else proceeds to the parse

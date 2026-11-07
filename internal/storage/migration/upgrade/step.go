@@ -61,6 +61,10 @@ var registry = []Step{
 		ID:    "2026-10-13-decode-email-senders",
 		Apply: applyDecodeEmailSenders,
 	},
+	{
+		ID:    "2026-11-07-mailstore-fts",
+		Apply: applyMailstoreSearchIndex,
+	},
 }
 
 func Registry() []Step {

@@ -41,6 +41,7 @@ import (
 	"github.com/goposta/posta/internal/services/emailhistory"
 	"github.com/goposta/posta/internal/services/eventbus"
 	"github.com/goposta/posta/internal/services/inbound"
+	"github.com/goposta/posta/internal/services/mailstore"
 	"github.com/goposta/posta/internal/services/messages"
 	"github.com/goposta/posta/internal/services/mta"
 	"github.com/goposta/posta/internal/services/notification"
@@ -536,6 +537,26 @@ func startInboundSMTPServer(
 		svc,
 	))
 
+	// OB-3 (ADR-003, flow F13): a matched route action=deliver additionally
+	// files the message into the recipient mailbox's INBOX through the
+	// mailstore (quota-enforced; over-quota → quarantine with a typed
+	// reason). The seam needs the blob store and the at-rest encryption key —
+	// the production ZstdBlobCodec refuses to store unencrypted (SF-78).
+	// Without either, delivery stays archive-only: exactly the pre-OB-3
+	// behavior, with a visible log line instead of a silent gap.
+	if blobStore != nil && cfg.EncryptionKey != "" {
+		if msSvc, err := mailstore.New(db, mailstore.ZstdBlobCodec{}, blobStore, nil); err != nil {
+			logger.Error("mailstore service unavailable; inbound delivery stays archive-only", "error", err)
+		} else {
+			svc.SetMailboxDeliverer(inbound.NewMailboxDelivery(msSvc, domainRepo, inbound.MailboxDeliveryConfig{
+				AutoProvision: cfg.MailstoreAutoProvision,
+			}))
+			logger.Info("hosted-mailbox delivery enabled", "auto_provision", cfg.MailstoreAutoProvision)
+		}
+	} else {
+		logger.Warn("hosted-mailbox delivery disabled (needs blob store + POSTA_ENCRYPTION_KEY); deliver routes stay archive-only")
+	}
+
 	// OB-2 (ADR-002 decision 4): the VERP return-path feature — bounce
 	// addresses are accepted through a dedicated RCPT allowlist, DSN bounces
 	// are durably ingested as system messages, and RFC 3464 reports are
@@ -925,6 +946,15 @@ func initCronManager(
 	}
 	if blobStore != nil {
 		retentionJob.SetBlobStore(blobStore)
+	}
+	// OB-3 (ADR-003 §7): hosted-mailbox retention runs in the same unified
+	// job. The sweeper needs only db + blob store (no blob codec), so it
+	// wires ahead of the full mailstore service (the OB-4 ingestion seam).
+	if msSweeper, err := mailstore.NewRetentionSweeper(db, blobStore); err == nil {
+		retentionJob.SetMailstoreSweeper(msSweeper)
+		// OB-3 W2 (GAP-45): the same sweeper reports per-mailbox blob bytes
+		// from mail_blob_refs for the GC step's audited summary event.
+		retentionJob.SetMailBlobUsageReporter(msSweeper)
 	}
 	manager.Register(retentionJob)
 	// Daily release check. A second Service instance backs the admin handler; the

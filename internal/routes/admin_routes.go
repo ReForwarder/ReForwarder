@@ -830,6 +830,27 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 		})
 	}
 
+	// ==================== Mailstore maintenance (OB-3, ADR-003) ====================
+	// The search index rebuild is the only mailstore HTTP surface this phase
+	// adds: a single admin-gated maintenance action. User-facing search comes
+	// with OB-4 (IMAP SEARCH) and OB-5 (webmail).
+	if r.h.mailstoreSearch != nil {
+		routes = append(routes, okapi.RouteDefinition{
+			Method:  http.MethodPost,
+			Path:    "/mailstore/search/reindex",
+			Handler: r.h.mailstoreSearch.Reindex,
+			Group:   adminGroup,
+			Tags:    []string{tagAdmin},
+			Summary: "Rebuild the mailstore full-text search index",
+			Description: "Drops and re-creates the mail_messages.search_tsv generated tsvector column and its GIN index from the canonical definition (ADR-003 decision 3). The column regenerates automatically on every write, so this is an operator recovery path for schema or index drift, not a routine task; it takes an exclusive lock on mail_messages while the DDL runs. Idempotent. Audited.",
+			Response: &dto.Response[handlers.ReindexMailstoreSearchResponse]{},
+			Options: []okapi.RouteOption{
+				okapi.DocErrorResponse(500, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+			},
+		})
+	}
+
 	return routes
 }
 

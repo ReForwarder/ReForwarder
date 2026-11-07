@@ -22,15 +22,26 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/mailstore"
 	"github.com/goposta/posta/internal/services/settings"
 	"github.com/goposta/posta/internal/storage/blob"
 	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/hibiken/asynq"
 	"github.com/jkaninda/logger"
 )
+
+// MailstoreRetentionSweeper is the hosted-mailbox retention family (OB-3,
+// ADR-003 §7): per-mailbox and per-folder age/count policies purge messages,
+// the mailstore keeps its quota counters in sync in the same transactions,
+// and blob refs that dropped to zero are reclaimed together with their stored
+// objects. Implemented by *mailstore.RetentionSweeper.
+type MailstoreRetentionSweeper interface {
+	SweepRetention(ctx context.Context) (mailstore.RetentionStats, error)
+}
 
 // RetentionCleanupJob purges old email logs, audit events, and webhook
 // delivery records based on platform retention settings. It also scrubs email
@@ -49,6 +60,8 @@ type RetentionCleanupJob struct {
 	emailEventRepo        *repositories.EmailEventRepository
 	incomingWebhookRepo   *repositories.IncomingWebhookEventRepository
 	securityEventRepo     *repositories.SecurityEventRepository
+	mailstoreSweeper      MailstoreRetentionSweeper
+	mailBlobUsage         MailBlobUsageReporter
 	blobStore             blob.Store
 	settings              *settings.Provider
 }
@@ -122,6 +135,26 @@ func (j *RetentionCleanupJob) SetWebhookDeliveryAttemptRepo(r *repositories.Webh
 // window is the security_events_retention_days setting; 0 keeps events forever.
 func (j *RetentionCleanupJob) SetSecurityEventRepo(r *repositories.SecurityEventRepository) {
 	j.securityEventRepo = r
+}
+
+// SetMailstoreSweeper enables the hosted-mailbox retention family (OB-3,
+// ADR-003 §7). When nil, the mailstore is not wired and the family is
+// skipped — the other families are unaffected.
+func (j *RetentionCleanupJob) SetMailstoreSweeper(s MailstoreRetentionSweeper) {
+	j.mailstoreSweeper = s
+}
+
+// MailBlobUsageReporter is the GAP-45 usage-reporting surface (OB-3 W2):
+// per-mailbox blob bytes counted from mail_blob_refs, dedup-aware.
+// Implemented by *mailstore.RetentionSweeper (and the mailstore Service).
+type MailBlobUsageReporter interface {
+	MailboxBlobUsageAll() ([]mailstore.MailboxUsageReport, error)
+}
+
+// mailBlobUsageReporter is optional: when unset, the GC step skips the
+// usage summary (reclamation and its audit event still run).
+func (j *RetentionCleanupJob) SetMailBlobUsageReporter(r MailBlobUsageReporter) {
+	j.mailBlobUsage = r
 }
 
 // SetBlobStore configures the blob store so retention cleanup can also purge
@@ -490,6 +523,30 @@ func (j *RetentionCleanupJob) Run(_ context.Context, _ *asynq.Client) error {
 		}
 	}
 
+	// Hosted-mailbox retention (OB-3, ADR-003 decision 7): per-mailbox and
+	// per-folder age/count policies purge only in-policy messages — each
+	// mailbox in its own transaction, counters synced — then unreferenced
+	// mail blobs past the grace period are reclaimed (GAP-45 orphan GC).
+	// The sweeper carries its own policies on the mailbox/folder rows, so no
+	// platform window applies here; a nil sweeper (mailstore not wired)
+	// skips the family.
+	if j.mailstoreSweeper != nil {
+		stats, err := j.mailstoreSweeper.SweepRetention(context.Background())
+		if err != nil {
+			logger.Error("retention cleanup: mailstore sweep failed", "error", err)
+		} else {
+			if stats.PurgedMessages > 0 || stats.BlobRefsReclaimed > 0 {
+				logger.Info("retention cleanup: mailstore sweep",
+					"mailboxes_scanned", stats.MailboxesScanned,
+					"purged_messages", stats.PurgedMessages,
+					"purged_bytes", stats.PurgedBytes,
+					"blob_refs_reclaimed", stats.BlobRefsReclaimed,
+					"reclaimed_blob_bytes", stats.ReclaimedBlobBytes)
+			}
+			j.auditMailBlobGC(stats)
+		}
+	}
+
 	// Clean up the message-history event timeline and the raw webhook payloads
 	// captured from bounce posts and tracking callbacks. Both share the
 	// email-events window: they are the same lifecycle record at different
@@ -607,5 +664,72 @@ func (j *RetentionCleanupJob) cleanupFormMessages(platformDays int) {
 		} else if deleted > 0 {
 			logger.Info("retention cleanup: deleted form messages", "form_id", form.ID, "count", deleted, "older_than_days", days)
 		}
+	}
+}
+
+// auditMailBlobGC records the OB-3 W2 (GAP-45) orphan-GC outcome as an audit
+// event: what the sweep reclaimed (rows + object bytes) and, when the usage
+// reporter is wired, the per-mailbox blob-byte totals it computed from
+// mail_blob_refs afterwards (reclamation shrinks exactly that number). The
+// event is written only when the sweep did something, so a quiet night adds
+// no audit noise. A reporting failure never affects reclamation.
+func (j *RetentionCleanupJob) auditMailBlobGC(stats mailstore.RetentionStats) {
+	if stats.PurgedMessages == 0 && stats.BlobRefsReclaimed == 0 {
+		return
+	}
+	if j.eventRepo == nil {
+		return
+	}
+	metadata := map[string]any{
+		"mailboxes_scanned":   stats.MailboxesScanned,
+		"purged_messages":     stats.PurgedMessages,
+		"purged_bytes":        stats.PurgedBytes,
+		"blob_refs_reclaimed": stats.BlobRefsReclaimed,
+		"reclaimed_blob_bytes": stats.ReclaimedBlobBytes,
+	}
+	blobBytesSummary := "unavailable"
+	if j.mailBlobUsage != nil {
+		usage, err := j.mailBlobUsage.MailboxBlobUsageAll()
+		if err != nil {
+			logger.Error("retention cleanup: failed to report mail blob usage", "error", err)
+		} else {
+			var total, mailboxes int64
+			perMailbox := make([]map[string]any, 0, len(usage))
+			for _, u := range usage {
+				total += u.BlobBytes
+				perMailbox = append(perMailbox, map[string]any{
+					"mailbox_id": u.MailboxID, "blob_bytes": u.BlobBytes, "distinct_blobs": u.DistinctBlobs,
+				})
+				if u.BlobBytes > 0 {
+					mailboxes++
+				}
+			}
+			metadata["total_blob_bytes"] = total
+			metadata["mailboxes_with_blobs"] = mailboxes
+			metadata["per_mailbox"] = perMailbox
+			raw, err := json.Marshal(perMailbox)
+			if err == nil && len(raw) > 0 {
+				logger.Info("retention cleanup: mail blob usage (GAP-45)", "total_blob_bytes", total, "mailboxes_with_blobs", mailboxes, "per_mailbox", string(raw))
+			}
+			blobBytesSummary = fmt.Sprintf("%d bytes across %d mailboxes", total, mailboxes)
+		}
+	}
+	metadata["blob_bytes_summary"] = blobBytesSummary
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		logger.Error("retention cleanup: failed to marshal mail blob GC summary", "error", err)
+		return
+	}
+	if err := j.eventRepo.Create(&models.Event{
+		Category: models.EventCategoryAudit,
+		Type:     "mail_blob_gc",
+		Message: fmt.Sprintf("mail blob GC reclaimed %d refs (%d bytes); purged %d messages (%d bytes); store holds %s",
+			stats.BlobRefsReclaimed, stats.ReclaimedBlobBytes, stats.PurgedMessages, stats.PurgedBytes, blobBytesSummary),
+		Metadata: string(raw),
+		Outcome:  "success",
+		TargetType: "mailstore",
+		TargetID:   "blob-gc",
+	}); err != nil {
+		logger.Error("retention cleanup: failed to write mail blob GC audit event", "error", err)
 	}
 }

@@ -213,8 +213,19 @@ func (s *QuarantineService) Release(ctx context.Context, scope repositories.Reso
 		return nil, fmt.Errorf("mark quarantine record released: %w", err)
 	}
 
-	// Re-run the post-ingest action executor exactly as at ingest.
-	s.svc.applyRouteActions(ctx, rec, route, kind)
+	// Re-run the post-ingest action executor exactly as at ingest. The raw
+	// bytes ride along for the OB-3 mailbox delivery seam (flow F13): a
+	// released over-quota hold re-attempts the append. LoadRaw reads the
+	// inline column or the blob-stored .eml; on failure the actions still run
+	// (forward/webhook/quarantine need only the record) and only the mailbox
+	// delivery degrades — logged, never silent.
+	raw, rawErr := s.svc.LoadRaw(ctx, rec)
+	if rawErr != nil {
+		logger.Error("release could not load the message raw bytes; mailbox delivery degraded",
+			"inbound_id", rec.ID, "error", rawErr)
+		raw = nil
+	}
+	s.svc.applyRouteActions(ctx, rec, route, kind, raw)
 
 	// Deliver (and an empty action) leaves the record received — the parse
 	// worker was never enqueued for a held message, so the release queues it

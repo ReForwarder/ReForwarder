@@ -201,6 +201,15 @@ type Config struct {
 	InboundSMTPRateLimit  int // per-IP max sessions per window; 0 disables
 	InboundSMTPRateWindow int // rate-limit window in seconds
 
+	// Hosted-mailbox delivery (OB-3, ADR-003, flow F13): a matched route
+	// action=deliver files the message into the recipient mailbox's INBOX
+	// via the mailstore. Auto-provision creates the recipient mailbox on
+	// first delivery to a verified domain bound to the tenant user; off means
+	// only already-provisioned mailboxes receive (archive-only otherwise).
+	// Delivery itself also requires the blob store and POSTA_ENCRYPTION_KEY
+	// (the stored form is encrypted at rest).
+	MailstoreAutoProvision bool // POSTA_MAILSTORE_AUTO_PROVISION, default true
+
 	// Spam & malware filtering (OB-2, ADR-006). Thresholds are
 	// admin-configurable platform settings (spam_score_quarantine /
 	// spam_score_reject); these environment keys gate the machinery itself.
@@ -509,6 +518,9 @@ func New() *Config {
 		InboundTLSKeyFile:     goutils.Env("POSTA_INBOUND_TLS_KEY_FILE", ""),
 		InboundSMTPRateLimit:  goutils.EnvInt("POSTA_INBOUND_SMTP_RATE_LIMIT", 60),
 		InboundSMTPRateWindow: goutils.EnvInt("POSTA_INBOUND_SMTP_RATE_WINDOW", 60),
+
+		// Hosted-mailbox auto-provisioning (OB-3, ADR-003, flow F13).
+		MailstoreAutoProvision: goutils.EnvBool("POSTA_MAILSTORE_AUTO_PROVISION", true),
 
 		// Spam & malware filtering (OB-2, ADR-006).
 		SpamFilterEnabled:       goutils.EnvBool("POSTA_SPAM_FILTER_ENABLED", true),
