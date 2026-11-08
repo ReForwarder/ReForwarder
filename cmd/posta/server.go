@@ -21,9 +21,12 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"time"
 
 	"github.com/emersion/go-smtp"
@@ -40,11 +43,14 @@ import (
 	"github.com/goposta/posta/internal/services/email"
 	"github.com/goposta/posta/internal/services/emailhistory"
 	"github.com/goposta/posta/internal/services/eventbus"
+	"github.com/goposta/posta/internal/services/imap"
 	"github.com/goposta/posta/internal/services/inbound"
+	"github.com/goposta/posta/internal/services/mailauth"
 	"github.com/goposta/posta/internal/services/mailstore"
 	"github.com/goposta/posta/internal/services/messages"
 	"github.com/goposta/posta/internal/services/mta"
 	"github.com/goposta/posta/internal/services/notification"
+	"github.com/goposta/posta/internal/services/pop3"
 	"github.com/goposta/posta/internal/services/ratelimit"
 	"github.com/goposta/posta/internal/services/realtime"
 	"github.com/goposta/posta/internal/services/retry"
@@ -81,6 +87,12 @@ type serverResources struct {
 	smtpInbound    *smtp.Server
 	smtpRelay      *smtp.Server
 	smtpSubmission *smtp.Server
+	// pop3 is the OB-4 W3 POP3 server (ADR-004 decision 2); nil unless
+	// POSTA_POP3_ENABLED=true and the listener started.
+	pop3 *pop3.Server
+	// imap is the OB-4 W2 IMAP4rev1 server (ADR-004 decision 1); nil unless
+	// POSTA_IMAP_ENABLED=true and the listener started.
+	imap *imap.Server
 	// logSinks releases the SF-94 file sink (nil when stdout-only).
 	logSinks io.Closer
 }
@@ -257,6 +269,32 @@ func runServer(cli *okapicli.CLI) {
 					res.smtpSubmission = srv
 				}
 			}
+
+			// POP3 server (OB-4 W3, ADR-004 decision 2): classic POP3 against
+				// the mailstore INBOX, app-password-only auth, TLS enforced
+				// (STLS required on the plaintext port; implicit TLS on 995 when
+				// POSTA_POP3_TLS_PORT is served). Off by default
+				// (POSTA_POP3_ENABLED).
+				if cfg.POP3.Enabled && !cfg.DevMode {
+					if srv, err := startPOP3Server(res.db, cfg, res.blobStore, secEng); err != nil {
+						logger.Error("failed to start POP3 server", "error", err)
+					} else {
+						res.pop3 = srv
+					}
+				}
+
+				// IMAP4rev1 server (OB-4 W2, ADR-004 decision 1): the ADR-004
+				// command subset over the mailstore, app-password-only auth,
+				// TLS enforced (STARTTLS required before auth on 143; implicit
+				// TLS on 993 when POSTA_IMAP_TLS_PORT is served). Off by
+				// default (POSTA_IMAP_ENABLED).
+				if cfg.IMAP.Enabled && !cfg.DevMode {
+					if srv, err := startIMAPServer(res.db, cfg, res.blobStore, secEng, res.redis); err != nil {
+						logger.Error("failed to start IMAP server", "error", err)
+					} else {
+						res.imap = srv
+					}
+				}
 
 			if res.cronManager != nil {
 				res.cronManager.Start(context.Background())
@@ -724,6 +762,240 @@ func startSubmissionServer(
 	return srv, nil
 }
 
+// startPOP3Server configures and launches the POP3 server (OB-4 W3,
+// ADR-004 decision 2): classic POP3 against the mailstore INBOX,
+// authenticated with app passwords only via the W1 mailauth seam (the
+// primary account password is structurally never consulted). The plaintext
+// listener (POSTA_POP3_PORT, default 110) serves STLS when a certificate is
+// configured and refuses authentication before the upgrade; the implicit-TLS
+// listener (POSTA_POP3_TLS_PORT, default 995) always runs TLS and is served
+// only with a certificate. Returns the server so shutdown can release it.
+func startPOP3Server(
+	db *gorm.DB,
+	cfg *config.Config,
+	blobStore blob.Store,
+	secEng *security.Engine,
+) (*pop3.Server, error) {
+	mcfg := cfg.POP3
+	// Message bodies live in content-addressed encrypted blobs (ADR-003);
+	// the production ZstdBlobCodec refuses to store unencrypted (SF-78), so
+	// a deployment without the blob store or the at-rest key cannot serve
+	// mail at all — refuse to start rather than expose empty maildrops.
+	if blobStore == nil || cfg.EncryptionKey == "" {
+		return nil, errors.New("POP3 requires the blob store and POSTA_ENCRYPTION_KEY (message bodies are stored encrypted)")
+	}
+	msSvc, err := mailstore.New(db, mailstore.ZstdBlobCodec{}, blobStore, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	auth := mailauth.NewAuthenticator(
+		repositories.NewUserRepository(db),
+		repositories.NewUserAppPasswordRepository(db),
+	)
+	if auth == nil {
+		return nil, errors.New("POP3 authenticator could not be built (nil mailauth dependency)")
+	}
+
+	// Audit events land in the events substrate (ADR-004 decision 6).
+	auditSink := pop3.NewEventAuditLogger(eventbus.New(repositories.NewEventRepository(db)))
+
+	srv, err := pop3.NewServer(pop3.Config{
+		Hostname:           mcfg.Hostname,
+		MaxSessionsPerUser: mcfg.MaxSessionsPerUser,
+		MaxConnsPerIP:      mcfg.MaxConnsPerIP,
+		CommandRateLimit:   mcfg.CommandRateLimit,
+		CommandRateWindow:  time.Duration(mcfg.CommandRateWindow) * time.Second,
+		// Cleartext authentication is allowed only when the plaintext
+		// listener serves no TLS at all — a configuration validate()
+		// confines to loopback binds; the server additionally checks the
+		// peer address at runtime. With a certificate present, credentials
+		// are accepted only after STLS (or on the implicit-TLS port).
+		AllowCleartextAuth: mcfg.TLSCertFile == "" || mcfg.TLSKeyFile == "",
+	}, msSvc, auth)
+	if err != nil {
+		return nil, err
+	}
+	srv.SetAudit(auditSink)
+	srv.SetSecurity(secEng)
+
+	var tlsCfg *tls.Config
+	if mcfg.TLSCertFile != "" && mcfg.TLSKeyFile != "" {
+		cert, err := tls.LoadX509KeyPair(mcfg.TLSCertFile, mcfg.TLSKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load POP3 TLS cert: %w", err)
+		}
+		tlsCfg = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			ServerName:   mcfg.Hostname,
+			MinVersion:   tls.VersionTLS12,
+		}
+		srv.SetTLSConfig(tlsCfg)
+	} else if mcfg.TLSPort > 0 {
+		return nil, errors.New("POP3 TLS port configured without POSTA_POP3_TLS_CERT_FILE/POSTA_POP3_TLS_KEY_FILE (implicit TLS serves no cleartext)")
+	}
+
+	// Plaintext/STARTTLS listener: banned peers are dropped at accept by the
+	// CountingListener; STLS upgrades happen in-session.
+	if mcfg.Port > 0 {
+		l, err := net.Listen("tcp", net.JoinHostPort(mcfg.Host, strconv.Itoa(mcfg.Port)))
+		if err != nil {
+			return nil, err
+		}
+		listener := security.NewCountingListener(l, secEng, mcfg.Port, "pop3")
+		go func() {
+			logger.Info("POP3 server listening", "addr", listener.Addr().String(),
+				"tls", map[bool]string{true: "stls", false: "none"}[tlsCfg != nil])
+			if err := srv.Serve(listener); err != nil && !errors.Is(err, net.ErrClosed) {
+				logger.Error("POP3 server error", "error", err)
+			}
+		}()
+	}
+
+	// Implicit-TLS listener (995): the eager-handshake TLSServerListener
+	// hands over established *tls.Conn sessions (same stack as the SMTP
+	// receivers' TLS wiring).
+	if mcfg.TLSPort > 0 && tlsCfg != nil {
+		l, err := net.Listen("tcp", net.JoinHostPort(mcfg.Host, strconv.Itoa(mcfg.TLSPort)))
+		if err != nil {
+			return nil, err
+		}
+		listener := security.NewCountingListener(l, secEng, mcfg.TLSPort, "pop3")
+		tlsListener := security.TLSServerListener(listener, tlsCfg, secEng, mcfg.TLSPort)
+		go func() {
+			logger.Info("POP3 implicit-TLS server listening", "addr", listener.Addr().String())
+			if err := srv.Serve(tlsListener); err != nil && !errors.Is(err, net.ErrClosed) {
+				logger.Error("POP3 implicit-TLS server error", "error", err)
+			}
+		}()
+	}
+
+	return srv, nil
+}
+
+// startIMAPServer configures and launches the IMAP4rev1 server (OB-4 W2,
+// ADR-004 decision 1): the ADR-004 command subset over the mailstore, with
+// the W1 ChangeNotifier wired for IDLE and the Postgres FTS searcher wired
+// for the SEARCH BODY/TEXT keys. Authentication is app-password-only through
+// mailauth (ADR-004 decision 3). Returns the server for graceful shutdown.
+//
+// The mailstore service is built here (inbound delivery builds its own
+// instance in startInboundSMTPServer); both instances share the same
+// database and blob store, and IDLE notifications stay per-instance —
+// sessions served by THIS process subscribe through THIS instance's
+// notifier, and every mutation committed through either instance's store
+// reaches subscribers via the Redis fan-out when wired (local hub otherwise).
+func startIMAPServer(
+	db *gorm.DB,
+	cfg *config.Config,
+	blobStore blob.Store,
+	secEng *security.Engine,
+	rdb *redis.Client,
+) (*imap.Server, error) {
+	mcfg := cfg.IMAP
+	// Message bodies live in content-addressed encrypted blobs (ADR-003);
+	// the production ZstdBlobCodec refuses unencrypted storage (SF-78), so
+	// a deployment without the blob store or the at-rest key cannot serve
+	// mail at all — refuse to start rather than expose empty mailboxes.
+	if blobStore == nil || cfg.EncryptionKey == "" {
+		return nil, errors.New("IMAP requires the blob store and POSTA_ENCRYPTION_KEY (message bodies are stored encrypted)")
+	}
+	msSvc, err := mailstore.New(db, mailstore.ZstdBlobCodec{}, blobStore, nil)
+	if err != nil {
+		return nil, err
+	}
+	// IDLE (ADR-004 decision 7): folder changes fan out in-process first and
+	// through Redis pub/sub when this process holds a Redis handle (same
+	// propagation pattern as the ban events).
+	msSvc.SetChangeNotifier(mailstore.NewRedisChangeNotifier(rdb))
+	// SEARCH BODY/TEXT keys run through Postgres FTS (OB-3 search wave);
+	// flag/date/size/header keys work without it.
+	if sr, err := mailstore.NewPostgresSearcher(db); err == nil {
+		msSvc.SetSearcher(sr)
+	} else {
+		logger.Warn("IMAP full-text searcher unavailable; SEARCH BODY/TEXT keys will be refused", "error", err)
+	}
+
+	auth := mailauth.NewAuthenticator(
+		repositories.NewUserRepository(db),
+		repositories.NewUserAppPasswordRepository(db),
+	)
+	if auth == nil {
+		return nil, errors.New("IMAP authenticator could not be built (nil mailauth dependency)")
+	}
+
+	// Audit events land in the events substrate (ADR-004 decision 6).
+	auditSink := imap.NewEventAuditLogger(eventbus.New(repositories.NewEventRepository(db)))
+
+	srv := imap.NewServer(imap.Config{
+		Hostname:              mcfg.Hostname,
+		MaxSessionsPerUser:    mcfg.MaxSessionsPerUser,
+		MaxConnsPerIP:         mcfg.MaxConnsPerIP,
+		CommandRateLimit:      mcfg.CommandRateLimit,
+		CommandRateWindowSecs: mcfg.CommandRateWindow,
+		// Cleartext authentication is permitted only when the plaintext
+		// listener serves no TLS at all — a configuration validate()
+		// confines that bind to loopback; the server additionally requires
+		// the peer address to be loopback at runtime (ADR-004 decision 4).
+		AllowCleartextAuth: mcfg.TLSCertFile == "" || mcfg.TLSKeyFile == "",
+	}, msSvc, auth)
+	srv.SetAudit(auditSink)
+	srv.SetSecurity(secEng)
+
+	var tlsCfg *tls.Config
+	if mcfg.TLSCertFile != "" && mcfg.TLSKeyFile != "" {
+		cert, err := tls.LoadX509KeyPair(mcfg.TLSCertFile, mcfg.TLSKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load IMAP TLS cert: %w", err)
+		}
+		tlsCfg = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			ServerName:   mcfg.Hostname,
+			MinVersion:   tls.VersionTLS12,
+		}
+		srv.SetTLSConfig(tlsCfg)
+	} else if mcfg.TLSPort > 0 {
+		return nil, errors.New("IMAP TLS port configured without POSTA_IMAP_TLS_CERT_FILE/POSTA_IMAP_TLS_KEY_FILE (implicit TLS serves no cleartext)")
+	}
+
+	// Plaintext/STARTTLS listener (143): banned peers are dropped at accept
+	// by the CountingListener; STARTTLS upgrades happen in-session.
+	if mcfg.Port > 0 {
+		l, err := net.Listen("tcp", net.JoinHostPort(mcfg.Host, strconv.Itoa(mcfg.Port)))
+		if err != nil {
+			return nil, err
+		}
+		listener := security.NewCountingListener(l, secEng, mcfg.Port, "imap")
+		go func() {
+			logger.Info("IMAP server listening", "addr", listener.Addr().String(),
+				"tls", map[bool]string{true: "starttls", false: "none"}[tlsCfg != nil])
+			if err := srv.Serve(listener); err != nil && !errors.Is(err, net.ErrClosed) {
+				logger.Error("IMAP server error", "error", err)
+			}
+		}()
+	}
+
+	// Implicit-TLS listener (993): the eager-handshake TLSServerListener
+	// hands over established *tls.Conn sessions (same stack as the SMTP
+	// receivers' TLS wiring).
+	if mcfg.TLSPort > 0 && tlsCfg != nil {
+		l, err := net.Listen("tcp", net.JoinHostPort(mcfg.Host, strconv.Itoa(mcfg.TLSPort)))
+		if err != nil {
+			return nil, err
+		}
+		listener := security.NewCountingListener(l, secEng, mcfg.TLSPort, "imap")
+		tlsListener := security.TLSServerListener(listener, tlsCfg, secEng, mcfg.TLSPort)
+		go func() {
+			logger.Info("IMAP implicit-TLS server listening", "addr", listener.Addr().String())
+			if err := srv.Serve(tlsListener); err != nil && !errors.Is(err, net.ErrClosed) {
+				logger.Error("IMAP implicit-TLS server error", "error", err)
+			}
+		}()
+	}
+
+	return srv, nil
+}
+
 // startEmbeddedWorker starts an in-process asynq worker for email delivery.
 // The bus argument is used by the inbound parse handler to publish
 // email.inbound.received events; it may be nil when inbound is disabled.
@@ -1080,6 +1352,17 @@ func shutdownServer(res *serverResources) {
 			logger.Error("failed to shut down submission server", "error", err)
 		}
 		cancel()
+	}
+	if res.pop3 != nil {
+		// POP3 sessions own no long-lived worker state; closing the listeners
+		// and live conns releases their per-user/per-IP slots.
+		res.pop3.Close()
+	}
+	if res.imap != nil {
+		// IMAP sessions hold IDLE subscriptions on the mailstore notifier;
+		// Close terminates listeners and live conns, releasing the
+		// per-user/per-IP slots with them.
+		res.imap.Close()
 	}
 	if res.cronManager != nil {
 		res.cronManager.Stop()

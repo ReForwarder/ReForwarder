@@ -30,11 +30,22 @@ import (
 type ExpungeResult struct {
 	Expunged  int64
 	ByteDelta int64
+	// UIDs lists the purged messages' UIDs in ascending order (OB-4 wave W1)
+	// — the IDLE layer and the servers' EXPUNGE responses derive their
+	// per-message notifications from this list.
+	UIDs []uint32
 }
 
 // Expunge permanently removes the \Deleted-flagged messages of a folder
 // (IMAP EXPUNGE/CLOSE semantics), decrementing blob ref counts and the
 // mailbox counters in the same transaction.
+//
+// OB-4 wave W1 (ADR-004 decision 1): the expunge runs under the service's
+// per-folder ConcurrentSessionGuard, so two sessions of one process cannot
+// expunge concurrently — the second waits until the first's transaction
+// commits. Cross-replica serialization rides the database row locks, and the
+// change notification fires only after the transaction has committed, so a
+// subscriber can never observe an expunge before it is durable.
 //
 // uid_validity policy (ADR-003 §6): expunge does NOT bump uid_validity and
 // does NOT rewind uid_next — surviving messages keep their UIDs, removed ones
@@ -42,6 +53,8 @@ type ExpungeResult struct {
 // folder's whole message set is destroyed: folder deletion is destructive and
 // a later recreate mints a fresh random UIDValidity (see createFolderRow).
 func (s *Service) Expunge(folderID, userID, workspaceID uint) (*ExpungeResult, error) {
+	release := s.guard.acquireBlocking(folderID)
+	defer release()
 	var out ExpungeResult
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		f, _, err := s.resolveFolder(tx, folderID, userID, workspaceID)
@@ -54,6 +67,13 @@ func (s *Service) Expunge(folderID, userID, workspaceID uint) (*ExpungeResult, e
 	if err != nil {
 		return nil, err
 	}
+	if out.Expunged > 0 {
+		s.notifyChange(ChangeEvent{
+			FolderID:     folderID,
+			Kind:         KindExpunge,
+			ExpungedUIDs: out.UIDs,
+		})
+	}
 	return &out, nil
 }
 
@@ -62,6 +82,7 @@ func (s *Service) Expunge(folderID, userID, workspaceID uint) (*ExpungeResult, e
 func purgeDeletedMessages(tx *gorm.DB, folderID, mailboxID uint) (ExpungeResult, error) {
 	var victims []models.MailMessage
 	if err := tx.Where("folder_id = ? AND (flags & ?) > 0", folderID, models.FlagDeleted).
+		Order("uid ASC").
 		Find(&victims).Error; err != nil {
 		return ExpungeResult{}, fmt.Errorf("collect deleted messages of folder %d: %w", folderID, err)
 	}
@@ -69,7 +90,11 @@ func purgeDeletedMessages(tx *gorm.DB, folderID, mailboxID uint) (ExpungeResult,
 	if err != nil {
 		return ExpungeResult{}, err
 	}
-	return ExpungeResult{Expunged: purged, ByteDelta: -bytes}, nil
+	uids := make([]uint32, 0, len(victims))
+	for _, v := range victims {
+		uids = append(uids, v.UID)
+	}
+	return ExpungeResult{Expunged: purged, ByteDelta: -bytes, UIDs: uids}, nil
 }
 
 // purgeFolderMessages purges ALL messages of a folder (folder/mailbox delete

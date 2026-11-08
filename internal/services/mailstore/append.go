@@ -250,6 +250,15 @@ func (s *Service) Append(ctx context.Context, userID, workspaceID uint, in Appen
 		}
 		return nil, err
 	}
+	// OB-4 wave W1: fan the new message out to IDLE subscribers (best-effort;
+	// the message is durable by this point).
+	s.notifyChange(ChangeEvent{
+		FolderID:  result.FolderID,
+		Kind:      KindAppend,
+		MessageID: result.MessageID,
+		UID:       result.UID,
+		ModSeq:    result.ModSeq,
+	})
 	return &result, nil
 }
 
@@ -445,6 +454,14 @@ func (s *Service) CopyMessage(messageID, targetFolderID, userID, workspaceID uin
 	if err != nil {
 		return nil, err
 	}
+	// OB-4 wave W1: notify the target folder's IDLE subscribers.
+	s.notifyChange(ChangeEvent{
+		FolderID:  result.FolderID,
+		Kind:      KindAppend,
+		MessageID: result.MessageID,
+		UID:       result.UID,
+		ModSeq:    result.ModSeq,
+	})
 	return &result, nil
 }
 
@@ -454,6 +471,7 @@ func (s *Service) CopyMessage(messageID, targetFolderID, userID, workspaceID uin
 // mailbox.
 func (s *Service) MoveMessage(messageID, targetFolderID, userID, workspaceID uint) (*AppendResult, error) {
 	var result AppendResult
+	var movedFrom AppendResult
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		m, _, mb, err := s.resolveMessage(tx, messageID, userID, workspaceID)
 		if err != nil {
@@ -473,6 +491,8 @@ func (s *Service) MoveMessage(messageID, targetFolderID, userID, workspaceID uin
 		if err != nil {
 			return err
 		}
+		previousUID := m.UID
+		sourceFolder := m.FolderID
 		if err := tx.Model(&models.MailMessage{}).Where("id = ?", m.ID).
 			Updates(map[string]interface{}{
 				"folder_id": target.ID,
@@ -483,10 +503,28 @@ func (s *Service) MoveMessage(messageID, targetFolderID, userID, workspaceID uin
 			return fmt.Errorf("move message %d: %w", m.ID, err)
 		}
 		result = AppendResult{MessageID: m.ID, FolderID: target.ID, UID: uid, ModSeq: modSeq}
+		movedFrom = AppendResult{MessageID: m.ID, FolderID: sourceFolder, UID: previousUID, ModSeq: modSeq}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	// OB-4 wave W1: a move is an append into the target folder and an
+	// expunge out of the source folder, each notified to its own IDLE
+	// subscribers after the commit.
+	s.notifyChange(ChangeEvent{
+		FolderID:  result.FolderID,
+		Kind:      KindAppend,
+		MessageID: result.MessageID,
+		UID:       result.UID,
+		ModSeq:    result.ModSeq,
+	})
+	s.notifyChange(ChangeEvent{
+		FolderID:  movedFrom.FolderID,
+		Kind:      KindExpunge,
+		MessageID: result.MessageID,
+		UID:       movedFrom.UID,
+		ExpungedUIDs: []uint32{movedFrom.UID},
+	})
 	return &result, nil
 }

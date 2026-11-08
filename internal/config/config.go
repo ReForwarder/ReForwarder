@@ -283,6 +283,16 @@ type Config struct {
 	SubmissionRateLimit      int
 	SubmissionRateWindow     int
 
+	// Mail-protocol listeners (OB-4, ADR-004): IMAP4rev1 (143 STARTTLS +
+	// 993 implicit TLS) and POP3 (110 STARTTLS + 995 implicit TLS) served
+	// over the mailstore, authenticated with app passwords only. Both are
+	// OFF by default (POSTA_IMAP_ENABLED / POSTA_POP3_ENABLED); the
+	// non-negotiables are enforced in validate(): TLS on any non-loopback
+	// bind, a connection cap per user and per IP, and a per-session
+	// command-rate budget.
+	IMAP MailProtocolConfig
+	POP3 MailProtocolConfig
+
 	// Provider event webhook secrets (R-04). Each upstream provider that
 	// posts delivery events to /api/v1/webhooks/provider/{provider} is
 	// authenticated by its own signing secret; a provider whose secret is
@@ -294,6 +304,29 @@ type Config struct {
 	ProviderPostmarkSecret string // POSTA_PROVIDER_POSTMARK_SECRET — webhook token (header or Basic auth)
 	ProviderMailgunKey     string // POSTA_PROVIDER_MAILGUN_KEY — webhook signing key
 }
+
+// MailProtocolConfig carries the settings of one mail-protocol listener pair
+// (OB-4, ADR-004). IMAP uses ports 143 (STARTTLS) + 993 (implicit TLS); POP3
+// uses 110 + 995. Port 0 disables that listener while the protocol stays
+// enabled on the other. Authentication is app-password-only everywhere
+// (mailauth.Authenticator); the limits below are the ADR-004 decision-5
+// non-negotiables and are required to be positive when the protocol is on.
+type MailProtocolConfig struct {
+	Enabled  bool   // POSTA_IMAP_ENABLED / POSTA_POP3_ENABLED, default false
+	Host     string // bind address for both listeners
+	Port     int    // plaintext/STARTTLS listener; 0 disables it
+	TLSPort  int    // implicit-TLS listener; 0 disables it
+	Hostname string // advertised hostname (greeting, capability, cert ServerName)
+
+	TLSCertFile string // certificate for the implicit-TLS listener and STARTTLS
+	TLSKeyFile  string
+
+	MaxSessionsPerUser int // concurrent authenticated sessions per user
+	MaxConnsPerIP      int // concurrent connections per client IP, both listeners
+	CommandRateLimit   int // commands per session per CommandRateWindow; required
+	CommandRateWindow  int // command-rate window in seconds
+}
+
 type SystemSMTPConfig struct {
 	Host       string
 	Port       int
@@ -383,6 +416,27 @@ func (r RedisConfig) AsynqRedisOpt() asynq.RedisClientOpt {
 		Password:  r.Password,
 		DB:        r.DB,
 		TLSConfig: r.TLSConfig,
+	}
+}
+
+// newMailProtocolConfig reads one mail-protocol listener pair (OB-4, ADR-004)
+// from the environment; proto is the "IMAP" / "POP3" key fragment. Limits
+// default to conservative on-values (never zero): the ADR-004 non-negotiables
+// make connection caps, per-session command budgets and audit events part of
+// the feature, not tunable opt-outs.
+func newMailProtocolConfig(proto string, plainPort, tlsPort int) MailProtocolConfig {
+	return MailProtocolConfig{
+		Enabled:            goutils.EnvBool("POSTA_"+proto+"_ENABLED", false),
+		Host:               goutils.Env("POSTA_"+proto+"_HOST", "0.0.0.0"),
+		Port:               goutils.EnvInt("POSTA_"+proto+"_PORT", plainPort),
+		TLSPort:            goutils.EnvInt("POSTA_"+proto+"_TLS_PORT", tlsPort),
+		Hostname:           goutils.Env("POSTA_"+proto+"_HOSTNAME", "posta.local"),
+		TLSCertFile:        goutils.Env("POSTA_"+proto+"_TLS_CERT_FILE", ""),
+		TLSKeyFile:         goutils.Env("POSTA_"+proto+"_TLS_KEY_FILE", ""),
+		MaxSessionsPerUser: goutils.EnvInt("POSTA_"+proto+"_MAX_SESSIONS_PER_USER", 10),
+		MaxConnsPerIP:      goutils.EnvInt("POSTA_"+proto+"_MAX_CONNS_PER_IP", 30),
+		CommandRateLimit:   goutils.EnvInt("POSTA_"+proto+"_COMMAND_RATE_LIMIT", 600),
+		CommandRateWindow:  goutils.EnvInt("POSTA_"+proto+"_COMMAND_RATE_WINDOW", 60),
 	}
 }
 
@@ -576,6 +630,11 @@ func New() *Config {
 		SubmissionRateLimit:      goutils.EnvInt("POSTA_SUBMISSION_RATE_LIMIT", 60),
 		SubmissionRateWindow:     goutils.EnvInt("POSTA_SUBMISSION_RATE_WINDOW", 60),
 
+		// Mail-protocol listeners (OB-4, ADR-004): off by default; TLS and
+		// the limits are required when on (validate()).
+		IMAP: newMailProtocolConfig("IMAP", 143, 993),
+		POP3: newMailProtocolConfig("POP3", 110, 995),
+
 		ProviderSESSecret:      goutils.Env("POSTA_PROVIDER_SES_SECRET", ""),
 		ProviderSendGridKey:    goutils.Env("POSTA_PROVIDER_SENDGRID_KEY", ""),
 		ProviderPostmarkSecret: goutils.Env("POSTA_PROVIDER_POSTMARK_SECRET", ""),
@@ -639,7 +698,122 @@ func (c *Config) validate() error {
 			return fmt.Errorf("invalid POSTA_TRUSTED_PROXIES entry %q (expected a CIDR block or IP address)", entry)
 		}
 	}
+	if err := c.validateMailProtocols(); err != nil {
+		return err
+	}
 	return c.ValidateSecurity()
+}
+
+// isLoopbackHost reports whether host binds only the loopback interface — the
+// one place ADR-004 decision 4 permits a cleartext mail listener (tests and
+// local development).
+func isLoopbackHost(host string) bool {
+	h := strings.TrimSpace(host)
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(strings.Trim(h, "[]")); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
+// validateMailProtocols enforces the ADR-004 posture for the IMAP/POP3
+// listeners: enabled means TLS-protected (implicit-TLS ports always need a
+// certificate; a plaintext listener is only accepted on a loopback bind), the
+// connection and command limits are on, and the four ports do not collide
+// with each other or with the other listeners this process may open.
+func (c *Config) validateMailProtocols() error {
+	for name, m := range map[string]MailProtocolConfig{"POSTA_IMAP": c.IMAP, "POSTA_POP3": c.POP3} {
+		if !m.Enabled {
+			continue
+		}
+		if m.Port < 0 || m.TLSPort < 0 {
+			return fmt.Errorf("%s_PORT and %s_TLS_PORT cannot be negative", name, name)
+		}
+		if m.Port == 0 && m.TLSPort == 0 {
+			return fmt.Errorf("%s_ENABLED=true needs %s_PORT or %s_TLS_PORT above 0 (both are 0)", name, name, name)
+		}
+		if m.Port > 65535 || m.TLSPort > 65535 {
+			return fmt.Errorf("%s_PORT and %s_TLS_PORT must be at most 65535", name, name)
+		}
+		if m.TLSPort > 0 && (m.TLSCertFile == "" || m.TLSKeyFile == "") {
+			return fmt.Errorf("%s_TLS_PORT=%d requires %s_TLS_CERT_FILE and %s_TLS_KEY_FILE (implicit TLS serves no cleartext)", name, m.TLSPort, name, name)
+		}
+		if m.Port > 0 && (m.TLSCertFile == "" || m.TLSKeyFile == "") && !isLoopbackHost(m.Host) {
+			return fmt.Errorf("%s_PORT=%d without %s_TLS_CERT_FILE/%s_TLS_KEY_FILE is only permitted on a loopback bind (%s_HOST=%q); set the certificate files to serve a public address", name, m.Port, name, name, name, m.Host)
+		}
+		if m.MaxSessionsPerUser < 1 {
+			return fmt.Errorf("%s_MAX_SESSIONS_PER_USER must be at least 1 when %s_ENABLED=true (connection limits are part of the mail-protocol posture)", name, name)
+		}
+		if m.MaxConnsPerIP < 1 {
+			return fmt.Errorf("%s_MAX_CONNS_PER_IP must be at least 1 when %s_ENABLED=true (connection limits are part of the mail-protocol posture)", name, name)
+		}
+		if m.CommandRateLimit < 1 || m.CommandRateWindow < 1 {
+			return fmt.Errorf("%s_COMMAND_RATE_LIMIT and %s_COMMAND_RATE_WINDOW must be at least 1 when %s_ENABLED=true (command rate limits are part of the mail-protocol posture)", name, name, name)
+		}
+		if m.Host == "" {
+			return fmt.Errorf("%s_HOST cannot be empty", name)
+		}
+	}
+
+	if c.IMAP.Enabled && c.POP3.Enabled {
+		if c.IMAP.Port != 0 && c.IMAP.Port == c.POP3.Port {
+			return fmt.Errorf("POSTA_IMAP_PORT=%d and POSTA_POP3_PORT=%d collide; one process cannot listen on the same port twice", c.IMAP.Port, c.POP3.Port)
+		}
+		if c.IMAP.TLSPort != 0 && c.IMAP.TLSPort == c.POP3.TLSPort {
+			return fmt.Errorf("POSTA_IMAP_TLS_PORT=%d and POSTA_POP3_TLS_PORT=%d collide; one process cannot listen on the same port twice", c.IMAP.TLSPort, c.POP3.TLSPort)
+		}
+		for _, pair := range [][2]int{{c.IMAP.Port, c.POP3.TLSPort}, {c.IMAP.TLSPort, c.POP3.Port}} {
+			if pair[0] != 0 && pair[0] == pair[1] {
+				return fmt.Errorf("POSTA_IMAP/POSTA_POP3 port %d is configured twice; one process cannot listen on the same port twice", pair[0])
+			}
+		}
+	}
+
+	// Same-process listeners the mail ports must not collide with. The HTTP
+	// port is always taken; the SMTP listeners only when their feature is on.
+	// (The worker's health/metrics port is a different process and not
+	// checked here.)
+	type gatedPort struct {
+		envVar string
+		on     bool
+		port   int
+	}
+	taken := []gatedPort{
+		{"POSTA_PORT", true, c.Port},
+		{"POSTA_INBOUND_SMTP_PORT", c.InboundEnabled, c.InboundSMTPPort},
+		{"POSTA_SMTP_RELAY_PORT", c.SMTPRelayEnabled, c.SMTPRelayPort},
+		{"POSTA_SUBMISSION_PORT", c.SubmissionEnabled, c.SubmissionPort},
+	}
+	check := func(label string, port int) error {
+		if port == 0 {
+			return nil
+		}
+		for _, tp := range taken {
+			if tp.on && tp.port != 0 && tp.port == port {
+				return fmt.Errorf("%s=%d collides with %s=%d; one process cannot listen on the same port twice", label, port, tp.envVar, tp.port)
+			}
+		}
+		return nil
+	}
+	if c.IMAP.Enabled {
+		if err := check("POSTA_IMAP_PORT", c.IMAP.Port); err != nil {
+			return err
+		}
+		if err := check("POSTA_IMAP_TLS_PORT", c.IMAP.TLSPort); err != nil {
+			return err
+		}
+	}
+	if c.POP3.Enabled {
+		if err := check("POSTA_POP3_PORT", c.POP3.Port); err != nil {
+			return err
+		}
+		if err := check("POSTA_POP3_TLS_PORT", c.POP3.TLSPort); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func (c *Config) validateWorker() error {
 	warnRemovedEnvVars()
