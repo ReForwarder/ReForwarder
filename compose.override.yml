@@ -6,3 +6,30 @@ services:
     ports:
       - "2525:2525"
       - "2526:2526"
+
+  # Mail-protocol listeners (OB-4, ADR-004) — default OFF. To enable, merge
+  # the lines below into the `posta` service above (the `environment` entries
+  # join the existing environment map; `ports` and `volumes` join the
+  # existing lists). Both protocols authenticate with APP PASSWORDS only
+  # (Profile → app passwords; never the dashboard password), with mandatory
+  # per-user session caps, per-IP connection budgets and per-session command
+  # rate limits — see docs/docs/security/mail-protocols.md.
+  #
+  # TLS is enforced by default: a non-loopback bind refuses to start without
+  # the certificate files mounted, and the implicit-TLS ports (993/995)
+  # always need them.
+  #
+  #    environment:
+  #      POSTA_IMAP_ENABLED: "true"
+  #      POSTA_IMAP_TLS_CERT_FILE: /certs/mail.pem
+  #      POSTA_IMAP_TLS_KEY_FILE: /certs/mail.key
+  #      POSTA_POP3_ENABLED: "true"
+  #      POSTA_POP3_TLS_CERT_FILE: /certs/mail.pem
+  #      POSTA_POP3_TLS_KEY_FILE: /certs/mail.key
+  #    volumes:
+  #      - ./certs:/certs:ro
+  #    ports:
+  #      - "143:143"
+  #      - "993:993"
+  #      - "110:110"
+  #      - "995:995"

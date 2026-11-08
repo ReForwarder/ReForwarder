@@ -151,6 +151,8 @@ type msPredicate struct {
 //
 //	col = $n            (optionally "t"."col")
 //	col < $n            (retention age window on created_at)
+//	col >= / <= $n      (OB-4 W1 IMAP SEARCH date/size/uid windows)
+//	col ilike $n        (OB-4 W1 IMAP SEARCH header-substring fast path)
 //	(flags & $n) = 0 | (flags & $n) > 0
 //	id in ($1,$2,...)
 func parseWhere(s *msState, table, where string, args []driver.NamedValue) ([]msPredicate, error) {
@@ -172,6 +174,38 @@ func parseWhere(s *msState, table, where string, args []driver.NamedValue) ([]ms
 				}
 			}
 			preds = append(preds, msPredicate{col: col, op: "in", inVals: vals})
+		case strings.Contains(part, " ilike "):
+			// OB-4 W1: "subject ilike $n escape '\'" — case-insensitive
+			// substring over a stored header column. The ESCAPE clause exists
+			// so client-supplied %/_ are literals; the fake strips and
+			// unescapes them like Postgres would.
+			pieces := strings.SplitN(part, " ilike ", 2)
+			lhs := strings.TrimSpace(pieces[0])
+			rhs := strings.TrimSpace(pieces[1])
+			if i := strings.Index(rhs, " escape "); i >= 0 {
+				rhs = strings.TrimSpace(rhs[:i])
+			}
+			if !strings.HasPrefix(rhs, "$") {
+				return nil, fmt.Errorf("fake: unsupported ilike rhs %q in %q", rhs, part)
+			}
+			preds = append(preds, msPredicate{col: stripQual(lhs), op: "ilike", argN: bindNum(rhs)})
+		case strings.Contains(part, " >= "):
+			pieces := strings.SplitN(part, " >= ", 2)
+			col := stripQual(strings.TrimSpace(pieces[0]))
+			rhs := strings.TrimSpace(pieces[1])
+			if !strings.HasPrefix(rhs, "$") {
+				return nil, fmt.Errorf("fake: unsupported >= rhs %q in %q", rhs, part)
+			}
+			preds = append(preds, msPredicate{col: col, op: ">=", argN: bindNum(rhs)})
+		case strings.Contains(part, " <= "):
+			// Must precede the "<" branch: "<=" contains "<".
+			pieces := strings.SplitN(part, " <= ", 2)
+			col := stripQual(strings.TrimSpace(pieces[0]))
+			rhs := strings.TrimSpace(pieces[1])
+			if !strings.HasPrefix(rhs, "$") {
+				return nil, fmt.Errorf("fake: unsupported <= rhs %q in %q", rhs, part)
+			}
+			preds = append(preds, msPredicate{col: col, op: "<=", argN: bindNum(rhs)})
 		case strings.Contains(part, " > ") && !strings.HasPrefix(part, "(flags & "):
 			// OB-3 W2 (GAP-45 usage batching): "id > $n" keyset paging. Must
 			// not swallow the "(flags & $n) > 0" predicate, which the next
@@ -258,6 +292,20 @@ func (p msPredicate) match(s *msState, table string, row []driver.Value, args []
 			}
 		}
 		return false
+	case ">=":
+		return msCompare(cell, msArg(args, p.argN)) >= 0
+	case "<=":
+		return msCompare(cell, msArg(args, p.argN)) <= 0
+	case "ilike":
+		sv, ok := cell.(string)
+		av, ok2 := msArg(args, p.argN).(string)
+		if !ok || !ok2 {
+			return false
+		}
+		// Unescape the LIKE-escaped wildcards (likePattern's ESCAPE '\').
+		pat := strings.NewReplacer(`\%`, "%", `\_`, "_", `\\`, `\`).Replace(av)
+		pat = strings.TrimSuffix(strings.TrimPrefix(pat, "%"), "%")
+		return strings.Contains(strings.ToLower(sv), strings.ToLower(pat))
 	}
 	return false
 }
@@ -428,6 +476,11 @@ func (c *msConn) QueryContext(_ context.Context, query string, args []driver.Nam
 	// Workspace aggregate ceiling (quota wave): SUM over member mailboxes.
 	case strings.Contains(lower, "sum(used_bytes)"):
 		return c.querySumUsedBytes(lower, args)
+	// OB-4 W1: StatusCounts' single-round-trip aggregate — three counts, the
+	// unseen/recent ones expressed with count(*) FILTER (WHERE ...). Routed
+	// before the generic count(*) handler, which can only answer one column.
+	case strings.Contains(lower, "filter (where") && strings.Contains(lower, "from mail_messages"):
+		return c.queryStatusCounts(lower, args)
 	case strings.Contains(lower, "count(*)"):
 		return c.queryCount(lower, args)
 	case strings.Contains(lower, "from workspaces"):
@@ -463,6 +516,41 @@ func (c *msConn) querySumUsedBytes(lower string, args []driver.NamedValue) (driv
 		}
 	}
 	return &msRows{cols: []string{"sum"}, rows: [][]driver.Value{{total}}}, nil
+}
+
+// queryStatusCounts handles StatusCounts' single-round-trip aggregate:
+//
+//	select count(*) as total_count,
+//	       count(*) filter (where (flags & $1) = 0) as unseen_count,
+//	       count(*) filter (where (flags & $2) > 0) as recent_count
+//	from mail_messages where folder_id = $3
+func (c *msConn) queryStatusCounts(lower string, args []driver.NamedValue) (driver.Rows, error) {
+	s := c.s
+	where := ""
+	if i := strings.Index(lower, " where "); i >= 0 {
+		where = strings.TrimSpace(lower[i+len(" where "):])
+	}
+	matched, err := c.match("mail_messages", where, args)
+	if err != nil {
+		return nil, err
+	}
+	idxFlags := s.colIndex("mail_messages", "flags")
+	unseenMask := msArgInt(args, 1)
+	recentMask := msArgInt(args, 2)
+	var total, unseen, recent int64
+	for _, row := range matched {
+		total++
+		if f, ok := row[idxFlags].(int64); ok {
+			if f&unseenMask == 0 {
+				unseen++
+			}
+			if f&recentMask > 0 {
+				recent++
+			}
+		}
+	}
+	return &msRows{cols: []string{"total_count", "unseen_count", "recent_count"},
+		rows: [][]driver.Value{{total, unseen, recent}}}, nil
 }
 
 // queryBlobRefGC handles the retention sweep's
@@ -754,12 +842,17 @@ func (c *msConn) querySelect(table, lower string, args []driver.NamedValue) (dri
 		}
 	}
 	// Which columns to return: Pluck emits a single column; otherwise *.
+	// OB-4 W1: multi-column select lists (the fetch/search position scan
+	// selects id + uid) split on commas like Postgres would.
 	cols := msColumns[table]
 	if strings.HasPrefix(lower, "select ") {
 		sel := lower[len("select "):strings.Index(lower, " from ")]
 		sel = strings.TrimSpace(strings.ReplaceAll(sel, `"`, ""))
 		if sel != "*" && !strings.HasPrefix(sel, "count(") {
-			cols = []string{stripQual(sel)}
+			cols = nil
+			for _, c := range strings.Split(sel, ",") {
+				cols = append(cols, stripQual(strings.TrimSpace(c)))
+			}
 		}
 	}
 	rows := make([][]driver.Value, 0, len(matched))

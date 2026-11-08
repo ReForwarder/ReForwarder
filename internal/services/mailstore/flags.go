@@ -44,6 +44,9 @@ type FlagsUpdate struct {
 type FlagsResult struct {
 	Flags  uint32
 	ModSeq uint64
+	// UID identifies the message on the wire (OB-4 wave W1: IDLE flag-change
+	// notifications and UID-mode STORE responses carry it).
+	UID uint32
 }
 
 // SetFlags applies one CAS flag update for a user:
@@ -57,11 +60,16 @@ type FlagsResult struct {
 // shape: one statement, decided by RowsAffected).
 func (s *Service) SetFlags(userID, workspaceID uint, up FlagsUpdate) (*FlagsResult, error) {
 	var result FlagsResult
+	var evFolder, evMsgID uint
+	var evUID uint32
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		m, _, _, err := s.resolveMessage(tx, up.MessageID, userID, workspaceID)
 		if err != nil {
 			return err
 		}
+		evFolder = m.FolderID
+		evMsgID = m.ID
+		evUID = m.UID
 		newFlags := (m.Flags | up.Set) &^ up.Clear
 		modSeq := m.ModSeq
 		if up.ExpectedModSeq != 0 {
@@ -99,12 +107,22 @@ func (s *Service) SetFlags(userID, workspaceID uint, up FlagsUpdate) (*FlagsResu
 				return fmt.Errorf("store flags of message %d: %w", m.ID, err)
 			}
 		}
-		result = FlagsResult{Flags: newFlags, ModSeq: modSeq}
+		result = FlagsResult{Flags: newFlags, ModSeq: modSeq, UID: m.UID}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	// OB-4 wave W1: fan the flag change out to the folder's IDLE subscribers
+	// (best-effort; the store already committed).
+	s.notifyChange(ChangeEvent{
+		FolderID:  evFolder,
+		Kind:      KindFlags,
+		MessageID: evMsgID,
+		UID:       evUID,
+		ModSeq:    result.ModSeq,
+		Flags:     result.Flags,
+	})
 	return &result, nil
 }
 

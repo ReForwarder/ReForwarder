@@ -78,6 +78,7 @@ const sidebars: SidebarsConfig = {
         'security/authentication',
         'security/api-keys',
         'security/smtp-relay',
+        'security/mail-protocols',
         'security/two-factor-auth',
         'security/rate-limiting',
         'security/sessions',

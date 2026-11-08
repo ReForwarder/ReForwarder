@@ -32,11 +32,19 @@ import (
 // a user (and, when non-zero, a workspace): user A can never read or mutate
 // user B's mailboxes, folders or messages — the isolation is enforced here,
 // below the future HTTP/admin layers, and covered by tests.
+//
+// OB-4 wave W1 (ADR-004) adds the protocol-access seams: guard is the
+// per-folder write-lock ConcurrentSessionGuard; notifier (optional, via
+// SetChangeNotifier) fans out folder changes for IDLE; searcher (optional,
+// via SetSearcher) is the FTS backend the IMAP SEARCH executor consumes.
 type Service struct {
-	db    *gorm.DB
-	codec BlobCodec
-	store blob.Store
-	quota QuotaEnforcer
+	db       *gorm.DB
+	codec    BlobCodec
+	store    blob.Store
+	quota    QuotaEnforcer
+	guard    *ConcurrentSessionGuard
+	notifier *ChangeNotifier
+	searcher Searcher
 }
 
 // New wires the service. db is the primary Postgres handle; codec transforms
@@ -55,7 +63,14 @@ func New(db *gorm.DB, codec BlobCodec, store blob.Store, quota QuotaEnforcer) (*
 	if quota == nil {
 		quota = DefaultQuotaEnforcer{}
 	}
-	return &Service{db: db, codec: codec, store: store, quota: quota}, nil
+	return &Service{db: db, codec: codec, store: store, quota: quota, guard: NewConcurrentSessionGuard()}, nil
+}
+
+// SetSearcher wires the FTS backend (PostgresSearcher) the IMAP SEARCH
+// executor consumes for BODY/TEXT keys (OB-4 wave W1). Unwired, those keys
+// report ErrSearchUnavailable; flag/date/size/header keys keep working.
+func (s *Service) SetSearcher(sr Searcher) {
+	s.searcher = sr
 }
 
 // resolveMailbox loads the mailbox owned by userID (workspaceID, when
