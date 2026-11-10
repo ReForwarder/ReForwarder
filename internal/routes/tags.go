@@ -31,6 +31,7 @@ const (
 	tagForms                 = "Forms"
 	tagInbound               = "Inbound"
 	tagLanguages             = "Languages"
+	tagMailCompose           = "Mail compose"
 	tagMessages              = "Messages"
 	tagOAuth                 = "OAuth"
 	tagSubscriberLists       = "Subscriber Lists"

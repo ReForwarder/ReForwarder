@@ -851,6 +851,95 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 		})
 	}
 
+	// ==================== Mailbox administration (OB-5 W2, ADR-005 decision 3) ====================
+	// Provision/suspend/reactivate/delete mailboxes, adjust quotas, and read
+	// usage — the admin slices of SF-65/72/80. Every route is admin-gated via
+	// this group (ADR-008: admin scope is deployment-wide) and every mutating
+	// action is audited as admin.mailbox.* (SF-74). Deletion cascades through
+	// the ADR-008 mailbox → user → workspace ownership chain; the dashboard
+	// confirms before calling. Unavailable (503) when the mailstore's blob
+	// store is not configured.
+	if r.h.adminMailbox != nil {
+		routes = append(routes,
+			okapi.RouteDefinition{
+				Method:      http.MethodGet,
+				Path:        "/mailboxes",
+				Handler:     okapi.H(r.h.adminMailbox.List),
+				Group:       adminGroup,
+				Summary:     "List hosted mailboxes",
+				Description: "Platform-wide mailbox table with the owner identity and the mailstore's counters, filterable by name, owner, workspace and lifecycle status.",
+				Request:     &handlers.AdminListMailboxesRequest{},
+				Response:    &dto.PageableResponse[handlers.AdminMailboxRow]{},
+				Options: []okapi.RouteOption{
+					okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+					okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				},
+			},
+			okapi.RouteDefinition{
+				Method:      http.MethodPost,
+				Path:        "/mailboxes",
+				Handler:     okapi.H(r.h.adminMailbox.Create),
+				Group:       adminGroup,
+				Summary:     "Provision a mailbox for a user",
+				Description: "Creates the mailbox (unique per owner) with its INBOX folder and the requested byte/message-count quotas (0 = unlimited). An optional workspace binding requires the user to be a member. Audited.",
+				Request:     &handlers.AdminProvisionMailboxRequest{},
+				Response:    &dto.Response[handlers.AdminMailboxRow]{},
+				Options: []okapi.RouteOption{
+					okapi.DocResponse(201, &dto.Response[handlers.AdminMailboxRow]{}),
+					okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+					okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+					okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+					okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				},
+			},
+			okapi.RouteDefinition{
+				Method:      http.MethodPatch,
+				Path:        "/mailboxes/{id:int}",
+				Handler:     okapi.H(r.h.adminMailbox.Update),
+				Group:       adminGroup,
+				Summary:     "Update a mailbox (quotas, suspend/reactivate)",
+				Description: "Changes the byte and/or message-count quotas and/or moves the mailbox between active and suspended. A suspended mailbox refuses appends (IMAP/POP3/webmail writes) until reactivated; closed is not an admin-settable state — deletion is the removal path. Audited.",
+				Request:     &handlers.AdminUpdateMailboxRequest{},
+				Response:    &dto.Response[handlers.AdminMailboxRow]{},
+				Options: []okapi.RouteOption{
+					okapi.DocPathParam("id", "integer", "Mailbox ID"),
+					okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+					okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+					okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				},
+			},
+			okapi.RouteDefinition{
+				Method:      http.MethodDelete,
+				Path:        "/mailboxes/{id:int}",
+				Handler:     okapi.H(r.h.adminMailbox.Delete),
+				Group:       adminGroup,
+				Tags:        []string{tagAdmin},
+				Summary:     "Delete a mailbox",
+				Description: "Removes the mailbox with all of its folders and messages in one transaction (ADR-008 ownership chain), decrementing every referenced blob's ref count; the storage sweep reclaims the unreferenced blobs afterwards. The dashboard confirms before calling. Audited.",
+				Response:    &dto.Response[dto.MessageData]{},
+				Options: []okapi.RouteOption{
+					okapi.DocPathParam("id", "integer", "Mailbox ID"),
+					okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+					okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				},
+			},
+			okapi.RouteDefinition{
+				Method:      http.MethodGet,
+				Path:        "/mailboxes/{id:int}/usage",
+				Handler:     okapi.H(r.h.adminMailbox.Usage),
+				Group:       adminGroup,
+				Summary:     "Get mailbox usage",
+				Description: "Returns the mailbox's quota and usage counters: quota basis (raw bytes, message count) from the mailstore's maintained counters and the storage basis (dedup-aware blob bytes, distinct blobs) from mail_blob_refs (GAP-45).",
+				Response:    &dto.Response[handlers.AdminMailboxUsageResponse]{},
+				Options: []okapi.RouteOption{
+					okapi.DocPathParam("id", "integer", "Mailbox ID"),
+					okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+					okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				},
+			},
+		)
+	}
+
 	return routes
 }
 

@@ -88,6 +88,7 @@ var knownEventTypes = map[string]bool{
 	models.EmailEventComplained:   true,
 	models.EmailEventUnsubscribed: true,
 	models.EmailEventForwarded:    true,
+	models.EmailEventComposed:     true, // OB-5 webmail compose (ADR-005 W3)
 }
 
 // Recorder persists message-history events. It is safe for concurrent use and

@@ -43,6 +43,13 @@ const (
 // suppression layers are never consulted for system forwards.
 const EmailProvenanceSystemForward = "system_forward"
 
+// EmailProvenanceMailCompose stamps a transactional Email row that the webmail
+// compose seam enqueued (OB-5, ADR-005 decision 2): the outbound twin of a
+// message stored in the composer's Sent folder. Compose is not a
+// marketing-send path either — suppression/unsubscribe layers are not
+// consulted — but the sender domain must be verified (ADR-001 non-negotiable).
+const EmailProvenanceMailCompose = "mail-compose"
+
 type Email struct {
 	ID              uint           `json:"id" gorm:"primaryKey"`
 	UUID            string         `json:"uuid" gorm:"type:uuid;default:gen_random_uuid();uniqueIndex;not null"`

@@ -17,6 +17,7 @@
 #   2. commit the regenerated file together with the route change
 #   3. update web/src/api/*.ts callers if the change was breaking
 DELETE /api/v1/admin/announcements/{id}
+DELETE /api/v1/admin/mailboxes/{id}
 DELETE /api/v1/admin/oauth/providers/{id}
 DELETE /api/v1/admin/plans/{id}
 DELETE /api/v1/admin/queues/{queue}/tasks/{task_id}
@@ -27,6 +28,8 @@ DELETE /api/v1/admin/users/{id}
 DELETE /api/v1/admin/users/{id}/2fa
 DELETE /api/v1/admin/users/{id}/force
 DELETE /api/v1/auth/webauthn/credentials/{id}
+DELETE /api/v1/mail/folders/{id}
+DELETE /api/v1/mail/messages/{uid}
 DELETE /api/v1/users/me/app-passwords/{id}
 DELETE /api/v1/users/me/oauth/{provider_id}
 DELETE /api/v1/users/me/push/subscriptions/{id}
@@ -71,6 +74,8 @@ GET    /api/v1/admin/events
 GET    /api/v1/admin/events/stream
 GET    /api/v1/admin/events/{id}
 GET    /api/v1/admin/jobs
+GET    /api/v1/admin/mailboxes
+GET    /api/v1/admin/mailboxes/{id}/usage
 GET    /api/v1/admin/metrics
 GET    /api/v1/admin/metrics/stream
 GET    /api/v1/admin/oauth/providers
@@ -111,6 +116,13 @@ GET    /api/v1/inbound/attachments/{uuid}/{idx}
 GET    /api/v1/inbound/forward-confirm/{token}
 GET    /api/v1/info
 GET    /api/v1/invitations
+GET    /api/v1/mail/folders
+GET    /api/v1/mail/mailboxes
+GET    /api/v1/mail/messages
+GET    /api/v1/mail/messages/{uid}
+GET    /api/v1/mail/messages/{uid}/attachments/{index}
+GET    /api/v1/mail/messages/{uid}/delivery-status
+GET    /api/v1/mail/messages/{uid}/reply-frame
 GET    /api/v1/users/me
 GET    /api/v1/users/me/2fa/recovery-codes/count
 GET    /api/v1/users/me/app-passwords
@@ -226,11 +238,14 @@ GET    /t/o/{message_id}
 GET    /t/u/tx/{token}
 GET    /t/u/{token}
 GET    /t/v/{token}
+PATCH  /api/v1/admin/mailboxes/{id}
 PATCH  /api/v1/admin/plans/{id}/default
+PATCH  /api/v1/mail/folders/{id}
 PATCH  /api/v1/workspaces/current/domains/{id}/delivery-mode
 POST   /api/v1/admin/announcements
 POST   /api/v1/admin/domains/{id}/verify
 POST   /api/v1/admin/impersonate/exit
+POST   /api/v1/admin/mailboxes
 POST   /api/v1/admin/mailstore/search/reindex
 POST   /api/v1/admin/oauth/providers
 POST   /api/v1/admin/plans
@@ -277,6 +292,16 @@ POST   /api/v1/invitations/accept
 POST   /api/v1/invitations/decline
 POST   /api/v1/invitations/{id}/accept
 POST   /api/v1/invitations/{id}/decline
+POST   /api/v1/mail/attachments
+POST   /api/v1/mail/drafts
+POST   /api/v1/mail/drafts/{uid}/send
+POST   /api/v1/mail/folders
+POST   /api/v1/mail/folders/{id}/expunge
+POST   /api/v1/mail/messages/{uid}/copy
+POST   /api/v1/mail/messages/{uid}/flags
+POST   /api/v1/mail/messages/{uid}/move
+POST   /api/v1/mail/search
+POST   /api/v1/mail/send
 POST   /api/v1/subscriber-lists/subscribe
 POST   /api/v1/subscriber-lists/{id}/resubscribe
 POST   /api/v1/subscriber-lists/{id}/unsubscribe
@@ -375,6 +400,7 @@ PUT    /api/v1/admin/servers/{id}
 PUT    /api/v1/admin/settings
 PUT    /api/v1/admin/users/{id}
 PUT    /api/v1/auth/webauthn/credentials/{id}
+PUT    /api/v1/mail/drafts/{uid}
 PUT    /api/v1/users/me
 PUT    /api/v1/users/me/default-workspace
 PUT    /api/v1/users/me/password

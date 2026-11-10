@@ -108,6 +108,11 @@ func contractServer(t *testing.T) *okapi.TestServer {
 	// nil db is fine here — registration only captures the handler reference.
 	mailstoreSearch := handlers.NewMailstoreSearchAdminHandler(nil)
 
+	// OB-5 mailbox administration is wired unconditionally in InitRoutes too
+	// (nil store answers 503 at request time); nil is fine here —
+	// registration only captures the handler reference.
+	adminMailbox := handlers.NewAdminMailboxHandler(nil, nil)
+
 	// inbound and formIngest handlers exist only when their feature flag is on;
 	// construct them the same way InitRoutes does (nil stores are fine — the
 	// constructors are field-assign only).
@@ -140,6 +145,11 @@ func contractServer(t *testing.T) *okapi.TestServer {
 			inboundForwardTarget: forwardTargetHandler,
 			queueOps:             queueOps,
 			mailstoreSearch:      mailstoreSearch,
+			adminMailbox:         adminMailbox,
+			// OB-5 W1 webmail routes are registered unconditionally in
+			// registerRoutes; nil store answers 503 at request time, and
+			// registration only captures the handler reference.
+			mail: handlers.NewMailHandler(nil),
 		},
 	}
 	r.registerRoutes()

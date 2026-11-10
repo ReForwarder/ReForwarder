@@ -144,6 +144,15 @@ const navSections: NavSection[] = [
     ],
   },
   {
+    // Webmail (OB-5, ADR-005): the session user's own hosted mailboxes.
+    // User-facing surface — the admin mailbox administration lives under Admin.
+    id: 'mail',
+    title: 'Mail',
+    items: [
+      { name: 'Mailbox', path: '/mail', icon: 'mail' },
+    ],
+  },
+  {
     id: 'sending',
     title: 'Sending',
     items: [
@@ -261,6 +270,7 @@ const navSections: NavSection[] = [
       // The dashboard is the landing page for this section, so it leads.
       { name: 'Dashboard', path: '/admin/dashboard', icon: 'pie-chart' },
       { name: 'Users', path: '/admin/users', icon: 'users' },
+      { name: 'Mailboxes', path: '/admin/mailboxes', icon: 'mail' },
       { name: 'Workspaces', path: '/admin/workspaces', icon: 'briefcase' },
       { name: 'Plans', path: '/admin/plans', icon: 'layers' },
       { name: 'Shared Servers', path: '/admin/servers', icon: 'server' },

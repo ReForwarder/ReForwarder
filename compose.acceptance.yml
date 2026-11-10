@@ -1,0 +1,30 @@
+# Acceptance-run override (visual tester, 2026-11-08): enables the OB-3/OB-5
+# mailstore prerequisites on the dev stack so the /api/v1/mail/* webmail
+# surface is live. Additive only — merge with:
+#   docker compose -f compose.yml -f compose.override.yml -f compose.acceptance.yml up -d
+# The mail surface requires a blob store and an encryption key
+# (internal/routes/routes.go:502 — blobStore != nil && cfg.EncryptionKey != "").
+services:
+  posta:
+    environment:
+      POSTA_BLOB_PROVIDER: "fs"
+      POSTA_BLOB_FS_PATH: "/data/mail-blobs"
+      # Dev-only key (POSTA_ENV=dev deployment). 32 bytes.
+      POSTA_ENCRYPTION_KEY: "6f2b91c4a8d3e7510f9c2b6a4d8e3f17"
+      # (2026-11-10 run) Enables the POST /api/v1/inbound/webhook seam used to
+      # seed inbox messages (internal/handlers/inbound_handler.go:226 — an
+      # empty secret makes the webhook refuse with "not configured").
+      POSTA_INBOUND_WEBHOOK_SECRET: "acceptance-inbound-secret"
+    volumes:
+      - mail_blob_data:/data/mail-blobs
+
+  worker:
+    environment:
+      POSTA_BLOB_PROVIDER: "fs"
+      POSTA_BLOB_FS_PATH: "/data/mail-blobs"
+      POSTA_ENCRYPTION_KEY: "6f2b91c4a8d3e7510f9c2b6a4d8e3f17"
+    volumes:
+      - mail_blob_data:/data/mail-blobs
+
+volumes:
+  mail_blob_data:

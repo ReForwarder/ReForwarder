@@ -113,6 +113,10 @@ func Run(db *gorm.DB) error {
 		&models.MailFolder{},
 		&models.MailMessage{},
 		&models.MailBlobRef{}, // GAP-45 storage half: content-hash ref counts for dedup + GC
+		// OB-5 compose (ADR-005 W3): per-user compose-attachment staging rows —
+		// ownership + ADR-006 malware verdict per uploaded blob ref. Additive
+		// table; the attachment bytes themselves live in the blob store.
+		&models.MailAttachmentUpload{},
 	); err != nil {
 		return fmt.Errorf("failed to migrate database: %w", err)
 	}

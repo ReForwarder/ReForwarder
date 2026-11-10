@@ -331,12 +331,12 @@ flowchart TD
 
 ## Phase 5 — Webmail and mailbox administration
 
-- [ ] Mailbox provisioning and lifecycle management
+- [x] Mailbox provisioning and lifecycle management (2026-11-08, OB-5 wave W2 — the admin control-plane slice: `/admin/mailboxes` provision/quota/suspend/reactivate/cascade-delete + usage, audited `admin.mailbox.*`; user-facing webmail surfaces are the other ADR-005 waves)
 - [ ] Inbox, folders, compose, reply, forwarding, attachments
 - [ ] Search, read/unread state, mailbox settings
 - [ ] Password changes, sessions, device management
-- [ ] Mailbox quotas and usage reporting
-- [ ] Admin tools for mailbox suspension and recovery
+- [ ] Mailbox quotas and usage reporting (2026-11-08, OB-5 wave W2: admin-side quota management + usage reporting landed with `/admin/mailboxes` + `GET /admin/mailboxes/{id}/usage`; the self-service quota/usage display is the W1 frontend's scope)
+- [x] Admin tools for mailbox suspension and recovery (2026-11-08, OB-5 wave W2: `PATCH /admin/mailboxes/{id}` suspend/reactivate + confirm-gated cascade delete in `web/src/views/admin/Mailboxes.vue`, backed by `internal/services/mailstore/admin.go`)
 
 **Exit criteria:** users manage hosted email without a third-party webmail deployment.
 

@@ -37,6 +37,12 @@ const (
 	// delivery truth; this event marks the forwarding provenance on the
 	// message-history timeline.
 	EmailEventForwarded = "forwarded"
+	// EmailEventComposed stamps the moment the webmail compose seam accepted a
+	// message into the outbound pipeline (OB-5, ADR-005 decision 2). Like
+	// "forwarded" it has no write-once timestamp column — the delivery truth
+	// arrives as sent/failed/delivered events; this event marks the compose
+	// provenance (and the Sent-folder linkage) on the timeline.
+	EmailEventComposed = "composed"
 )
 
 // EmailEvent records one lifecycle event on the message-history timeline of an

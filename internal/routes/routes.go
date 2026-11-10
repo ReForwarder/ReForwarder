@@ -42,6 +42,7 @@ import (
 	"github.com/goposta/posta/internal/services/eventbus"
 	"github.com/goposta/posta/internal/services/inbound"
 	"github.com/goposta/posta/internal/services/inbox"
+	"github.com/goposta/posta/internal/services/mailcompose"
 	"github.com/goposta/posta/internal/services/mailstore"
 	"github.com/goposta/posta/internal/services/messages"
 	"github.com/goposta/posta/internal/services/notification"
@@ -53,6 +54,7 @@ import (
 	"github.com/goposta/posta/internal/services/security"
 	"github.com/goposta/posta/internal/services/seeder"
 	sessionpkg "github.com/goposta/posta/internal/services/session"
+	"github.com/goposta/posta/internal/services/spamfilter"
 	"github.com/goposta/posta/internal/services/settings"
 	"github.com/goposta/posta/internal/services/smtprelay"
 	"github.com/goposta/posta/internal/services/tracking"
@@ -171,7 +173,12 @@ type routerHandlers struct {
 	logs                 *handlers.LogsHandler
 	queueOps             *handlers.QueueOpsHandler
 	mailstoreSearch      *handlers.MailstoreSearchAdminHandler
-	webpush              *handlers.WebPushHandler
+	adminMailbox         *handlers.AdminMailboxHandler
+	mailCompose          *handlers.MailComposeHandler
+	// mail is the OB-5 W1 webmail REST surface (ADR-005 decision 1) for the
+	// session user's own mailboxes.
+	mail      *handlers.MailHandler
+	webpush   *handlers.WebPushHandler
 }
 
 func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *config.Config, eng *security.Engine, producer *worker.Producer, cronManager *cronpkg.Manager, blobStore blob.Store, ctx context.Context, notifier ...*notification.Service) *email.Service {
@@ -421,6 +428,93 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	// primary database, so it is wired unconditionally.
 	r.h.mailstoreSearch = handlers.NewMailstoreSearchAdminHandler(db)
 	r.h.mailstoreSearch.SetAuditLogger(auditLogger)
+
+	// OB-5 W2 mailbox administration (ADR-005 decision 3): provision/quota/
+	// suspend/delete + usage over the mailstore service. The service needs
+	// the same preconditions as inbound mailbox delivery (blob store + the
+	// at-rest encryption key — the production ZstdBlobCodec refuses to store
+	// unencrypted, SF-78); without either, the routes answer 503. The admin
+	// surface gets its own Service instance: the Service carries only
+	// in-process state (the per-folder write guard), cross-instance ordering
+	// is the database's (atomic UID claim, row locks), and this keeps the
+	// inbound wiring block untouched.
+	if blobStore != nil && cfg.EncryptionKey != "" {
+		if msSvc, err := mailstore.New(db, mailstore.ZstdBlobCodec{}, blobStore, nil); err != nil {
+			logger.Error("mailbox administration unavailable", "error", err)
+		} else {
+			r.h.adminMailbox = handlers.NewAdminMailboxHandler(msSvc, db)
+		}
+	}
+	if r.h.adminMailbox == nil {
+		// Unconfigured mailstore still gets a handler: it answers 503 on
+		// every endpoint instead of the route table dereferencing a nil
+		// handler (same pattern as the disabled-passkeys webauthn handler).
+		r.h.adminMailbox = handlers.NewAdminMailboxHandler(nil, db)
+	}
+	r.h.adminMailbox.SetAuditLogger(auditLogger)
+
+	// OB-5 W3 webmail compose seam (ADR-005 decision 2 + ADR-006 scan hook):
+	// attachment staging over the blob layer, send into the Sent folder +
+	// outbound pipeline, drafts, reply frame, delivery status. Same
+	// preconditions as the W2 block above (blob store + at-rest encryption
+	// key — the production ZstdBlobCodec refuses unencrypted storage, SF-78);
+	// without either, the compose routes answer 503. The compose surface gets
+	// its own mailstore Service instance for the same reason W2's does: the
+	// service carries only the in-process per-folder write guard, and this
+	// keeps the inbound and admin wiring blocks untouched. The spam scan runs
+	// through the deployment's clamd config (POSTA_CLAMAV_*); with no clamd
+	// configured the client reports disabled and uploads stage unscanned
+	// (ADR-006's config-gated fail-open posture).
+	if blobStore != nil && cfg.EncryptionKey != "" {
+		if msSvc, err := mailstore.New(db, mailstore.ZstdBlobCodec{}, blobStore, nil); err != nil {
+			logger.Error("webmail compose unavailable", "error", err)
+		} else {
+			composeSvc := mailcompose.New(
+				msSvc,
+				emailService,
+				spamfilter.NewClamdClient(spamfilter.ClamdConfig{
+					Host:     cfg.ClamAVHost,
+					Port:     cfg.ClamAVPort,
+					Timeout:  cfg.ClamAVTimeout,
+					FailMode: spamfilter.ClamFailModeFromEnv(cfg.ClamAVFailMode),
+				}),
+				mailcompose.NewGormStagingStore(db),
+				mailcompose.NewGormDeliveryStore(repositories.NewEmailRepository(db), repositories.NewEmailEventRepository(db)),
+				mailcompose.Config{AutoProvision: cfg.MailstoreAutoProvision},
+			)
+			r.h.mailCompose = handlers.NewMailComposeHandler(composeSvc)
+		}
+	}
+	if r.h.mailCompose == nil {
+		// Unconfigured mailstore still gets a handler: it answers 503 on
+		// every endpoint instead of the route table dereferencing a nil
+		// handler (same pattern as the disabled-passkeys webauthn handler).
+		r.h.mailCompose = handlers.NewMailComposeHandler(nil)
+	}
+
+	// OB-5 W1 webmail REST surface (ADR-005 decision 1): /api/v1/mail/* for
+	// the session user's own mailboxes — folders, message list/view, flags,
+	// attachments, ADR-003 FTS search. Same preconditions and construction
+	// posture as the W2/W3 blocks above; own Service instance (only
+	// in-process state, cross-instance ordering is the database's). The FTS
+	// searcher rides the same instance (POST /mail/search and the list
+	// endpoint's q parameter refuse search with 503 when it is unavailable).
+	if blobStore != nil && cfg.EncryptionKey != "" {
+		if msSvc, err := mailstore.New(db, mailstore.ZstdBlobCodec{}, blobStore, nil); err != nil {
+			logger.Error("webmail unavailable", "error", err)
+		} else {
+			if sr, serr := mailstore.NewPostgresSearcher(db); serr == nil {
+				msSvc.SetSearcher(sr)
+			}
+			r.h.mail = handlers.NewMailHandler(msSvc)
+		}
+	}
+	if r.h.mail == nil {
+		// Unconfigured mailstore still gets a handler: it answers 503 on
+		// every endpoint instead of the route table dereferencing a nil
+		// handler (same pattern as the disabled-passkeys webauthn handler).
+		r.h.mail = handlers.NewMailHandler(nil)
+	}
 
 	// Passkeys (R-19). The WebAuthn Relying Party identity is derived from the
 	// dashboard origin: RPID is the origin's bare host (no scheme, no port),
@@ -925,6 +1019,10 @@ func (r *Router) registerRoutes() {
 	r.app.Register(r.authRoutes()...)
 	r.app.Register(r.apiAuthRoutes()...)
 	r.app.Register(r.userRoutes()...)
+	// OB-5 (ADR-005 decision 1): the webmail REST surface under /mail, gated
+	// like /users/me (dashboard session, optional workspace header).
+	r.app.Register(r.mailRoutes()...)
+	r.app.Register(r.mailComposeRoutes()...)
 	r.app.Register(r.workspaceRoutes()...)
 	r.app.Register(r.workspaceResourceRoutes()...)
 	r.app.Register(r.automationRoutes()...)

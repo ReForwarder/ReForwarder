@@ -54,6 +54,14 @@ const routes = [
     meta: { auth: true },
     children: [
       { path: '', name: 'dashboard', component: () => import('../views/dashboard/Dashboard.vue'), meta: { title: 'Dashboard' } },
+      // Webmail (OB-5, ADR-005): the mailbox area of the same SPA, same auth.
+      // The mailbox route redirects to the first folder once Mailbox.vue knows
+      // it; /mail itself is the default mailbox view.
+      { path: 'mail', name: 'mail', component: () => import('../views/mail/Mailbox.vue'), meta: { title: 'Mail' } },
+      { path: 'mail/folder/:folderId', name: 'mail-folder', component: () => import('../views/mail/Mailbox.vue'), meta: { title: 'Mail' } },
+      { path: 'mail/message/:folderId/:uid', name: 'mail-message', component: () => import('../views/mail/MessageView.vue'), meta: { title: 'Message' } },
+      { path: 'mail/compose', name: 'mail-compose', component: () => import('../views/mail/Compose.vue'), meta: { title: 'Compose' } },
+      { path: 'mail/settings', name: 'mail-settings', component: () => import('../views/mail/MailSettings.vue'), meta: { title: 'Mail Settings' } },
       { path: 'api-keys', name: 'api-keys', component: () => import('../views/apikeys/ApiKeys.vue'), meta: { title: 'API Keys' } },
       { path: 'api-keys/:id', name: 'api-key-detail', component: () => import('../views/apikeys/ApiKeyDetail.vue'), meta: { title: 'API Key' } },
       { path: 'smtp-relay', name: 'smtp-relay', component: () => import('../views/smtp-relay/SmtpCredentials.vue'), meta: { title: 'SMTP Relay' } },
@@ -116,6 +124,7 @@ const routes = [
       { path: 'notifications', name: 'notifications', component: () => import('../views/Notifications.vue'), meta: { title: 'Notifications' } },
       { path: 'admin/users', name: 'admin-users', component: () => import('../views/admin/Users.vue'), meta: { admin: true, title: 'Admin · Users' } },
       { path: 'admin/users/:id', name: 'admin-user-detail', component: () => import('../views/admin/UserDetail.vue'), meta: { admin: true, title: 'Admin · User' } },
+      { path: 'admin/mailboxes', name: 'admin-mailboxes', component: () => import('../views/admin/Mailboxes.vue'), meta: { admin: true, title: 'Admin · Mailboxes' } },
       { path: 'admin/dashboard', name: 'admin-dashboard', component: () => import('../views/admin/Dashboard.vue'), meta: { admin: true, title: 'Admin · Dashboard' } },
       // The page was called Metrics until it grew a health summary and quick
       // links; keep the old path working for bookmarks and muscle memory.
