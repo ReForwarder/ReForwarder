@@ -70,7 +70,11 @@ type EmailSendHandler struct {
 	// (OB-2, ADR-002 decision 4). Nil or disabled keeps today's envelope:
 	// MAIL FROM is the plain sender address and bounce handling stays with
 	// the relay upstream.
-	verp     *inbound.Verp
+	verp *inbound.Verp
+	// ipPools resolves a sending domain's IP pool members and its active
+	// warm-up schedule (OB-6 W3, ADR-007 decision 7). Nil keeps the OB-1
+	// behavior: the domain's static bind IP alone, no warm-up cap.
+	ipPools  *repositories.IPPoolRepository
 	onSent   func()
 	onFailed func()
 }
@@ -158,6 +162,14 @@ func (h *EmailSendHandler) SetAutoSuppress(enabled bool) {
 // the only delivery path; a direct-mode email on such a worker fails closed.
 func (h *EmailSendHandler) SetMTAExecutor(e *mta.Executor) {
 	h.mta = e
+}
+
+// SetIPPoolRepo wires the IP pool substrate (OB-6 W3, ADR-007 decision 7):
+// direct-mode domains assigned to a pool rotate across its enabled member
+// IPs, and their active warm-up schedule caps the hourly budget. Nil (the
+// default) keeps the OB-1 behavior.
+func (h *EmailSendHandler) SetIPPoolRepo(r *repositories.IPPoolRepository) {
+	h.ipPools = r
 }
 
 // SetVerp enables the VERP return-path envelope on direct-to-MX deliveries
@@ -582,12 +594,7 @@ func (h *EmailSendHandler) processDirect(ctx context.Context, em *models.Email, 
 		msg = signed
 	}
 
-	res, err := h.mta.Deliver(ctx, mta.DeliverySpec{
-		SenderDomain:   senderDom,
-		DomainVerified: domain.OwnershipVerified,
-		BindIP:         domain.OutboundBindIP,
-		Policy:         mta.PolicyFor(domain),
-	}, mta.Envelope{
+	res, err := h.mta.Deliver(ctx, h.deliverySpec(ctx, domain, senderDom), mta.Envelope{
 		EmailID:     em.ID,
 		WorkspaceID: em.WorkspaceID,
 		From:        envelopeFrom,
@@ -613,6 +620,39 @@ func (h *EmailSendHandler) processDirect(ctx context.Context, em *models.Email, 
 	}
 	h.handleSendSuccess(em, nil, 0, prep.campMsg, prep.recipients, mtaMetadata(res))
 	return nil
+}
+
+// deliverySpec resolves the per-domain delivery configuration for one direct
+// delivery (OB-1 policy + OB-6 W3 pool/warm-up). The pool's enabled member
+// IPs replace the static bind IP as the selection candidates when the domain
+// is assigned to a pool; the domain's active warm-up schedule rides along and
+// the executor folds its cap into the hourly budget. A pool with no enabled
+// members (or any resolution error) degrades to the static bind IP — a
+// configuration failure must never turn into a missing source address.
+func (h *EmailSendHandler) deliverySpec(_ context.Context, domain *models.Domain, senderDom string) mta.DeliverySpec {
+	spec := mta.DeliverySpec{
+		SenderDomain:   senderDom,
+		DomainVerified: domain.OwnershipVerified,
+		BindIP:         domain.OutboundBindIP,
+		Policy:         mta.PolicyFor(domain),
+	}
+	if h.ipPools == nil {
+		return spec
+	}
+	if domain.PoolID != nil {
+		if ips := h.ipPools.EnabledMemberIPs(*domain.PoolID); len(ips) > 0 {
+			spec.PoolIPs = ips
+		}
+	}
+	if ws, err := h.ipPools.ActiveWarmupForDomain(domain.ID); err == nil && ws != nil {
+		spec.Warmup = &mta.WarmupSchedule{
+			StartVolume:     ws.StartVolume,
+			DailyMultiplier: ws.DailyMultiplier,
+			Days:            ws.Days,
+			StartedAt:       ws.StartedAt,
+		}
+	}
+	return spec
 }
 
 // mtaMetadata adds direct-delivery trace fields to history event metadata.

@@ -28,6 +28,7 @@ import (
 	"github.com/goposta/posta/internal/cron/jobs"
 	"github.com/goposta/posta/internal/logging"
 	"github.com/goposta/posta/internal/metrics"
+	"github.com/goposta/posta/internal/observability"
 	"github.com/goposta/posta/internal/services/automation"
 	"github.com/goposta/posta/internal/services/crypto"
 	"github.com/goposta/posta/internal/services/email"
@@ -62,12 +63,25 @@ func runWorker() error {
 	}()
 
 	cfg := config.New()
+	// OB-6 W5 (GAP-51): error-monitoring hook before anything that can exit
+	// fatally; the DB-backed recorder attaches below once the database is
+	// open. No-op unless POSTA_ERROR_WEBHOOK_URL is set.
+	observability.SetErrorHook(observability.NewErrorHook(
+		cfg.ErrorWebhookURL, cfg.ErrorWebhookSecret, "posta", config.Version, nil))
 	if err := cfg.InitWorker(); err != nil {
+		observability.CaptureGlobalFatal("worker configuration is not usable: " + err.Error())
 		logger.Fatal("worker configuration is not usable", "error", err)
 	}
 	cfg.InitStorage()
 
 	db := cfg.Database.DB
+
+	// OB-6 W5 (GAP-51): attach the platform-events recorder now that the
+	// database is available, so panics/fatals also land on the admin
+	// activity timeline (best-effort).
+	observability.SetErrorHook(observability.NewErrorHook(
+		cfg.ErrorWebhookURL, cfg.ErrorWebhookSecret, "posta", config.Version,
+		repositories.NewEventRepository(db)))
 	defer func() {
 		if sqlDB, err := db.DB(); err == nil {
 			_ = sqlDB.Close()
@@ -100,6 +114,7 @@ func runWorker() error {
 			FSBasePath:        cfg.BlobFSPath,
 		})
 		if err != nil {
+			observability.CaptureGlobalFatal("failed to initialize blob storage: " + err.Error())
 			logger.Fatal("failed to initialize blob storage", "error", err)
 		}
 		blobStore = bs
@@ -128,6 +143,10 @@ func runWorker() error {
 	// Outbound MTA executor (OB-1, ADR-001): domains configured 'direct'
 	// deliver direct-to-MX; everything else keeps today's relay path.
 	handler.SetMTAExecutor(newMTAExecutor(db, cfg))
+	// IP pools + warm-up (OB-6 W3, ADR-007 decision 7): direct-mode domains
+	// assigned to a pool rotate across its enabled member IPs and their
+	// active warm-up ramp caps the hourly budget.
+	handler.SetIPPoolRepo(repositories.NewIPPoolRepository(db))
 	// OB-2 (ADR-002 decision 4): direct-mode MAIL FROM becomes the VERP
 	// bounce address when the return-path feature is configured (off unless
 	// POSTA_RETURN_PATH_SUBDOMAIN + POSTA_RETURN_PATH_SECRET are set).
@@ -243,6 +262,7 @@ func runWorker() error {
 		parseSvc.SetEventBus(parseBus)
 		attachThreadRouter(parseSvc, db, cfg, parseProducer)
 		parseSvc.EnableDMARC(db) // R-17: parse DMARC aggregate reports on the parse path
+		parseSvc.EnableTLSRPT(db) // SF-31 (OB-6 W4): parse TLS reports on the parse path
 		parseSvc.EnableVerification(db, cfg.InboundHostname) // SF-22/23/24: message-level auth verification
 		parseHandler := worker.NewInboundParseHandler(
 			repositories.NewInboundEmailRepository(db),
@@ -309,6 +329,32 @@ func runWorker() error {
 		logger.Info("worker health endpoints listening",
 			"addr", addr, "paths", "/healthz /readyz /metrics")
 	}
+
+	// OB-6 W5 (SF-93): OTLP push exporter off the worker's registry too —
+	// delivery-side families (sends, failures, queue size) move here. Off
+	// unless POSTA_OTLP_ENDPOINT is set; failures log and skip.
+	otlpStop := func() {}
+	if cfg.OTLPEndpoint != "" {
+		headers, hdrErr := observability.ParseOTLPHeaders(cfg.OTLPHeaders)
+		if hdrErr != nil {
+			logger.Error("OTLP header config invalid, exporter not started", "error", hdrErr)
+		} else {
+			pushStop, startErr := observability.StartOTLPPusher(context.Background(), observability.OTLPOptions{
+				Endpoint:       cfg.OTLPEndpoint,
+				Interval:       time.Duration(cfg.OTLPIntervalSecs) * time.Second,
+				Headers:        headers,
+				ServiceName:    "posta",
+				ServiceVersion: config.Version,
+			})
+			if startErr != nil {
+				logger.Error("OTLP exporter failed to start", "error", startErr)
+			} else {
+				otlpStop = pushStop
+				logger.Info("OTLP push exporter started", "endpoint", cfg.OTLPEndpoint, "interval_secs", cfg.OTLPIntervalSecs)
+			}
+		}
+	}
+	defer otlpStop()
 
 	logger.Info("Posta worker started",
 		"version", config.Version,

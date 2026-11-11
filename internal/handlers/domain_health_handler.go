@@ -45,6 +45,13 @@ func NewDomainHealthHandler(health *domain.HealthService, domainRepo *repositori
 	return &DomainHealthHandler{health: health, domainRepo: domainRepo, audit: auditLogger}
 }
 
+// SetReputationReader wires the OB-6 W3 reputation/pool/warm-up sections
+// (ADR-007 decision 7) onto the underlying health service; a nil reader
+// keeps the report shape unchanged.
+func (h *DomainHealthHandler) SetReputationReader(r domain.ReputationReader) {
+	h.health.SetReputationReader(r)
+}
+
 // DomainHealthRequest names one domain.
 type DomainHealthRequest struct {
 	ID uint `param:"id"`

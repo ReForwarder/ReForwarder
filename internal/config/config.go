@@ -81,6 +81,29 @@ type Config struct {
 
 	MetricsEnabled bool
 
+	// ---- OB-6 W5 observability completion (SF-93 OTLP slice, SF-96, GAP-51).
+	// All three surfaces default OFF: an unset endpoint/URL ships nothing.
+
+	// OTLPEndpoint is the OTLP/HTTP receiver base URL
+	// (POSTA_OTLP_ENDPOINT, e.g. http://otel-collector:4318). Empty
+	// disables the push exporter — the existing Prometheus families are
+	// shipped via OTLP only when an operator points it at a collector.
+	OTLPEndpoint string
+	// OTLPIntervalSecs is the push period (POSTA_OTLP_INTERVAL_SECS,
+	// default 60).
+	OTLPIntervalSecs int
+	// OTLPHeaders carries collector authentication headers
+	// (POSTA_OTLP_HEADERS, comma-separated Name=Value).
+	OTLPHeaders string
+
+	// ErrorWebhookURL ships runtime panics/fatals as events
+	// (POSTA_ERROR_WEBHOOK_URL, GAP-51). Empty disables the hook.
+	ErrorWebhookURL string
+	// ErrorWebhookSecret optionally HMAC-signs the error-hook payload
+	// (POSTA_ERROR_WEBHOOK_SECRET) with the same scheme as delivery
+	// webhooks (X-Posta-Signature: sha256=<hex>).
+	ErrorWebhookSecret string
+
 	// UpdateCheck enables the daily "is there a newer release?" query to GitHub.
 	// It only ever reads a public release list and reports the answer to platform
 	// admins; it never upgrades anything and sends nothing about this install.
@@ -171,6 +194,17 @@ type Config struct {
 	BackupRetentionDays int
 	BackupPgDumpBin     string
 
+	// Multi-replica cron leader lease (GAP-03, ADR-009 §2). Off by default
+	// so single-replica behavior is unchanged; enable on EVERY replica of a
+	// multi-replica deployment so exactly one replica executes each
+	// scheduled cron tick. Failure semantics and recovery are documented in
+	// docs/docs/operations/redis-ha.md.
+	CronLeaderLeaseEnabled bool
+	// Lease TTL in seconds. A holder that stops renewing (crash, lost
+	// Redis) is displaced at most this late — the failover bound is one
+	// cron interval; the default matches the smallest schedule (1 minute).
+	CronLeaseTTLSeconds int
+
 	EmailVerificationRequired bool
 
 	// Encryption key for SMTP password encryption (if empty, base64 encoding is used)
@@ -258,6 +292,38 @@ type Config struct {
 	// guidance). Delivery mode itself is per-domain configuration.
 	MTAEhloName string
 
+	// MTA-STS policy hosting (SF-29, OB-6 W4, ADR-007 §5, RFC 8461).
+	// MTASTSEnabled (POSTA_MTA_STS_ENABLED, default false) gates the
+	// /.well-known/mta-sts.txt policy path on the existing HTTP server
+	// (ADR-009 §1: gated path). When enabled, a verified domain whose
+	// mta_sts_mode is set is served its policy on the mta-sts.<domain>
+	// vhost; the operator fronts that vhost with the standard reverse proxy
+	// (TLS terminates there). The outbound enforcement half (checking
+	// recipient-domain policies during direct delivery) is always active —
+	// it only tightens behavior for remote domains that publish an enforce
+	// policy themselves, and falls open on discovery failure per RFC 8461.
+	MTASTSEnabled bool
+
+	// MTASTSEhloDomain is the generator identity for outbound TLS reports
+	// (SF-31 outbound half): organization-name / contact-info in the report
+	// document and the local domain of the mta-sts-report@ sender address.
+	// Empty (POSTA_MTA_STS_ORG empty) keeps the outbound report pass inert —
+	// reports are never sent without an explicit identity.
+	MTASTSOrgDomain string
+
+	// DNS automation (OB-6, ADR-007 decision 1): the provider publication
+	// layer. DNSAutomationEnabled (POSTA_DNS_AUTOMATION_ENABLED, default
+	// false) gates the connect/publish/drift routes and the drift cron —
+	// off-by-default like every new surface (ADR-009 §8). DNSMailHost
+	// (POSTA_DNS_MAIL_HOST) is the FQDN the MX + return-path records point
+	// at; empty falls back to InboundHostname. DNSMailRouting
+	// (POSTA_DNS_MAIL_ROUTING, default false) opts the publication planner
+	// into writing MX/return-path records — publishing an MX redirects a
+	// domain's mail RECEIPT, so it stays an explicit operator choice.
+	DNSAutomationEnabled bool
+	DNSMailHost          string
+	DNSMailRouting       bool
+
 	// Return-path / VERP (OB-2, ADR-002 decision 4, CA-05). ReturnPathSubdomain
 	// is the subdomain label prepended to each sending domain to form the
 	// bounce host — e.g. "bounce" turns sender domain mail.example.com into
@@ -293,6 +359,15 @@ type Config struct {
 	IMAP MailProtocolConfig
 	POP3 MailProtocolConfig
 
+	// ACME certificate lifecycle (SF-34, ADR-007 decision 3, OB-6 wave W2):
+	// per-domain SNI certificates for the IMAP(993)/POP3(995) implicit-TLS
+	// listeners, the submission(587) STARTTLS handshake and the webmail
+	// HTTPS path, issued through golang.org/x/crypto/acme/autocert with the
+	// certificate cache in the blob store. The whole feature is OFF by
+	// default; see internal/services/certmanager (package doc) for the
+	// challenge and listener posture, and the CertSolver DNS-01 seam.
+	ACME AcmeConfig
+
 	// Provider event webhook secrets (R-04). Each upstream provider that
 	// posts delivery events to /api/v1/webhooks/provider/{provider} is
 	// authenticated by its own signing secret; a provider whose secret is
@@ -325,6 +400,34 @@ type MailProtocolConfig struct {
 	MaxConnsPerIP      int // concurrent connections per client IP, both listeners
 	CommandRateLimit   int // commands per session per CommandRateWindow; required
 	CommandRateWindow  int // command-rate window in seconds
+}
+
+// AcmeConfig carries the ACME certificate-lifecycle settings (SF-34,
+// ADR-007 decision 3). Every listener posture the certificates serve is
+// described in internal/services/certmanager; the HTTPS listener here is
+// the webmail HTTPS path (okapi secondary TLS server — the plain-HTTP
+// listener keeps serving the API and the HTTP-01 challenge responder).
+type AcmeConfig struct {
+	Enabled      bool     // POSTA_ACME_ENABLED, default false
+	DirectoryURL string   // POSTA_ACME_DIRECTORY_URL; empty = Let's Encrypt production
+	Email        string   // POSTA_ACME_EMAIL — ACME account contact
+	Domains      []string // POSTA_ACME_DOMAINS — explicit certificate targets (comma-separated)
+
+	// Webmail HTTPS listener (okapi WithTLSServer). Port 0 (the default)
+	// keeps the webmail/API on plain HTTP only; a non-zero port serves the
+	// same app over TLS with the SNI map, so mapping 443 to it also enables
+	// TLS-ALPN-01 challenges. The optional static certificate pair is the
+	// fallback for SNI names the ACME map does not cover.
+	HTTPSHost     string // POSTA_ACME_HTTPS_HOST, default 0.0.0.0
+	HTTPSPort     int    // POSTA_ACME_HTTPS_PORT, default 0 (off)
+	HTTPSCertFile string // POSTA_ACME_HTTPS_CERT_FILE
+	HTTPSKeyFile  string // POSTA_ACME_HTTPS_KEY_FILE
+
+	// Blob-store cache namespace for the issued certificates, and the
+	// interval (seconds) of the SF-110 host-allowlist hot reload
+	// (verified tenant domains re-read and applied without restart).
+	CachePrefix string // POSTA_ACME_CACHE_PREFIX, default certs/acme
+	SyncSecs    int    // POSTA_ACME_SYNC_SECS, default 300
 }
 
 type SystemSMTPConfig struct {
@@ -450,6 +553,25 @@ type LogConfig struct {
 	Level string
 }
 
+// newAcmeConfig reads the ACME certificate-lifecycle settings (SF-34,
+// ADR-007 decision 3). Everything defaults OFF/empty: the feature exists
+// only when POSTA_ACME_ENABLED=true (the listener wiring treats that as the
+// single gate).
+func newAcmeConfig() AcmeConfig {
+	return AcmeConfig{
+		Enabled:       goutils.EnvBool("POSTA_ACME_ENABLED", false),
+		DirectoryURL:  goutils.Env("POSTA_ACME_DIRECTORY_URL", ""),
+		Email:         goutils.Env("POSTA_ACME_EMAIL", ""),
+		Domains:       splitList(goutils.Env("POSTA_ACME_DOMAINS", "")),
+		HTTPSHost:     goutils.Env("POSTA_ACME_HTTPS_HOST", "0.0.0.0"),
+		HTTPSPort:     goutils.EnvInt("POSTA_ACME_HTTPS_PORT", 0),
+		HTTPSCertFile: goutils.Env("POSTA_ACME_HTTPS_CERT_FILE", ""),
+		HTTPSKeyFile:  goutils.Env("POSTA_ACME_HTTPS_KEY_FILE", ""),
+		CachePrefix:   goutils.Env("POSTA_ACME_CACHE_PREFIX", "certs/acme"),
+		SyncSecs:      goutils.EnvInt("POSTA_ACME_SYNC_SECS", 300),
+	}
+}
+
 func New() *Config {
 	if err := godotenv.Load(); err != nil {
 		logger.Debug("no .env file found, using environment variables")
@@ -489,7 +611,16 @@ func New() *Config {
 		AllowDowngrade:             goutils.EnvBool("POSTA_ALLOW_DOWNGRADE", false),
 		securitySchemes:            okapi.SecuritySchemes{},
 
-		MetricsEnabled:  goutils.EnvBool("POSTA_METRICS_ENABLED", false),
+		MetricsEnabled: goutils.EnvBool("POSTA_METRICS_ENABLED", false),
+
+		// OB-6 W5 observability: OTLP push exporter (SF-93) and the
+		// error-monitoring hook (GAP-51) — both default-off.
+		OTLPEndpoint:       goutils.Env("POSTA_OTLP_ENDPOINT", ""),
+		OTLPIntervalSecs:   goutils.EnvInt("POSTA_OTLP_INTERVAL_SECS", 60),
+		OTLPHeaders:        goutils.Env("POSTA_OTLP_HEADERS", ""),
+		ErrorWebhookURL:    goutils.Env("POSTA_ERROR_WEBHOOK_URL", ""),
+		ErrorWebhookSecret: goutils.Env("POSTA_ERROR_WEBHOOK_SECRET", ""),
+
 		UpdateCheck:     goutils.EnvBool("POSTA_UPDATE_CHECK", true),
 		PlanEnforcement: goutils.EnvBool("POSTA_PLAN_ENFORCEMENT", false),
 		WebDir:          goutils.Env("POSTA_WEB_DIR", ""),
@@ -547,6 +678,12 @@ func New() *Config {
 		BackupDir:           goutils.Env("POSTA_BACKUP_DIR", "backups"),
 		BackupRetentionDays: goutils.EnvInt("POSTA_BACKUP_RETENTION_DAYS", 14),
 		BackupPgDumpBin:     goutils.Env("POSTA_BACKUP_PG_DUMP_BIN", "pg_dump"),
+
+		// GAP-03 cron leader lease: off by default — a single replica must
+		// not start depending on Redis liveness for its cron schedule. When
+		// on, the TTL bounds failover to one cron interval.
+		CronLeaderLeaseEnabled: goutils.EnvBool("POSTA_CRON_LEADER_LEASE_ENABLED", false),
+		CronLeaseTTLSeconds:    goutils.EnvInt("POSTA_CRON_LEASE_TTL_SECONDS", 60),
 
 		EncryptionKey: goutils.Env("POSTA_ENCRYPTION_KEY", ""),
 
@@ -613,6 +750,17 @@ func New() *Config {
 		// Outbound MTA (OB-1): EHLO name for direct-to-MX sessions.
 		MTAEhloName: goutils.Env("POSTA_MTA_EHLO_NAME", ""),
 
+		// MTA-STS policy hosting (SF-29, OB-6 W4): gated well-known path;
+		// see the field comments for the gate semantics.
+		MTASTSEnabled:   goutils.EnvBool("POSTA_MTA_STS_ENABLED", false),
+		MTASTSOrgDomain: strings.ToLower(strings.TrimSpace(goutils.Env("POSTA_MTA_STS_ORG", ""))),
+
+		// DNS automation (OB-6, ADR-007 decision 1): off by default; see the
+		// field comments for the gate semantics.
+		DNSAutomationEnabled: goutils.EnvBool("POSTA_DNS_AUTOMATION_ENABLED", false),
+		DNSMailHost:          goutils.Env("POSTA_DNS_MAIL_HOST", ""),
+		DNSMailRouting:       goutils.EnvBool("POSTA_DNS_MAIL_ROUTING", false),
+
 		// Return-path / VERP (OB-2, ADR-002 decision 4): empty subdomain =
 		// feature off (the default; zero behavior change).
 		ReturnPathSubdomain: strings.ToLower(strings.TrimSpace(goutils.Env("POSTA_RETURN_PATH_SUBDOMAIN", ""))),
@@ -634,6 +782,7 @@ func New() *Config {
 		// the limits are required when on (validate()).
 		IMAP: newMailProtocolConfig("IMAP", 143, 993),
 		POP3: newMailProtocolConfig("POP3", 110, 995),
+		ACME: newAcmeConfig(),
 
 		ProviderSESSecret:      goutils.Env("POSTA_PROVIDER_SES_SECRET", ""),
 		ProviderSendGridKey:    goutils.Env("POSTA_PROVIDER_SENDGRID_KEY", ""),
@@ -684,8 +833,11 @@ func (c *Config) validate() error {
 		switch c.SubmissionTLSMode {
 		case "", "none":
 		case "starttls":
-			if c.SubmissionTLSCertFile == "" || c.SubmissionTLSKeyFile == "" {
-				return fmt.Errorf("POSTA_SUBMISSION_TLS_MODE=starttls requires POSTA_SUBMISSION_TLS_CERT_FILE and POSTA_SUBMISSION_TLS_KEY_FILE")
+			// A static certificate pair OR the ACME SNI map (SF-34, ADR-007
+			// decision 3) can serve the STARTTLS handshake; without either,
+			// starttls mode has no certificate to offer.
+			if (c.SubmissionTLSCertFile == "" || c.SubmissionTLSKeyFile == "") && !c.ACME.Enabled {
+				return fmt.Errorf("POSTA_SUBMISSION_TLS_MODE=starttls requires POSTA_SUBMISSION_TLS_CERT_FILE and POSTA_SUBMISSION_TLS_KEY_FILE (or POSTA_ACME_ENABLED=true with an ACME certificate map)")
 			}
 		default:
 			return fmt.Errorf("unsupported POSTA_SUBMISSION_TLS_MODE %q (use none or starttls)", c.SubmissionTLSMode)
@@ -698,10 +850,37 @@ func (c *Config) validate() error {
 			return fmt.Errorf("invalid POSTA_TRUSTED_PROXIES entry %q (expected a CIDR block or IP address)", entry)
 		}
 	}
+	if err := c.validateACME(); err != nil {
+		return err
+	}
 	if err := c.validateMailProtocols(); err != nil {
 		return err
 	}
 	return c.ValidateSecurity()
+}
+
+// validateACME enforces the ADR-007 certificate-lifecycle posture (SF-34):
+// ACME needs the blob store for the certificate cache (the cache is
+// structural — see certmanager.New), the webmail HTTPS listener needs a
+// sane bind, and the static fallback pair (when given) must be complete.
+func (c *Config) validateACME() error {
+	a := c.ACME
+	if !a.Enabled {
+		return nil
+	}
+	if c.BlobProvider == "" {
+		return fmt.Errorf("POSTA_ACME_ENABLED=true requires the blob store (POSTA_BLOB_PROVIDER=fs|s3): issued certificates are cached there and the hot reload re-reads them (ADR-007 decision 3)")
+	}
+	if a.HTTPSPort < 0 || a.HTTPSPort > 65535 {
+		return fmt.Errorf("invalid POSTA_ACME_HTTPS_PORT %d (use 0 to keep the webmail path on plain HTTP, or 1-65535)", a.HTTPSPort)
+	}
+	if (a.HTTPSCertFile == "") != (a.HTTPSKeyFile == "") {
+		return fmt.Errorf("POSTA_ACME_HTTPS_CERT_FILE and POSTA_ACME_HTTPS_KEY_FILE must be set together (static fallback certificate for the webmail HTTPS listener)")
+	}
+	if a.SyncSecs <= 0 {
+		return fmt.Errorf("POSTA_ACME_SYNC_SECS must be positive (the SF-110 host-allowlist hot reload interval)")
+	}
+	return nil
 }
 
 // isLoopbackHost reports whether host binds only the loopback interface — the
@@ -737,8 +916,10 @@ func (c *Config) validateMailProtocols() error {
 		if m.Port > 65535 || m.TLSPort > 65535 {
 			return fmt.Errorf("%s_PORT and %s_TLS_PORT must be at most 65535", name, name)
 		}
-		if m.TLSPort > 0 && (m.TLSCertFile == "" || m.TLSKeyFile == "") {
-			return fmt.Errorf("%s_TLS_PORT=%d requires %s_TLS_CERT_FILE and %s_TLS_KEY_FILE (implicit TLS serves no cleartext)", name, m.TLSPort, name, name)
+		// An implicit-TLS port needs a certificate: the static pair, or the
+		// ACME SNI map (OB-6 W2, SF-34/ADR-007 decision 3) when enabled.
+		if m.TLSPort > 0 && (m.TLSCertFile == "" || m.TLSKeyFile == "") && !c.ACME.Enabled {
+			return fmt.Errorf("%s_TLS_PORT=%d requires %s_TLS_CERT_FILE and %s_TLS_KEY_FILE (or POSTA_ACME_ENABLED=true with an ACME certificate map; implicit TLS serves no cleartext)", name, m.TLSPort, name, name)
 		}
 		if m.Port > 0 && (m.TLSCertFile == "" || m.TLSKeyFile == "") && !isLoopbackHost(m.Host) {
 			return fmt.Errorf("%s_PORT=%d without %s_TLS_CERT_FILE/%s_TLS_KEY_FILE is only permitted on a loopback bind (%s_HOST=%q); set the certificate files to serve a public address", name, m.Port, name, name, name, m.Host)

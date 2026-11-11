@@ -553,6 +553,8 @@ export interface Domain {
   verification_token: string
   created_at: string
   dns_records?: DnsRecords
+  /** IP pool the domain sends from (OB-6 W3); null = static bind IP only. */
+  pool_id?: number | null
 }
 
 export interface DnsRecords {
@@ -746,6 +748,8 @@ export interface DashboardFeatures {
   messages: boolean
   inbound: boolean
   relay: boolean
+  /** OB-6 DNS automation (ADR-007): the domain provider/publish panel gate. */
+  dns_automation?: boolean
 }
 
 export interface DailyVolume {
@@ -2289,7 +2293,179 @@ export interface DomainHealthReport {
   signing: HealthSigningStatus
   sending: HealthSendingHealth
   records?: DnsRecords
+  ptr?: HealthPTRGuidance
+  /** OB-6 W3 (ADR-007 decision 7): reputation/pool/warm-up additions. */
+  reputation?: DomainReputationReport
+  pool?: DomainPoolView
+  warmup?: DomainWarmupView
   checked_at: string
+}
+
+/** Reverse-DNS guidance for the outbound bind IP (OB-1, ADR-001 §7). */
+export interface HealthPTRGuidance {
+  bound_ip?: string
+  ptr_name?: string
+  match: string
+  guidance?: string
+}
+
+// ---- OB-6 DNS automation (ADR-007 decision 1) ----
+
+/** One record of the publication plan, with its role in the deliverability set. */
+export interface DnsPlannedRecord {
+  kind: 'verification' | 'spf' | 'dkim' | 'dmarc' | 'mx' | 'return-path'
+  record: DnsRecordSpec
+}
+
+/** A provider-neutral DNS record (FQDN name without a trailing dot). */
+export interface DnsRecordSpec {
+  type: string
+  name: string
+  value: string
+  ttl?: number
+  priority?: number
+}
+
+/** The masked provider connection — the raw credential never leaves the server. */
+export interface DnsCredentialView {
+  provider: string
+  masked: string
+  zone?: string
+  last_verified_at?: string | null
+  created_at: string
+}
+
+/** The last publication outcome. */
+export interface DnsPublicationView {
+  published_at?: string | null
+  publish_error?: string
+  record_count: number
+}
+
+/** One record whose live state diverges from the published plan. */
+export interface DnsDriftFinding {
+  kind: 'missing' | 'changed'
+  record: string
+  expected?: string
+  actual?: string
+}
+
+/** The drift health surface the hourly re-verification cron maintains. */
+export interface DnsDriftStatusView {
+  status: 'unknown' | 'ok' | 'drift'
+  findings?: DnsDriftFinding[]
+  last_checked_at?: string | null
+  published_at?: string | null
+  connected: boolean
+}
+
+/** Payload of GET /workspaces/current/domains/{id}/dns-provider. */
+export interface DnsStatusView {
+  connected?: DnsCredentialView | null
+  plan: DnsPlannedRecord[]
+  publication?: DnsPublicationView | null
+  drift?: DnsDriftStatusView | null
+}
+
+/** Payload of POST /workspaces/current/domains/{id}/dns-records/publish. */
+export interface DnsPublishResult {
+  records: DnsRecordSpec[]
+  verification?: {
+    ownership_verified: boolean
+    spf_verified: boolean
+    dkim_verified: boolean
+    dmarc_verified: boolean
+    checked_at: string
+  } | null
+}
+
+/** One per-day point of the reputation trend series. */
+export interface ReputationDayPoint {
+  day: string
+  attempts: number
+  delivered: number
+  permanent: number
+  deferred: number
+  bounced: number
+  complained: number
+}
+
+/** Reputation of one source IP against one recipient domain. */
+export interface IPReputationView {
+  ip: string
+  domain: string
+  attempts: number
+  delivered: number
+  transient: number
+  permanent: number
+  deferred: number
+  dns_failure: number
+  refused: number
+  sent: number
+  bounced: number
+  complained: number
+  /** Percent of sent (recipient events). */
+  bounce_rate: number
+  complaint_rate: number
+  /** Percent of attempts (transport outcomes). */
+  hard_fail_rate: number
+  deferred_rate: number
+  /** good | warning | poor | unknown */
+  grade: string
+  trend: ReputationDayPoint[]
+}
+
+/** Per-source-IP reputation surface for one domain (OB-6 W3). */
+export interface DomainReputationReport {
+  domain: string
+  window_days: number
+  since: string
+  ips: IPReputationView[]
+  generated_at: string
+  limitation_note: string
+}
+
+/** The domain's assigned IP pool (OB-6 W3). */
+export interface DomainPoolView {
+  pool_id: number
+  name: string
+  /** shared | workspace */
+  scope: string
+  strategy: string
+  member_ips: string[]
+  member_count: number
+}
+
+/** The domain's active warm-up ramp with today's resolved caps (OB-6 W3). */
+export interface DomainWarmupView {
+  active: boolean
+  start_volume: number
+  daily_multiplier: number
+  days: number
+  started_at: string
+  day_index: number
+  daily_cap: number
+  hourly_cap: number
+}
+
+/** One IP pool with its members (GET/POST /workspaces/current/ip-pools). */
+export interface IPPoolView {
+  id: number
+  workspace_id?: number | null
+  /** shared | workspace */
+  scope: string
+  name: string
+  description: string
+  strategy: string
+  members: IPPoolMemberView[]
+  domains_using: number
+}
+
+export interface IPPoolMemberView {
+  id: number
+  ip: string
+  ptr_name?: string
+  enabled: boolean
 }
 
 /** Roll-up of the RFC 7489 aggregate reports ingested for one domain (R-17). */

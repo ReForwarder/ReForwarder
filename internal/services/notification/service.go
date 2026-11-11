@@ -52,6 +52,9 @@ const (
 	TemplateAccountDeletion = "account_deletion"
 	TemplateNewMessage      = "new_message"
 	TemplateMessageDigest   = "message_digest"
+	// TemplateMetricAlert (SF-96, OB-6) is the body of the optional email
+	// action fired by the metric-alert engine (internal/services/meticalert).
+	TemplateMetricAlert = "metric_alert"
 )
 
 var templatePreference = map[string]func(*models.UserSetting) bool{
@@ -122,6 +125,7 @@ func (s *Service) loadTemplates() {
 		TemplateAccountDeletion,
 		TemplateNewMessage,
 		TemplateMessageDigest,
+		TemplateMetricAlert,
 	}
 	for _, name := range names {
 		tmpl := template.Must(template.ParseFS(templateFS,

@@ -47,9 +47,11 @@ import (
 // through the existing repository method, and the audit event per transition.
 
 var dkColumns = map[string][]string{
+	// pool_id: OB-6 W3 additive column (domains.pool_id) — Save() on the model
+	// emits it in every UPDATE's SET list, so the fake must know it.
 	"domains": {"id", "user_id", "workspace_id", "domain", "ownership_verified", "spf_verified",
 		"dkim_verified", "dmarc_verified", "verification_token", "delivery_mode", "outbound_bind_ip",
-		"max_msgs_per_connection", "hourly_budget", "created_at"},
+		"max_msgs_per_connection", "hourly_budget", "pool_id", "mta_sts_mode", "created_at"},
 	"domain_signing_keys": {"id", "user_id", "workspace_id", "domain_id", "selector", "algorithm",
 		"private_key_pem", "status", "dns_state", "dns_published_at", "created_at", "updated_at"},
 	"settings": {"id", "key", "value", "type", "created_at", "updated_at"},

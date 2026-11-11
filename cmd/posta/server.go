@@ -22,14 +22,17 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/emersion/go-smtp"
+	"github.com/jkaninda/okapi"
 
 	"github.com/goposta/posta/internal/config"
 	cronpkg "github.com/goposta/posta/internal/cron"
@@ -37,8 +40,10 @@ import (
 	"github.com/goposta/posta/internal/logging"
 	"github.com/goposta/posta/internal/metrics"
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/observability"
 	"github.com/goposta/posta/internal/routes"
 	"github.com/goposta/posta/internal/services/automation"
+	"github.com/goposta/posta/internal/services/certmanager"
 	"github.com/goposta/posta/internal/services/crypto"
 	"github.com/goposta/posta/internal/services/email"
 	"github.com/goposta/posta/internal/services/emailhistory"
@@ -47,6 +52,7 @@ import (
 	"github.com/goposta/posta/internal/services/inbound"
 	"github.com/goposta/posta/internal/services/mailauth"
 	"github.com/goposta/posta/internal/services/mailstore"
+	"github.com/goposta/posta/internal/services/meticalert"
 	"github.com/goposta/posta/internal/services/messages"
 	"github.com/goposta/posta/internal/services/mta"
 	"github.com/goposta/posta/internal/services/notification"
@@ -58,14 +64,15 @@ import (
 	"github.com/goposta/posta/internal/services/seeder"
 	"github.com/goposta/posta/internal/services/settings"
 	"github.com/goposta/posta/internal/services/smtprelay"
+	"github.com/goposta/posta/internal/services/tlsrpt"
 	"github.com/goposta/posta/internal/services/spamfilter"
 	"github.com/goposta/posta/internal/services/tracking"
 	"github.com/goposta/posta/internal/services/updatecheck"
 	"github.com/goposta/posta/internal/services/webhook"
 	"github.com/goposta/posta/internal/services/workermon"
 	workspacesvc "github.com/goposta/posta/internal/services/workspace"
-	"github.com/goposta/posta/internal/services/workspaceprovision"
 	"github.com/goposta/posta/internal/storage"
+	"github.com/goposta/posta/internal/services/workspaceprovision"
 	"github.com/goposta/posta/internal/storage/blob"
 	"github.com/goposta/posta/internal/storage/migration"
 	"github.com/goposta/posta/internal/storage/migration/upgrade"
@@ -95,10 +102,26 @@ type serverResources struct {
 	imap *imap.Server
 	// logSinks releases the SF-94 file sink (nil when stdout-only).
 	logSinks io.Closer
+	// certMgr is the ACME/SNI certificate manager (OB-6 W2, SF-34, ADR-007
+	// decision 3); nil unless POSTA_ACME_ENABLED=true and the blob store is
+	// configured — a nil manager keeps the static-certificate behavior on
+	// every listener. certCancel stops the SF-110 host-allowlist hot-reload
+	// loop at shutdown.
+	certMgr    *certmanager.Manager
+	certCancel context.CancelFunc
+	// otlpStop stops the SF-93 OTLP push exporter (OB-6 W5); nil unless
+	// POSTA_OTLP_ENDPOINT is set.
+	otlpStop func()
 }
 
 func runServer(cli *okapicli.CLI) {
 	cfg := config.New()
+	// OB-6 W5 (GAP-51): error-monitoring hook, installed before anything that
+	// can panic or exit fatally. The DB-backed platform-event recorder is
+	// attached in OnStart once the database is up; until then the hook only
+	// has its webhook side. No-op unless POSTA_ERROR_WEBHOOK_URL is set.
+	observability.SetErrorHook(observability.NewErrorHook(
+		cfg.ErrorWebhookURL, cfg.ErrorWebhookSecret, "posta", config.Version, nil))
 	// ---- P3-3 (SF-94): multi-sink logging (POSTA_LOG_SINKS / POSTA_LOG_FILE).
 	// Must run BEFORE cfg.Initialize(app): the structured logger's handler
 	// captures os.Stdout at construction, so the file tee has to be in place
@@ -110,6 +133,7 @@ func runServer(cli *okapicli.CLI) {
 	}
 	app := cli.Okapi()
 	if err := cfg.Initialize(app); err != nil {
+		observability.CaptureGlobalFatal("Failed to initialize Posta: " + err.Error())
 		logger.Fatal("Failed to initialize Posta", "error", err)
 	}
 	res := &serverResources{logSinks: logSinks}
@@ -120,7 +144,16 @@ func runServer(cli *okapicli.CLI) {
 			res.db = cfg.Database.DB
 			res.redis = cfg.Redis.Client
 
+			// OB-6 W5 (GAP-51): re-install the error hook with the
+			// platform-events recorder, so panics/fatals also land on the
+			// admin activity timeline (best-effort) in addition to the
+			// POSTA_ERROR_WEBHOOK_URL POST.
+			observability.SetErrorHook(observability.NewErrorHook(
+				cfg.ErrorWebhookURL, cfg.ErrorWebhookSecret, "posta", config.Version,
+				repositories.NewEventRepository(res.db)))
+
 			if err := migration.Run(res.db); err != nil {
+				observability.CaptureGlobalFatal("failed to run migrations: " + err.Error())
 				logger.Fatal("failed to run migrations", "error", err)
 			}
 
@@ -128,6 +161,7 @@ func runServer(cli *okapicli.CLI) {
 				AllowDowngrade:  cfg.AllowDowngrade,
 				PlanEnforcement: cfg.PlanEnforcement,
 			}); err != nil {
+				observability.CaptureGlobalFatal("failed to run upgrade steps: " + err.Error())
 				logger.Fatal("failed to run upgrade steps", "error", err)
 			}
 
@@ -147,6 +181,7 @@ func runServer(cli *okapicli.CLI) {
 			email.SetDkimSigner(email.NewDkimSigningService(repositories.NewDomainSigningKeyRepository(res.db)))
 
 			if err := storage.SeedAdmin(res.db, cfg.AdminEmail, cfg.AdminPassword, cfg.ValidateAdminSeedPassword); err != nil {
+				observability.CaptureGlobalFatal("failed to seed admin user: " + err.Error())
 				logger.Fatal("failed to seed admin user", "error", err)
 			}
 
@@ -176,10 +211,64 @@ func runServer(cli *okapicli.CLI) {
 					FSBasePath:        cfg.BlobFSPath,
 				})
 				if err != nil {
+					observability.CaptureGlobalFatal("failed to initialize blob storage: " + err.Error())
 					logger.Fatal("failed to initialize blob storage", "error", err)
 				}
 				res.blobStore = bs
 				logger.Info("blob storage initialized", "provider", cfg.BlobProvider)
+			}
+
+			// ACME certificate lifecycle (OB-6 W2, SF-34, ADR-007 decision 3):
+			// per-domain SNI certificates for the IMAP(993)/POP3(995)
+			// implicit-TLS listeners, the submission(587) STARTTLS handshake
+			// and the webmail HTTPS path, issued through autocert and cached
+			// in the blob store. Off unless POSTA_ACME_ENABLED=true (validate
+			// also requires the blob store, which the cache needs). A nil
+			// certMgr keeps every listener on the static-certificate behavior.
+			if cfg.ACME.Enabled && res.blobStore != nil {
+				certCtx, certCancel := context.WithCancel(context.Background())
+				cache := certmanager.NewBlobCacheWithPrefix(res.blobStore, cfg.ACME.CachePrefix)
+				mgr, mgrErr := certmanager.New(certmanager.Options{
+					Email:        cfg.ACME.Email,
+					DirectoryURL: cfg.ACME.DirectoryURL,
+					Hosts:        cfg.ACME.Domains,
+					Cache:        cache,
+				})
+				if mgrErr != nil {
+					// Fail-open to static certificates: log, keep starting.
+					certCancel()
+					logger.Error("ACME certificate manager unavailable; TLS listeners keep static certificates only", "error", mgrErr)
+				} else {
+					mgr.SetHostSource(newACMEHostSource(res.db, cfg))
+					mgr.StartHostSync(certCtx, time.Duration(cfg.ACME.SyncSecs)*time.Second)
+					res.certMgr = mgr
+					res.certCancel = certCancel
+
+					// HTTP-01 through the existing HTTP server: only
+					// /.well-known/acme-challenge/ paths are intercepted,
+					// everything else falls through to the app.
+					app.UseMiddleware(func(next http.Handler) http.Handler {
+						return mgr.HTTPChallenge(next)
+					})
+
+					// Webmail HTTPS path (okapi secondary TLS server — the
+					// plain-HTTP listener keeps serving the API and the
+					// HTTP-01 responder). Port 0 keeps the webmail path on
+					// plain HTTP only.
+					if cfg.ACME.HTTPSPort > 0 {
+						var webBase *tls.Certificate
+						if cfg.ACME.HTTPSCertFile != "" && cfg.ACME.HTTPSKeyFile != "" {
+							webBase, mgrErr = certmanager.StaticCertFromFiles(cfg.ACME.HTTPSCertFile, cfg.ACME.HTTPSKeyFile)
+							if mgrErr != nil {
+								observability.CaptureGlobalFatal("failed to load POSTA_ACME_HTTPS certificate: " + mgrErr.Error())
+								logger.Fatal("failed to load webmail HTTPS fallback certificate", "error", mgrErr)
+							}
+						}
+						webAddr := net.JoinHostPort(cfg.ACME.HTTPSHost, strconv.Itoa(cfg.ACME.HTTPSPort))
+						app.With(okapi.WithTLSServer(webAddr, mgr.WebListenerTLSConfig(webBase)))
+						logger.Info("webmail HTTPS listener configured (ACME SNI map)", "addr", webAddr)
+					}
+				}
 			}
 
 			// Notification service
@@ -251,8 +340,25 @@ func runServer(cli *okapicli.CLI) {
 				res.blobStore,
 				context.Background(), notifier)
 
+			// SF-31 outbound half (OB-6 W4, ADR-007 §5): the daily TLS report
+			// pass over our own delivery aggregates. Inert until the operator
+			// sets POSTA_MTA_STS_ORG (reports are never sent without an
+			// explicit generator identity); reports go ONLY to rua addresses
+			// read from each remote policy domain's live _smtp._tls TXT record.
+			if res.cronManager != nil && cfg.MTASTSOrgDomain != "" {
+				sender := newTLSRPTSender(emailSvc, cfg)
+				res.cronManager.Register(jobs.NewTLSRPTReportJob(
+					res.db,
+					tlsrpt.NewAggregator(res.db),
+					sender,
+					"mta-sts-report@"+cfg.MTASTSOrgDomain,
+					cfg.MTASTSOrgDomain,
+				))
+			}
+
 			if cfg.SMTPRelayEnabled && !cfg.DevMode {
 				if srv, err := startSMTPRelayServer(res.db, cfg, emailSvc, secEng); err != nil {
+					observability.CaptureGlobalFatal("failed to start SMTP relay server: " + err.Error())
 					logger.Fatal("failed to start SMTP relay server", "error", err)
 				} else {
 					res.smtpRelay = srv
@@ -263,7 +369,7 @@ func runServer(cli *okapicli.CLI) {
 			// 587 feeding accepted messages into the same pipeline as API
 			// sends. Off by default (POSTA_SUBMISSION_ENABLED).
 			if cfg.SubmissionEnabled && !cfg.DevMode {
-				if srv, err := startSubmissionServer(res.db, cfg, emailSvc, secEng); err != nil {
+				if srv, err := startSubmissionServer(res.db, cfg, emailSvc, secEng, res.certMgr); err != nil {
 					logger.Error("failed to start submission server", "error", err)
 				} else {
 					res.smtpSubmission = srv
@@ -276,7 +382,7 @@ func runServer(cli *okapicli.CLI) {
 				// POSTA_POP3_TLS_PORT is served). Off by default
 				// (POSTA_POP3_ENABLED).
 				if cfg.POP3.Enabled && !cfg.DevMode {
-					if srv, err := startPOP3Server(res.db, cfg, res.blobStore, secEng); err != nil {
+					if srv, err := startPOP3Server(res.db, cfg, res.blobStore, secEng, res.certMgr); err != nil {
 						logger.Error("failed to start POP3 server", "error", err)
 					} else {
 						res.pop3 = srv
@@ -289,7 +395,7 @@ func runServer(cli *okapicli.CLI) {
 				// TLS on 993 when POSTA_IMAP_TLS_PORT is served). Off by
 				// default (POSTA_IMAP_ENABLED).
 				if cfg.IMAP.Enabled && !cfg.DevMode {
-					if srv, err := startIMAPServer(res.db, cfg, res.blobStore, secEng, res.redis); err != nil {
+					if srv, err := startIMAPServer(res.db, cfg, res.blobStore, secEng, res.redis, res.certMgr); err != nil {
 						logger.Error("failed to start IMAP server", "error", err)
 					} else {
 						res.imap = srv
@@ -298,6 +404,31 @@ func runServer(cli *okapicli.CLI) {
 
 			if res.cronManager != nil {
 				res.cronManager.Start(context.Background())
+			}
+
+			// OB-6 W5 (SF-93): OTLP push exporter shipping the existing
+			// Prometheus families to an OTLP/HTTP collector. Off unless
+			// POSTA_OTLP_ENDPOINT is set; a misconfigured endpoint logs and
+			// skips — it must not take the server down.
+			if cfg.OTLPEndpoint != "" {
+				headers, hdrErr := observability.ParseOTLPHeaders(cfg.OTLPHeaders)
+				if hdrErr != nil {
+					logger.Error("OTLP header config invalid, exporter not started", "error", hdrErr)
+				} else {
+					stop, startErr := observability.StartOTLPPusher(context.Background(), observability.OTLPOptions{
+						Endpoint:       cfg.OTLPEndpoint,
+						Interval:       time.Duration(cfg.OTLPIntervalSecs) * time.Second,
+						Headers:        headers,
+						ServiceName:    "posta",
+						ServiceVersion: config.Version,
+					})
+					if startErr != nil {
+						logger.Error("OTLP exporter failed to start", "error", startErr)
+					} else {
+						res.otlpStop = stop
+						logger.Info("OTLP push exporter started", "endpoint", cfg.OTLPEndpoint, "interval_secs", cfg.OTLPIntervalSecs)
+					}
+				}
 			}
 
 			if !cfg.DevMode {
@@ -315,6 +446,7 @@ func runServer(cli *okapicli.CLI) {
 			shutdownServer(res)
 		},
 	}); err != nil {
+		observability.CaptureGlobalFatal("server error: " + err.Error())
 		logger.Fatal("server error", "error", err)
 	}
 }
@@ -444,6 +576,7 @@ func newInboundServiceForWorker(db *gorm.DB,
 	}
 	attachThreadRouter(svc, db, cfg, producer)
 	attachDMARC(svc, db)
+	attachTLSRPT(svc, db)
 	attachVerification(svc, db, cfg)
 	return svc
 }
@@ -471,6 +604,15 @@ func attachThreadRouter(svc *inbound.Service, db *gorm.DB, cfg *config.Config, p
 // never fail because DMARC parsing did.
 func attachDMARC(svc *inbound.Service, db *gorm.DB) {
 	svc.EnableDMARC(db)
+}
+
+// attachTLSRPT wires SMTP TLS report ingestion (SF-31 inbound half, OB-6 W4,
+// ADR-007 §5) into every inbound service that parses mail — the R-17 DMARC
+// pattern with the dedicated tlsrpt@ rua allowlist. The processor contains
+// its own errors — ingestion must never fail because TLS-report parsing did.
+func attachTLSRPT(svc *inbound.Service, db *gorm.DB) {
+	svc.EnableTLSRPT(db)
+	svc.SetTLSRPTAddress(inbound.NewTlsRptAllowlist())
 }
 
 // attachVerification wires message-level SPF/DKIM/DMARC verification
@@ -610,6 +752,10 @@ func startInboundSMTPServer(
 	backend := inbound.NewBackend(svc, domainRepo, cfg.InboundMaxMessageSize)
 	backend.SetRouter(routeRouter)
 	backend.SetVerp(verp)
+	// SF-31 (OB-6 W4): the receiver accepts tlsrpt@<verified-domain> report
+	// addresses through the dedicated allowlist (same pattern as the VERP
+	// bounce host).
+	backend.SetTLSRPT(inbound.NewTlsRptAllowlist())
 	if cfg.InboundSMTPRateLimit > 0 {
 		window := time.Duration(cfg.InboundSMTPRateWindow) * time.Second
 		backend.SetRateLimiter(inbound.NewIPRateLimiter(cfg.InboundSMTPRateLimit, window))
@@ -696,6 +842,39 @@ func startSMTPRelayServer(
 	return srv, nil
 }
 
+// newTLSRPTSender adapts the email service's system path onto the TLS-RPT
+// report sender seam (SF-31 outbound half, OB-6 W4): the report rides the
+// standard outbound pipeline as system-provenance mail — queued, signed,
+// retried with the standard backoff — never through the tenant send path
+// (no suppression, quota or marketing limits apply to it, mirroring the
+// forwarding posture). The document is attached gzipped per RFC 8460 §7.3.
+func newTLSRPTSender(emailSvc *email.Service, cfg *config.Config) tlsrpt.Sender {
+	return tlsrpt.SenderFunc(func(ctx context.Context, req *tlsrpt.OutboundReportRequest) error {
+		filename, body, err := tlsrpt.GzipAttachment(req)
+		if err != nil {
+			return err
+		}
+		_, err = emailSvc.SendSystemForward(ctx, &email.SystemForwardRequest{
+			From: req.From,
+			To:   req.To,
+			Subject: fmt.Sprintf("Report Domain: %s Submitter: %s Report-ID: %s",
+				req.PolicyDomain, cfg.MTASTSOrgDomain, req.ReportID),
+			Text: tlsrpt.ReportText(req),
+			Attachments: []models.Attachment{{
+				Filename:    filename,
+				Content:     base64.StdEncoding.EncodeToString(body),
+				ContentType: "application/tlsrpt+json",
+			}},
+			Metadata: map[string]any{
+				"tlsrpt":        true,
+				"policy_domain": req.PolicyDomain,
+				"report_id":     req.ReportID,
+			},
+		})
+		return err
+	})
+}
+
 // newMTAExecutor builds the outbound MTA executor (OB-1, ADR-001): system-DNS
 // MX resolver with a 30s cache, a sliding-hour per-domain budget, and the
 // durable attempt-record repository. The EHLO name comes from
@@ -705,15 +884,55 @@ func startSMTPRelayServer(
 func newMTAExecutor(db *gorm.DB, cfg *config.Config) *mta.Executor {
 	executor := mta.NewExecutor(mta.NewResolver(), mta.NewBudgetKeeper(time.Hour), repositories.NewMTADeliveryAttemptRepository(db))
 	executor.SetHeloDomain(cfg.MTAEhloName)
+	// SF-29 (OB-6 W4, ADR-007 §5): outbound MTA-STS enforcement for direct
+	// delivery — the runner consults each recipient domain's published
+	// policy through the process-wide hook (deliver.go's opts literal is
+	// untouched; the hook only tightens behavior for domains that publish
+	// mode: enforce, and discovery failures fall open per RFC 8461 §6.1).
+	mta.SetDefaultSTS(mta.NewEnforcer(mta.NewPolicyClient()))
 	return executor
+}
+
+// newACMEHostSource builds the certificate-target allowlist snapshot source
+// (OB-6 W2, SF-34/ADR-007 decision 3): the ownership-verified tenant domains
+// (ADR-008 decision 2 — unverified domains are refused as certificate
+// targets) plus the operator's explicit POSTA_ACME_DOMAINS list (mail
+// subdomains like mail.example.com are not tenant rows). The certmanager
+// hot-reload loop (SF-110) calls this on its sync interval, so newly
+// verified domains join the SNI map without a restart.
+func newACMEHostSource(db *gorm.DB, cfg *config.Config) func(ctx context.Context) []string {
+	return func(ctx context.Context) []string {
+		hosts := make([]string, 0, len(cfg.ACME.Domains)+8)
+		hosts = append(hosts, cfg.ACME.Domains...)
+		verified := true
+		domains, _, err := repositories.NewDomainRepository(db).FindAllFiltered(
+			repositories.AdminDomainFilter{Verified: &verified}, 10000, 0)
+		if err != nil {
+			// Keep the previous allowlist on a transient read failure: the
+			// refresh loop logs and retries on the next tick.
+			logger.Warn("ACME host source read failed; keeping the previous allowlist", "error", err)
+			return nil
+		}
+		for _, d := range domains {
+			if d.OwnershipVerified && d.Domain != "" {
+				hosts = append(hosts, d.Domain)
+			}
+		}
+		return hosts
+	}
 }
 
 // startSubmissionServer launches the gated SMTP submission listener (SF-03,
 // ADR-001 §10): AUTH against SMTP relay credentials, tenant-verified sender
 // domains, validated recipients — no open relay. Accepted messages enter the
 // same pipeline as API sends through the email service.
+//
+// certMgr (nil unless POSTA_ACME_ENABLED=true, OB-6 W2/SF-34) serves the
+// STARTTLS handshake through the SNI certificate map when the listener runs
+// starttls mode without a static certificate pair.
 func startSubmissionServer(
 	db *gorm.DB, cfg *config.Config, emailSvc *email.Service, secEng *security.Engine,
+	certMgr *certmanager.Manager,
 ) (*smtp.Server, error) {
 	verifier := mta.NewRelayCredentialVerifier(
 		repositories.NewSMTPCredentialRepository(db),
@@ -738,6 +957,11 @@ func startSubmissionServer(
 		TLSMode:        cfg.SubmissionTLSMode,
 		TLSCertFile:    cfg.SubmissionTLSCertFile,
 		TLSKeyFile:     cfg.SubmissionTLSKeyFile,
+		// OB-6 W2 (SF-34, ADR-007 decision 3): the ACME SNI map serves the
+		// STARTTLS handshake when no static certificate pair is configured.
+		// Submission is STARTTLS in this tree (RFC 8314); the manager method
+		// returns nil for a nil manager, keeping the static-only behavior.
+		TLSGetCertificate: certMgr.SubmissionTLSGetCert(nil),
 	})
 	if err != nil {
 		return nil, err
@@ -775,6 +999,7 @@ func startPOP3Server(
 	cfg *config.Config,
 	blobStore blob.Store,
 	secEng *security.Engine,
+	certMgr *certmanager.Manager,
 ) (*pop3.Server, error) {
 	mcfg := cfg.POP3
 	// Message bodies live in content-addressed encrypted blobs (ADR-003);
@@ -819,19 +1044,43 @@ func startPOP3Server(
 	srv.SetAudit(auditSink)
 	srv.SetSecurity(secEng)
 
+	// TLS wiring (OB-6 W2, SF-34/ADR-007 decision 3): with the ACME manager
+	// present, the implicit-TLS listener serves the per-domain SNI map —
+	// static certificate first for the names it covers, ACME-issued
+	// certificates for the map's hosts, the static certificate as the
+	// fallback otherwise. Without a static certificate at all, the SNI map
+	// alone serves the listener (ACME-only). The plaintext/STLS listener
+	// shares the same configuration.
 	var tlsCfg *tls.Config
-	if mcfg.TLSCertFile != "" && mcfg.TLSKeyFile != "" {
-		cert, err := tls.LoadX509KeyPair(mcfg.TLSCertFile, mcfg.TLSKeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("load POP3 TLS cert: %w", err)
+	switch {
+	case mcfg.TLSCertFile != "" && mcfg.TLSKeyFile != "":
+		base, certErr := tls.LoadX509KeyPair(mcfg.TLSCertFile, mcfg.TLSKeyFile)
+		if certErr != nil {
+			return nil, fmt.Errorf("load POP3 TLS cert: %w", certErr)
 		}
-		tlsCfg = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			ServerName:   mcfg.Hostname,
-			MinVersion:   tls.VersionTLS12,
+		baseCert := base
+		if certMgr != nil {
+			// Parse the leaf so SNI coverage checks can read the SANs.
+			parsed, parseErr := certmanager.StaticCertFromFiles(mcfg.TLSCertFile, mcfg.TLSKeyFile)
+			if parseErr != nil {
+				return nil, fmt.Errorf("load POP3 TLS cert: %w", parseErr)
+			}
+			baseCert = *parsed
+			tlsCfg = certMgr.MailListenerTLSConfig(parsed)
+		} else {
+			tlsCfg = &tls.Config{
+				Certificates: []tls.Certificate{baseCert},
+				ServerName:   mcfg.Hostname,
+				MinVersion:   tls.VersionTLS12,
+			}
 		}
 		srv.SetTLSConfig(tlsCfg)
-	} else if mcfg.TLSPort > 0 {
+	case certMgr != nil && mcfg.TLSPort > 0:
+		// ACME-only implicit-TLS listener: every certificate comes from the
+		// SNI map; unknown SNI fails the handshake (fail-closed).
+		tlsCfg = certMgr.MailListenerTLSConfig(nil)
+		srv.SetTLSConfig(tlsCfg)
+	case mcfg.TLSPort > 0:
 		return nil, errors.New("POP3 TLS port configured without POSTA_POP3_TLS_CERT_FILE/POSTA_POP3_TLS_KEY_FILE (implicit TLS serves no cleartext)")
 	}
 
@@ -891,6 +1140,7 @@ func startIMAPServer(
 	blobStore blob.Store,
 	secEng *security.Engine,
 	rdb *redis.Client,
+	certMgr *certmanager.Manager,
 ) (*imap.Server, error) {
 	mcfg := cfg.IMAP
 	// Message bodies live in content-addressed encrypted blobs (ADR-003);
@@ -942,19 +1192,40 @@ func startIMAPServer(
 	srv.SetAudit(auditSink)
 	srv.SetSecurity(secEng)
 
+	// TLS wiring (OB-6 W2, SF-34/ADR-007 decision 3): same posture as POP3 —
+	// the ACME SNI map serves the implicit-TLS listener when the manager is
+	// present; the static certificate covers its own names first and remains
+	// the fallback otherwise; without a static certificate the map alone
+	// serves the listener (fail-closed for unknown SNI).
 	var tlsCfg *tls.Config
-	if mcfg.TLSCertFile != "" && mcfg.TLSKeyFile != "" {
-		cert, err := tls.LoadX509KeyPair(mcfg.TLSCertFile, mcfg.TLSKeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("load IMAP TLS cert: %w", err)
+	switch {
+	case mcfg.TLSCertFile != "" && mcfg.TLSKeyFile != "":
+		base, certErr := tls.LoadX509KeyPair(mcfg.TLSCertFile, mcfg.TLSKeyFile)
+		if certErr != nil {
+			return nil, fmt.Errorf("load IMAP TLS cert: %w", certErr)
 		}
-		tlsCfg = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			ServerName:   mcfg.Hostname,
-			MinVersion:   tls.VersionTLS12,
+		baseCert := base
+		if certMgr != nil {
+			// Parse the leaf so SNI coverage checks can read the SANs.
+			parsed, parseErr := certmanager.StaticCertFromFiles(mcfg.TLSCertFile, mcfg.TLSKeyFile)
+			if parseErr != nil {
+				return nil, fmt.Errorf("load IMAP TLS cert: %w", parseErr)
+			}
+			baseCert = *parsed
+			tlsCfg = certMgr.MailListenerTLSConfig(parsed)
+		} else {
+			tlsCfg = &tls.Config{
+				Certificates: []tls.Certificate{baseCert},
+				ServerName:   mcfg.Hostname,
+				MinVersion:   tls.VersionTLS12,
+			}
 		}
 		srv.SetTLSConfig(tlsCfg)
-	} else if mcfg.TLSPort > 0 {
+	case certMgr != nil && mcfg.TLSPort > 0:
+		// ACME-only implicit-TLS listener (993).
+		tlsCfg = certMgr.MailListenerTLSConfig(nil)
+		srv.SetTLSConfig(tlsCfg)
+	case mcfg.TLSPort > 0:
 		return nil, errors.New("IMAP TLS port configured without POSTA_IMAP_TLS_CERT_FILE/POSTA_IMAP_TLS_KEY_FILE (implicit TLS serves no cleartext)")
 	}
 
@@ -1026,6 +1297,10 @@ func startEmbeddedWorker(db *gorm.DB,
 	// Outbound MTA executor (OB-1): domains configured 'direct' deliver
 	// direct-to-MX; everything else keeps today's relay path (ADR-001).
 	handler.SetMTAExecutor(newMTAExecutor(db, cfg))
+	// IP pools + warm-up (OB-6 W3, ADR-007 decision 7): direct-mode domains
+	// assigned to a pool rotate across its enabled member IPs and their
+	// active warm-up ramp caps the hourly budget.
+	handler.SetIPPoolRepo(repositories.NewIPPoolRepository(db))
 	// OB-2 (ADR-002 decision 4): direct-mode MAIL FROM becomes the VERP
 	// bounce address when the return-path feature is configured; relay mode
 	// keeps the upstream provider's envelope. Off unless
@@ -1245,14 +1520,16 @@ func initCronManager(
 			}
 		}()
 	}
-	manager.Register(jobs.NewDailyReportJob(repositories.NewWorkspaceRepository(db)))
+	dailyReportJob := jobs.NewDailyReportJob(repositories.NewWorkspaceRepository(db))
+	manager.Register(dailyReportJob)
 	manager.Register(jobs.NewAccountCleanupJob(repositories.NewUserRepository(db)))
 	manager.Register(jobs.NewAPIKeyExpiryJob(db, notifier))
-	manager.Register(jobs.NewBounceAlertJob(
+	bounceAlertJob := jobs.NewBounceAlertJob(
 		db, notifier,
 		repositories.NewBounceRepository(db),
 		repositories.NewSuppressionRepository(db),
-	))
+	)
+	manager.Register(bounceAlertJob)
 	if producer != nil {
 		manager.Register(jobs.NewCampaignRestartJob(
 			repositories.NewCampaignRepository(db),
@@ -1306,6 +1583,53 @@ func initCronManager(
 	// API-driven; this only automates the retire step, making old keys
 	// deletable without operator follow-up.
 	manager.Register(jobs.NewDKIMRetireJob(db, settingsProvider))
+	// ---- OB-6 W3 (ADR-007 decision 7): daily IP-reputation rollup pass.
+	// Aggregates mta_delivery_attempts + email_events into
+	// ip_reputation_rollups for the previous two UTC days (idempotent
+	// upserts); the R-07 report refreshes the current day on read.
+	manager.Register(jobs.NewIPReputationRollupJob(db))
+
+	// ---- SF-96 (OB-6 W5): platform metric-alert engine. Rules live in the
+	// `metric_alert_rules` platform setting (admin-gated settings API); this
+	// cron evaluates them every minute and executes the fire/resolve actions
+	// (event + webhook + optional email). Registered unconditionally —
+	// without rules the evaluation is a cheap no-op, the same posture as the
+	// bounce-alert job.
+	manager.Register(jobs.NewMetricAlertJob(meticalert.NewEngine(
+		settingsProvider,
+		repositories.NewEventRepository(db),
+		notifier,
+	)))
+
+	// ---- GAP-03 (ADR-009 §2): multi-replica cron leadership. Off by
+	// default; when enabled on EVERY replica, each scheduled tick first
+	// acquires/renews a Redis SET-NX-PX lease and non-holders skip the tick
+	// — fail-closed on Redis errors, since mutual exclusion is the feature.
+	// The same client backs the per-recipient dedup guard on the two
+	// customer-facing alert jobs, covering the crash window between lease
+	// acquire and send. Failure modes and recovery: docs/docs/operations/redis-ha.md.
+	if cfg.CronLeaderLeaseEnabled {
+		leaseClient := cfg.Redis.Client
+		if leaseClient == nil {
+			if client, err := storage.NewRedis(cfg.Redis.RedisOptions()); err == nil {
+				leaseClient = client
+			} else {
+				logger.Error("cron leader lease: redis client unavailable; crons keep running on every replica (single-replica semantics)", "error", err)
+			}
+		}
+		if leaseClient != nil {
+			manager.SetLeaderLease(cronpkg.NewLeaderLease(
+				cronpkg.NewRedisLeaseStore(leaseClient),
+				cronpkg.DefaultLeaseKey,
+				time.Duration(cfg.CronLeaseTTLSeconds)*time.Second,
+				cronpkg.NewHolderID(),
+			))
+			claims := cronpkg.NewRedisClaimStore(leaseClient)
+			bounceAlertJob.SetClaimStore(claims)
+			dailyReportJob.SetClaimStore(claims)
+			logger.Info("cron leader lease enabled", "ttl_seconds", cfg.CronLeaseTTLSeconds)
+		}
+	}
 
 	return manager
 }
@@ -1331,6 +1655,12 @@ func startRetryWorker(db *gorm.DB, cfg *config.Config, producer *worker.Producer
 // shutdownServer gracefully closes all server resources.
 func shutdownServer(res *serverResources) {
 	logger.Info("Posta Server shutting down gracefully...")
+
+	// OB-6 W5 (SF-93): stop the OTLP push exporter first — one final partial
+	// interval is not worth delaying the drain of real listeners.
+	if res.otlpStop != nil {
+		res.otlpStop()
+	}
 
 	if res.smtpInbound != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1363,6 +1693,10 @@ func shutdownServer(res *serverResources) {
 		// Close terminates listeners and live conns, releasing the
 		// per-user/per-IP slots with them.
 		res.imap.Close()
+	}
+	if res.certCancel != nil {
+		// Stop the SF-110 host-allowlist hot-reload loop (OB-6 W2/SF-34).
+		res.certCancel()
 	}
 	if res.cronManager != nil {
 		res.cronManager.Stop()

@@ -43,6 +43,10 @@ type DashboardFeatures struct {
 	Messages bool `json:"messages"`
 	Inbound  bool `json:"inbound"`
 	Relay    bool `json:"relay"`
+	// DNSAutomation (OB-6, ADR-007 decision 1) tells the dashboard whether
+	// the domain DNS provider/publish panel is available on this deployment
+	// (POSTA_DNS_AUTOMATION_ENABLED, default off).
+	DNSAutomation bool `json:"dns_automation"`
 }
 
 type DashboardStats struct {

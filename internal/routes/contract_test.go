@@ -135,6 +135,14 @@ func contractServer(t *testing.T) *okapi.TestServer {
 			InboundEnabled:   true,
 			MessagesEnabled:  true,
 			SMTPRelayEnabled: true,
+			// OB-6 DNS automation routes ride this flag in
+			// workspaceResourceRoutes; the golden file pins them like every
+			// other env-gated group.
+			DNSAutomationEnabled: true,
+			// OB-6 W4 (SF-29): the MTA-STS policy path is env-gated in
+			// production (POSTA_MTA_STS_ENABLED); the golden file pins the
+			// complete surface, so the flag rides on here too.
+			MTASTSEnabled: true,
 		},
 		v1: app.Group("/api/v1"),
 		h: routerHandlers{
@@ -150,6 +158,10 @@ func contractServer(t *testing.T) *okapi.TestServer {
 			// registerRoutes; nil store answers 503 at request time, and
 			// registration only captures the handler reference.
 			mail: handlers.NewMailHandler(nil),
+			// OB-6 W4 (SF-29): the MTA-STS policy path is registered when
+			// MTASTSEnabled is on; nil store is fine here — registration only
+			// captures the handler reference.
+			mtaStsPolicy: handlers.NewMTASTSPolicyHandler(nil),
 		},
 	}
 	r.registerRoutes()

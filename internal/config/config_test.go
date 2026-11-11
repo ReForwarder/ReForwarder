@@ -157,3 +157,71 @@ func TestAllowedCORSOrigins(t *testing.T) {
 		})
 	}
 }
+
+// TestCronLeaderLeaseOffByDefault (GAP-03, ADR-009 §2): the multi-replica
+// leader lease must be an explicit opt-in — a plain `New()` (no env) keeps
+// single-replica behavior (lease off), and the TTL only moves when the
+// operator sets it.
+func TestCronLeaderLeaseOffByDefault(t *testing.T) {
+	t.Run("off by default with default TTL", func(t *testing.T) {
+		cfg := New()
+		if cfg.CronLeaderLeaseEnabled {
+			t.Fatal("POSTA_CRON_LEADER_LEASE_ENABLED must default to off")
+		}
+		if cfg.CronLeaseTTLSeconds != 60 {
+			t.Fatalf("CronLeaseTTLSeconds = %d, want 60", cfg.CronLeaseTTLSeconds)
+		}
+	})
+
+	t.Run("env opt-in and TTL honored", func(t *testing.T) {
+		t.Setenv("POSTA_CRON_LEADER_LEASE_ENABLED", "true")
+		t.Setenv("POSTA_CRON_LEASE_TTL_SECONDS", "30")
+		cfg := New()
+		if !cfg.CronLeaderLeaseEnabled {
+			t.Fatal("env opt-in not honored")
+		}
+		if cfg.CronLeaseTTLSeconds != 30 {
+			t.Fatalf("CronLeaseTTLSeconds = %d, want 30", cfg.CronLeaseTTLSeconds)
+		}
+	})
+}
+
+// TestObservabilityConfigDefaultsOff (OB-6 W5, SF-93/GAP-51): the OTLP push
+// exporter and the error-monitoring hook ship NOTHING unless an operator
+// configures an endpoint/URL — plain New() must leave both disabled, and the
+// env keys must be honored when set.
+func TestObservabilityConfigDefaultsOff(t *testing.T) {
+	t.Run("defaults off", func(t *testing.T) {
+		cfg := New()
+		if cfg.OTLPEndpoint != "" {
+			t.Fatalf("POSTA_OTLP_ENDPOINT must default to empty (exporter off), got %q", cfg.OTLPEndpoint)
+		}
+		if cfg.OTLPIntervalSecs != 60 {
+			t.Fatalf("POSTA_OTLP_INTERVAL_SECS = %d, want 60", cfg.OTLPIntervalSecs)
+		}
+		if cfg.ErrorWebhookURL != "" {
+			t.Fatalf("POSTA_ERROR_WEBHOOK_URL must default to empty (hook off), got %q", cfg.ErrorWebhookURL)
+		}
+	})
+
+	t.Run("env opt-in honored", func(t *testing.T) {
+		t.Setenv("POSTA_OTLP_ENDPOINT", "http://otel-collector:4318")
+		t.Setenv("POSTA_OTLP_INTERVAL_SECS", "15")
+		t.Setenv("POSTA_OTLP_HEADERS", "Authorization=Basic x")
+		t.Setenv("POSTA_ERROR_WEBHOOK_URL", "https://errors.example.com/hook")
+		t.Setenv("POSTA_ERROR_WEBHOOK_SECRET", "shh")
+		cfg := New()
+		if cfg.OTLPEndpoint != "http://otel-collector:4318" {
+			t.Fatalf("OTLPEndpoint = %q", cfg.OTLPEndpoint)
+		}
+		if cfg.OTLPIntervalSecs != 15 {
+			t.Fatalf("OTLPIntervalSecs = %d, want 15", cfg.OTLPIntervalSecs)
+		}
+		if cfg.OTLPHeaders != "Authorization=Basic x" {
+			t.Fatalf("OTLPHeaders = %q", cfg.OTLPHeaders)
+		}
+		if cfg.ErrorWebhookURL != "https://errors.example.com/hook" || cfg.ErrorWebhookSecret != "shh" {
+			t.Fatalf("error hook env not honored: %q/%q", cfg.ErrorWebhookURL, cfg.ErrorWebhookSecret)
+		}
+	})
+}

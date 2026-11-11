@@ -458,6 +458,21 @@ func IncrementAutomationScheduleFire() {
 	automationScheduleFiresTotal.Inc()
 }
 
+// IncrementHTTPRequests moves the HTTP request counter for one finished
+// request. The PrometheusMiddleware is the production caller; the helper
+// exists so tests (and the observability dashboard check) can materialize the
+// family without running a request through the router (OB-6).
+func IncrementHTTPRequests(method, path, status string) {
+	httpRequestsTotal.WithLabelValues(method, path, status).Inc()
+}
+
+// ObserveHTTPDuration records one HTTP request duration. Production goes
+// through PrometheusMiddleware; the helper exists so tests can materialize
+// the histogram family (OB-6).
+func ObserveHTTPDuration(seconds float64) {
+	httpRequestDuration.WithLabelValues("GET", "/seed").Observe(seconds)
+}
+
 // PrometheusMiddleware records HTTP request metrics.
 func PrometheusMiddleware() okapi.Middleware {
 	return func(c *okapi.Context) error {

@@ -108,6 +108,54 @@ func (h *DomainHandler) SetDeliveryMode(c *okapi.Context, req *SetDeliveryModeRe
 	return ok(c, okapi.M{"domain": d, "delivery_mode": mode, "changed": true})
 }
 
+// SetMTASTSModeRequest selects the MTA-STS policy mode this deployment
+// publishes for the domain (SF-29, OB-6 W4, ADR-007 §5): ” clears the
+// policy (nothing is served), 'none' monitors, 'testing' announces enforce
+// semantics without refusing, 'enforce' refuses.
+type SetMTASTSModeRequest struct {
+	ID   int `param:"id"`
+	Body struct {
+		Mode string `json:"mode" required:"true"`
+	} `json:"body"`
+}
+
+// SetMTASTSMode sets the domain's published MTA-STS policy mode. Fail-closed
+// per ADR-008 §2: only ownership-verified domains may publish a policy — the
+// policy document and the _smtp._tls TXT guidance are only meaningful for a
+// domain whose mail this deployment actually receives.
+func (h *DomainHandler) SetMTASTSMode(c *okapi.Context, req *SetMTASTSModeRequest) error {
+	if err := requireEdit(c); err != nil {
+		return c.AbortForbidden("insufficient workspace permissions", err)
+	}
+	mode := req.Body.Mode
+	switch mode {
+	case "", models.MTASTSModeNone, models.MTASTSModeTesting, models.MTASTSModeEnforce:
+	default:
+		return c.AbortBadRequest("mode must be '', 'none', 'testing' or 'enforce'")
+	}
+	d, err := h.repo.FindByID(uint(req.ID))
+	if err != nil || !ownsResource(c, d.UserID, d.WorkspaceID) {
+		return c.AbortNotFound("domain not found")
+	}
+	if mode != "" && !d.OwnershipVerified {
+		return c.AbortBadRequest("an MTA-STS policy requires a verified domain")
+	}
+	if d.MTASTSMode == mode {
+		return ok(c, okapi.M{"domain": d, "mta_sts_mode": mode, "changed": false})
+	}
+	d.MTASTSMode = mode
+	if err := h.repo.Update(d); err != nil {
+		return c.AbortInternalServerError("failed to update domain")
+	}
+	if h.audit != nil {
+		h.audit.LogCtx(c, "domain.mta_sts_mode_changed",
+			"Domain MTA-STS policy mode changed", map[string]any{
+				"domain_id": d.ID, "domain": d.Domain, "mta_sts_mode": mode,
+			})
+	}
+	return ok(c, okapi.M{"domain": d, "mta_sts_mode": mode, "changed": true})
+}
+
 // SetQuota sets the quota checker for plan-based resource limits.
 func (h *DomainHandler) SetQuota(q QuotaChecker, db *gorm.DB) {
 	h.quota = q

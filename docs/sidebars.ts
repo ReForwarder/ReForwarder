@@ -175,6 +175,14 @@ const sidebars: SidebarsConfig = {
     },
     {
       type: 'category',
+      label: 'Operations',
+      items: [
+        'operations/deployment',
+        'operations/redis-ha',
+      ],
+    },
+    {
+      type: 'category',
       label: 'SDKs',
       items: [
         'sdks/overview',

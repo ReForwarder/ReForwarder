@@ -48,6 +48,11 @@ type Manager struct {
 	mu       sync.Mutex
 	running  bool
 	statuses map[string]*jobState
+	// lease, when set, makes this manager a participant in multi-replica
+	// leadership (GAP-03, ADR-009 §2): only the lease holder runs ticks.
+	// Nil — the default, POSTA_CRON_LEADER_LEASE_ENABLED off — keeps the
+	// single-replica behavior of every replica running every job.
+	lease *LeaderLease
 }
 
 type jobState struct {
@@ -73,6 +78,47 @@ func (m *Manager) Register(job CronJob) {
 	m.statuses[job.Name()] = &jobState{}
 }
 
+// SetLeaderLease installs the multi-replica leadership gate (GAP-03, ADR-009
+// §2). From then on every scheduled tick first acquires/renews the lease;
+// a replica that does not hold it skips the tick, so exactly one replica
+// executes each job per interval. Must be called before Start. Leaving it
+// unset (the default) keeps single-replica behavior unchanged.
+func (m *Manager) SetLeaderLease(l *LeaderLease) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lease = l
+}
+
+// RunOnce executes one scheduled tick of job through the manager's full path:
+// the leadership gate first (when a lease is installed), then the run with
+// its status recording. The scheduler's AddFunc closure delegates here; it is
+// exported so tests and ops tooling can drive a tick deterministically
+// instead of waiting out a cron expression.
+func (m *Manager) RunOnce(ctx context.Context, job CronJob) {
+	m.mu.Lock()
+	lease := m.lease
+	m.mu.Unlock()
+
+	if lease != nil && !lease.Acquire(ctx) {
+		// Another replica holds the lease (or Redis is down and the gate
+		// fails closed). Not a run: no status recording, debug only.
+		logger.Debug("cron tick skipped: not the lease leader", "name", job.Name())
+		return
+	}
+
+	m.setRunning(job.Name(), true)
+	defer m.setRunning(job.Name(), false)
+
+	now := time.Now().UTC()
+	if err := job.Run(ctx, m.client); err != nil {
+		m.recordRun(job.Name(), now, err.Error())
+		logger.Error("cron job failed", "name", job.Name(), "error", err)
+	} else {
+		m.recordRun(job.Name(), now, "")
+		logger.Debug("cron job completed", "name", job.Name())
+	}
+}
+
 // Start begins running all registered cron jobs.
 func (m *Manager) Start(ctx context.Context) {
 	m.mu.Lock()
@@ -84,17 +130,7 @@ func (m *Manager) Start(ctx context.Context) {
 	for _, j := range m.jobs {
 		job := j // capture for closure
 		_, err := m.cron.AddFunc(job.Schedule(), func() {
-			m.setRunning(job.Name(), true)
-			defer m.setRunning(job.Name(), false)
-
-			now := time.Now().UTC()
-			if err := job.Run(ctx, m.client); err != nil {
-				m.recordRun(job.Name(), now, err.Error())
-				logger.Error("cron job failed", "name", job.Name(), "error", err)
-			} else {
-				m.recordRun(job.Name(), now, "")
-				logger.Debug("cron job completed", "name", job.Name())
-			}
+			m.RunOnce(ctx, job)
 		})
 		if err != nil {
 			logger.Error("failed to register cron job", "name", job.Name(), "schedule", job.Schedule(), "error", err)

@@ -47,6 +47,12 @@ const (
 	pathDomainByID            = "/domains/{id:int}"
 	pathDomainHealth          = "/domains/{id:int}/health"
 	pathDomainDiagnose        = "/domains/{id:int}/health/diagnose"
+	// OB-6 DNS automation (ADR-007 decision 1): connect/revoke the domain's
+	// DNS provider, publish the planned record set, and read the drift
+	// verdict. Registered only when POSTA_DNS_AUTOMATION_ENABLED is set.
+	pathDomainDNSProvider    = "/domains/{id:int}/dns-provider"
+	pathDomainDNSPublish     = "/domains/{id:int}/dns-records/publish"
+	pathDomainDNSDrift       = "/domains/{id:int}/dns-drift"
 	pathFormByID              = "/forms/{id:int}"
 	pathPlanByID              = "/plans/{id:int}"
 	pathSegmentByID           = "/segments/{id:int}"

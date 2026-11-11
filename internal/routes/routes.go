@@ -36,11 +36,13 @@ import (
 	"github.com/goposta/posta/internal/services/automation"
 	"github.com/goposta/posta/internal/services/cache"
 	domainpkg "github.com/goposta/posta/internal/services/domain"
+	"github.com/goposta/posta/internal/services/dnsmanager"
 	"github.com/goposta/posta/internal/services/email"
 	"github.com/goposta/posta/internal/services/emailhistory"
 	"github.com/goposta/posta/internal/services/emailverify"
 	"github.com/goposta/posta/internal/services/eventbus"
 	"github.com/goposta/posta/internal/services/inbound"
+	"github.com/goposta/posta/internal/services/reputation"
 	"github.com/goposta/posta/internal/services/inbox"
 	"github.com/goposta/posta/internal/services/mailcompose"
 	"github.com/goposta/posta/internal/services/mailstore"
@@ -126,7 +128,12 @@ type routerHandlers struct {
 	domain               *handlers.DomainHandler
 	domainSigning        *handlers.DomainSigningHandler
 	domainHealth         *handlers.DomainHealthHandler
+	dnsProvider          *handlers.DNSProviderHandler
 	dmarc                *handlers.DMARCReportHandler
+	// tlsrpt serves the per-domain SMTP TLS report read view (SF-31, OB-6 W4).
+	tlsrpt *handlers.TLSRPTHandler
+	// mtaStsPolicy serves the MTA-STS policy hosting path (SF-29, OB-6 W4).
+	mtaStsPolicy *handlers.MTASTSPolicyHandler
 	bounce               *handlers.BounceHandler
 	suppression          *handlers.SuppressionHandler
 	unsubscribeList      *handlers.UnsubscribeListHandler
@@ -175,6 +182,8 @@ type routerHandlers struct {
 	mailstoreSearch      *handlers.MailstoreSearchAdminHandler
 	adminMailbox         *handlers.AdminMailboxHandler
 	mailCompose          *handlers.MailComposeHandler
+	// ipPool serves the OB-6 W3 IP-pool surface (ADR-007 decision 7).
+	ipPool                *handlers.IPPoolHandler
 	// mail is the OB-5 W1 webmail REST surface (ADR-005 decision 1) for the
 	// session user's own mailboxes.
 	mail      *handlers.MailHandler
@@ -319,6 +328,21 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	jwtAuth := middlewares.JWTAuth(cfg, sessionStore)
 	jwtAdminAuth := middlewares.JWTAdminAuth(cfg, sessionStore)
 
+	// OB-6 DNS automation (ADR-007 decision 1): the plan → publish → verify
+	// orchestration behind the domain DNS routes. The planner derives the
+	// managed DKIM signing key's public TXT record through the same seam the
+	// signing-key surface uses (email.DnsTXTRecord), and the drift cron's
+	// alerts land on the deployment audit trail as system-actor events.
+	dnsSvc := dnsmanager.NewService(db, dnsPlanOptions(cfg))
+	dnsSvc.SetDKIMTXT(email.DnsTXTRecord)
+	dnsSvc.SetAuditLogger(auditLogger)
+	// The drift re-verification cron rides the same gate as the routes
+	// (POSTA_DNS_AUTOMATION_ENABLED, ADR-009 §8's off-by-default posture);
+	// dev mode has no cron manager by design.
+	if cfg.DNSAutomationEnabled && cronManager != nil {
+		cronManager.Register(jobs.NewDNSDriftCheckJob(dnsSvc))
+	}
+
 	r := &Router{
 		app: app,
 		cfg: cfg,
@@ -357,7 +381,10 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 			domain:           handlers.NewDomainHandler(domainRepo),
 			domainSigning:    handlers.NewDomainSigningHandler(repositories.NewDomainSigningKeyRepository(db), domainRepo, auditLogger),
 			domainHealth:     handlers.NewDomainHealthHandler(domainpkg.NewHealthService(db, repositories.NewDomainSigningKeyRepository(db)), domainRepo, auditLogger),
+			dnsProvider:      handlers.NewDNSProviderHandler(dnsSvc, domainRepo, auditLogger),
 			dmarc:            handlers.NewDMARCReportHandler(repositories.NewDMARCReportRepository(db), domainRepo, auditLogger),
+			tlsrpt:           handlers.NewTLSRPTHandler(repositories.NewTLSRPTRepository(db), domainRepo, auditLogger),
+			mtaStsPolicy:     handlers.NewMTASTSPolicyHandler(domainRepo),
 			adminDomain:      handlers.NewAdminDomainHandler(db, domainRepo, auditLogger),
 			adminWorkspace:   handlers.NewAdminWorkspaceHandler(db, workspaceRepo),
 			notification:     handlers.NewNotificationHandler(notificationRepo, inboxService),
@@ -392,6 +419,13 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	r.h.user.SetAuditLogger(auditLogger)
 	// Delivery-mode switches (OB-1) are audited on the deployment trail.
 	r.h.domain.SetAuditLogger(auditLogger)
+
+	// OB-6 W3 (ADR-007 decision 7): the reputation service backs the domain
+	// health report's reputation/pool/warm-up sections and the IP-pool
+	// surface (pools, warm-up schedules, per-domain + per-IP reputation).
+	repSvc := reputation.NewService(db)
+	r.h.domainHealth.SetReputationReader(repSvc)
+	r.h.ipPool = handlers.NewIPPoolHandler(repositories.NewIPPoolRepository(db), domainRepo, repSvc, auditLogger)
 
 	// SF-100: platform settings writes record a per-key change history
 	// (setting_history) and invalidate the shared provider's 30s TTL cache
@@ -609,6 +643,9 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 		Messages: cfg.MessagesEnabled,
 		Inbound:  cfg.InboundEnabled,
 		Relay:    cfg.SMTPRelayEnabled,
+		// OB-6 DNS automation: the domain page's provider/publish panel rides
+		// the same gate as the routes.
+		DNSAutomation: cfg.DNSAutomationEnabled,
 	})
 	r.h.dashboard.SetInbox(inboxService)
 
@@ -985,6 +1022,27 @@ func webauthnRPID(appWebURL string) string {
 	return u.Hostname()
 }
 
+// dnsPlanOptions maps the deployment's DNS automation configuration onto the
+// publication planner (OB-6, ADR-007 decision 1). Mail routing (MX +
+// return-path) stays an explicit operator opt-in (POSTA_DNS_MAIL_ROUTING) —
+// publishing an MX redirects a domain's mail receipt, and an absent mail host
+// falls back to the inbound hostname.
+func dnsPlanOptions(cfg *config.Config) dnsmanager.PlanOptions {
+	mailHost := cfg.DNSMailHost
+	if mailHost == "" {
+		mailHost = cfg.InboundHostname
+	}
+	bouncePrefix := cfg.ReturnPathSubdomain
+	if bouncePrefix == "" {
+		bouncePrefix = "bounce"
+	}
+	return dnsmanager.PlanOptions{
+		MailHost:           mailHost,
+		IncludeMailRouting: cfg.DNSMailRouting,
+		BouncePrefix:       bouncePrefix,
+	}
+}
+
 // loginLimiterMiddleware returns the login rate limit middleware when enabled,
 // or a pass-through middleware when disabled.
 func loginLimiterMiddleware(cfg *config.Config, limiter *ratelimit.RedisLimiter) okapi.Middleware {
@@ -999,6 +1057,12 @@ func loginLimiterMiddleware(cfg *config.Config, limiter *ratelimit.RedisLimiter)
 func (r *Router) registerRoutes() {
 	// Request ID middleware
 	r.app.Use(okapi.RequestID())
+
+	// GAP-51 (OB-6 W5): report escaping panics to the error-monitoring hook
+	// (no-op unless POSTA_ERROR_WEBHOOK_URL is set), then re-panic so request
+	// behavior is exactly as before — net/http still recovers per connection.
+	// Registered before every other middleware so the whole chain is covered.
+	r.app.Use(middlewares.CapturePanicsMiddleware())
 
 	// Security engine ban enforcement: allowlisted IPs pass, banned IPs are
 	// refused with a 403 before reaching any group, everything else is counted
@@ -1025,6 +1089,8 @@ func (r *Router) registerRoutes() {
 	r.app.Register(r.mailComposeRoutes()...)
 	r.app.Register(r.workspaceRoutes()...)
 	r.app.Register(r.workspaceResourceRoutes()...)
+	// OB-6 W3 (ADR-007 decision 7): IP pools, warm-up, reputation.
+	r.app.Register(r.ipPoolRoutes()...)
 	r.app.Register(r.automationRoutes()...)
 	r.app.Register(r.logsRoutes()...)
 	r.app.Register(r.oauthRoutes()...)
@@ -1032,6 +1098,12 @@ func (r *Router) registerRoutes() {
 	r.app.Register(r.trackingAnalyticsRoutes()...)
 	r.app.Register(r.bounceWebhookRoutes()...)
 	r.app.Register(r.providerWebhookRoutes()...)
+	// OB-6 W4 (SF-29, ADR-007 §5, ADR-009 §1): the MTA-STS policy hosting
+	// path — gated like the other listeners; the reverse proxy fronts the
+	// mta-sts.<domain> vhost with TLS when the operator opts in.
+	if r.cfg.MTASTSEnabled && r.h.mtaStsPolicy != nil {
+		r.app.Register(r.mtaSTSRoutes()...)
+	}
 	if r.cfg.InboundEnabled && r.h.inbound != nil {
 		r.app.Register(r.inboundWebhookRoutes()...)
 		r.app.Register(r.inboundWorkspaceRoutes()...)
@@ -1049,6 +1121,7 @@ func (r *Router) registerRoutes() {
 	}
 	r.app.Register(r.adminSSERoutes()...)
 	r.app.Register(r.adminRoutes()...)
+	r.app.Register(r.adminIPPoolRoutes()...)
 
 	// Security admin routes. The SSE stream is registered before the plain
 	// security routes so a later param route can never shadow

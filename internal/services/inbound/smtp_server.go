@@ -64,6 +64,10 @@ type Backend struct {
 	// allowlist (OB-2, ADR-002 decision 4); nil or disabled until SetVerp,
 	// and RCPT then behaves exactly as before.
 	verp *Verp
+	// tlsrpt accepts TLS-RPT rua recipients through the dedicated report
+	// allowlist (SF-31, OB-6 W4, ADR-007 §5); nil until SetTLSRPT, and RCPT
+	// then behaves exactly as before.
+	tlsrpt *TlsRptAllowlist
 }
 
 func NewBackend(svc *Service, domainRepo *repositories.DomainRepository, maxMessageSize int64) *Backend {
@@ -77,6 +81,10 @@ func (b *Backend) SetRouter(r *Router) { b.router = r }
 // SetVerp wires the return-path allowlist for VERP bounce recipients
 // (OB-2, ADR-002 decision 4; setter-injection convention).
 func (b *Backend) SetVerp(v *Verp) { b.verp = v }
+
+// SetTLSRPT wires the allowlist for TLS-RPT rua recipients (SF-31, OB-6 W4,
+// ADR-007 §5; setter-injection convention).
+func (b *Backend) SetTLSRPT(a *TlsRptAllowlist) { b.tlsrpt = a }
 
 // SetRateLimiter enables per-IP rate limiting for new SMTP sessions.
 func (b *Backend) SetRateLimiter(l *IPRateLimiter) { b.limiter = l }
@@ -168,6 +176,18 @@ func (s *session) Rcpt(to string, _ *smtp.RcptOptions) error {
 						return nil
 					}
 				}
+			}
+		}
+	}
+	// SF-31 (OB-6 W4): the TLS-RPT rua address is a system address exactly
+	// like the VERP bounce host — accepted through its dedicated allowlist
+	// before ordinary recipient validation. Unverified domains fall through
+	// to the ordinary chain and are rejected there.
+	if tr := s.backend.tlsrpt; tr != nil && tr.LooksLikeReport(addr) {
+		if rptDomain, ok := tr.ReportDomain(addr); ok {
+			if _, derr := s.backend.domainRepo.FindVerifiedByName(rptDomain); derr == nil {
+				s.to = append(s.to, addr)
+				return nil
 			}
 		}
 	}

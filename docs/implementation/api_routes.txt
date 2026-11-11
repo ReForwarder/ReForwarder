@@ -17,6 +17,7 @@
 #   2. commit the regenerated file together with the route change
 #   3. update web/src/api/*.ts callers if the change was breaking
 DELETE /api/v1/admin/announcements/{id}
+DELETE /api/v1/admin/ip-pools/{poolId}/members/{memberId}
 DELETE /api/v1/admin/mailboxes/{id}
 DELETE /api/v1/admin/oauth/providers/{id}
 DELETE /api/v1/admin/plans/{id}
@@ -40,12 +41,15 @@ DELETE /api/v1/workspaces/current/api-keys/{id}
 DELETE /api/v1/workspaces/current/automations/{id}
 DELETE /api/v1/workspaces/current/campaigns/{id}
 DELETE /api/v1/workspaces/current/domains/{id}
+DELETE /api/v1/workspaces/current/domains/{id}/dns-provider
 DELETE /api/v1/workspaces/current/domains/{id}/signing-keys/{keyId}
 DELETE /api/v1/workspaces/current/forms/{id}
 DELETE /api/v1/workspaces/current/inbound-emails/{id}
 DELETE /api/v1/workspaces/current/inbound-quarantine/{id}
 DELETE /api/v1/workspaces/current/inbound/forward-targets/{id}
 DELETE /api/v1/workspaces/current/invitations/{invitation_id}
+DELETE /api/v1/workspaces/current/ip-pools/{poolId}
+DELETE /api/v1/workspaces/current/ip-pools/{poolId}/members/{memberId}
 DELETE /api/v1/workspaces/current/languages/{id}
 DELETE /api/v1/workspaces/current/localizations/{localizationId}
 DELETE /api/v1/workspaces/current/members/{member_id}
@@ -64,6 +68,7 @@ DELETE /api/v1/workspaces/current/templates/{id}
 DELETE /api/v1/workspaces/current/templates/{id}/versions/{versionId}
 DELETE /api/v1/workspaces/current/unsubscribe-lists/{id}
 DELETE /api/v1/workspaces/current/webhooks/{id}
+GET    /.well-known/mta-sts.txt
 GET    /api/v1/admin/analytics
 GET    /api/v1/admin/analytics/dashboard
 GET    /api/v1/admin/analytics/providers
@@ -73,6 +78,8 @@ GET    /api/v1/admin/domains/{id}
 GET    /api/v1/admin/events
 GET    /api/v1/admin/events/stream
 GET    /api/v1/admin/events/{id}
+GET    /api/v1/admin/ip-pools
+GET    /api/v1/admin/ip-reputation
 GET    /api/v1/admin/jobs
 GET    /api/v1/admin/mailboxes
 GET    /api/v1/admin/mailboxes/{id}/usage
@@ -167,8 +174,12 @@ GET    /api/v1/workspaces/current/data/export
 GET    /api/v1/workspaces/current/domains
 GET    /api/v1/workspaces/current/domains/{id}
 GET    /api/v1/workspaces/current/domains/{id}/dmarc
+GET    /api/v1/workspaces/current/domains/{id}/dns-drift
+GET    /api/v1/workspaces/current/domains/{id}/dns-provider
 GET    /api/v1/workspaces/current/domains/{id}/health
+GET    /api/v1/workspaces/current/domains/{id}/reputation
 GET    /api/v1/workspaces/current/domains/{id}/signing-keys
+GET    /api/v1/workspaces/current/domains/{id}/tls-rpt
 GET    /api/v1/workspaces/current/emails
 GET    /api/v1/workspaces/current/emails/{id}
 GET    /api/v1/workspaces/current/emails/{id}/status
@@ -183,6 +194,7 @@ GET    /api/v1/workspaces/current/inbound-quarantine
 GET    /api/v1/workspaces/current/inbound-stream
 GET    /api/v1/workspaces/current/inbound/forward-targets
 GET    /api/v1/workspaces/current/invitations
+GET    /api/v1/workspaces/current/ip-pools
 GET    /api/v1/workspaces/current/languages
 GET    /api/v1/workspaces/current/logs/audit
 GET    /api/v1/workspaces/current/logs/audit/export
@@ -242,9 +254,12 @@ PATCH  /api/v1/admin/mailboxes/{id}
 PATCH  /api/v1/admin/plans/{id}/default
 PATCH  /api/v1/mail/folders/{id}
 PATCH  /api/v1/workspaces/current/domains/{id}/delivery-mode
+PATCH  /api/v1/workspaces/current/domains/{id}/mta-sts
 POST   /api/v1/admin/announcements
 POST   /api/v1/admin/domains/{id}/verify
 POST   /api/v1/admin/impersonate/exit
+POST   /api/v1/admin/ip-pools
+POST   /api/v1/admin/ip-pools/{poolId}/members
 POST   /api/v1/admin/mailboxes
 POST   /api/v1/admin/mailstore/search/reindex
 POST   /api/v1/admin/oauth/providers
@@ -339,6 +354,8 @@ POST   /api/v1/workspaces/current/campaigns/{id}/resume
 POST   /api/v1/workspaces/current/campaigns/{id}/send
 POST   /api/v1/workspaces/current/data/import
 POST   /api/v1/workspaces/current/domains
+POST   /api/v1/workspaces/current/domains/{id}/dns-provider
+POST   /api/v1/workspaces/current/domains/{id}/dns-records/publish
 POST   /api/v1/workspaces/current/domains/{id}/health/diagnose
 POST   /api/v1/workspaces/current/domains/{id}/signing-keys
 POST   /api/v1/workspaces/current/domains/{id}/signing-keys/rotate
@@ -356,6 +373,8 @@ POST   /api/v1/workspaces/current/inbound-emails/{id}/retry
 POST   /api/v1/workspaces/current/inbound-quarantine/{id}/release
 POST   /api/v1/workspaces/current/inbound/forward-targets
 POST   /api/v1/workspaces/current/invitations
+POST   /api/v1/workspaces/current/ip-pools
+POST   /api/v1/workspaces/current/ip-pools/{poolId}/members
 POST   /api/v1/workspaces/current/languages
 POST   /api/v1/workspaces/current/message-filters
 POST   /api/v1/workspaces/current/message-filters/test
@@ -409,6 +428,8 @@ PUT    /api/v1/workspaces/current
 PUT    /api/v1/workspaces/current/api-keys/{id}/revoke
 PUT    /api/v1/workspaces/current/automations/{id}
 PUT    /api/v1/workspaces/current/campaigns/{id}
+PUT    /api/v1/workspaces/current/domains/{id}/pool
+PUT    /api/v1/workspaces/current/domains/{id}/warmup
 PUT    /api/v1/workspaces/current/forms/{id}
 PUT    /api/v1/workspaces/current/languages/{id}
 PUT    /api/v1/workspaces/current/localizations/{localizationId}

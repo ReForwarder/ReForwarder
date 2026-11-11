@@ -30,16 +30,29 @@ const (
 	DeliveryModeDirect = "direct"
 )
 
+// Per-domain MTA-STS policy modes for hosted domains (SF-29, ADR-007 §5,
+// RFC 8461 §4.2). The mode is published in the domain's HTTPS policy
+// (mta-sts.<domain>/.well-known/mta-sts.txt): 'none' is the monitoring
+// posture (a policy is served, violations are only reportable), 'testing'
+// announces enforce semantics while failures are still delivered, 'enforce'
+// asks sending MTAs to refuse unsecured delivery. The empty value (the column
+// default until the operator opts in) means no policy is served at all.
+const (
+	MTASTSModeNone    = "none"
+	MTASTSModeTesting = "testing"
+	MTASTSModeEnforce = "enforce"
+)
+
 type Domain struct {
-	ID                uint      `json:"id" gorm:"primaryKey"`
-	UserID            uint      `json:"user_id" gorm:"index;not null"`
-	WorkspaceID       *uint     `json:"workspace_id,omitempty" gorm:"index"`
-	Domain            string    `json:"domain" gorm:"not null"`
-	OwnershipVerified bool      `json:"ownership_verified" gorm:"default:false"`
-	SPFVerified       bool      `json:"spf_verified" gorm:"default:false"`
-	DKIMVerified      bool      `json:"dkim_verified" gorm:"default:false"`
-	DMARCVerified     bool      `json:"dmarc_verified" gorm:"default:false"`
-	VerificationToken string    `json:"verification_token" gorm:"not null"`
+	ID                uint   `json:"id" gorm:"primaryKey"`
+	UserID            uint   `json:"user_id" gorm:"index;not null"`
+	WorkspaceID       *uint  `json:"workspace_id,omitempty" gorm:"index"`
+	Domain            string `json:"domain" gorm:"not null"`
+	OwnershipVerified bool   `json:"ownership_verified" gorm:"default:false"`
+	SPFVerified       bool   `json:"spf_verified" gorm:"default:false"`
+	DKIMVerified      bool   `json:"dkim_verified" gorm:"default:false"`
+	DMARCVerified     bool   `json:"dmarc_verified" gorm:"default:false"`
+	VerificationToken string `json:"verification_token" gorm:"not null"`
 
 	// OB-1 outbound MTA (ADR-001): per-domain delivery configuration. The
 	// columns are additive (default 'relay' = today's behavior); the PATCH
@@ -54,6 +67,20 @@ type Domain struct {
 	OutboundBindIP       string `json:"outbound_bind_ip" gorm:"size:64"`
 	MaxMsgsPerConnection int    `json:"max_msgs_per_connection" gorm:"default:0"`
 	HourlyBudget         int    `json:"hourly_budget" gorm:"default:0"`
+	// PoolID assigns the domain to an IP pool (OB-6 W3, ADR-007 decision 7):
+	// direct deliveries rotate across the pool's enabled member IPs instead
+	// of OutboundBindIP alone. nil = the domain uses OutboundBindIP alone.
+	// The referenced pool must be visible to the domain's workspace —
+	// enforced at the assignment endpoint, not here.
+	PoolID *uint `json:"pool_id,omitempty" gorm:"index"`
+
+	// MTASTSMode publishes the domain's MTA-STS policy mode (SF-29, OB-6 W4,
+	// ADR-007 §5): '' (default; no policy served) | 'none' | 'testing' |
+	// 'enforce'. The HTTPS policy path (mta-sts.<domain>/.well-known/
+	// mta-sts.txt) renders it together with the domain's live MX hosts; the
+	// companion _smtp._tls TXT record guidance (TLS-RPT rua) lives in the
+	// domain DNS-records surface.
+	MTASTSMode string `json:"mta_sts_mode" gorm:"column:mta_sts_mode;size:16;not null;default:''"`
 
 	CreatedAt time.Time `json:"created_at"`
 

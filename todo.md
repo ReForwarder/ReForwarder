@@ -343,7 +343,7 @@ flowchart TD
 ## Phase 6 — Full platform convergence
 
 - [ ] Integrate mailboxes, campaigns, transactional sending, inbound routing into one control plane
-- [ ] DNS automation + certificate lifecycle management
+- [ ] DNS automation + certificate lifecycle management (progress 2026-11-10, OB-6 wave W2: the certificate-lifecycle half landed — `internal/services/certmanager`, autocert behind `POSTA_ACME_ENABLED` default false, per-domain SNI map on IMAP 993/POP3 995/submission 587 STARTTLS/webmail HTTPS, blob-store cert cache + SF-110 hot reload, HTTP-01 through the existing HTTP server, TLS-ALPN-01 on the webmail HTTPS listener; DNS-01 is the recorded residual via the `CertSolver` seam awaiting the W1 dnsmanager adapter — see SF-34, now PARTIAL, and the OB-6 wave evidence; the DNS-automation half is the other OB-6 waves' scope)
 - [ ] IP pools, warm-up controls, reputation monitoring
 - [ ] Event, analytics, webhook coverage completion
 - [ ] Deployment, upgrade, backup, disaster-recovery tooling
@@ -437,7 +437,7 @@ flowchart TD
 
 - [ ] **GAP-11** — Server-side editor gate on automation write & event-ingest routes · S (2.85) — smallest, highest certainty
 - [x] **GAP-12** — Enforce or remove `two_factor_required`; recovery codes · M (2.85) — **enforcement landed 2026-11-07 (Wave P3-4)**: policy read at login (`internal/handlers/user_handler.go:129-134`), forced-enrollment marker + dashboard redirect to 2FA setup, admins not exempt, 8-case test matrix (`internal/handlers/login_enforcement_test.go`); recovery codes themselves (R-10) landed `7f445f2`; residual: middleware-layer refusal for un-enrolled sessions (documented `user_handler.go:566-571`)
-- [ ] **GAP-03** — Multi-replica cron leader election · M (3.15) — Redis `SET NX PX` lease; all 10 cron jobs currently run on every replica
+- [x] **GAP-03** — Multi-replica cron leader election · M (3.15) — **landed 2026-11-11 (OB-6 W6)**: Redis `SET NX PX` leader lease around the cron manager tick (`internal/cron/lease.go` — atomic Lua acquire-or-renew scoped to the holder id, fail-closed on Redis errors; `internal/cron/manager.go` `RunOnce` gates every scheduled tick; `POSTA_CRON_LEADER_LEASE_ENABLED` off by default — single-replica behavior unchanged), per-recipient dedup claims on `bounce_alert`/`daily_report` (fail-open, cleared on send failure), two-manager integration test vs real Redis PASS (`TestLeaderLeaseTwoManagersRedis`, `internal/cron/lease_test.go`) + config off-by-default proof (`TestCronLeaderLeaseOffByDefault`); runbook: `docs/docs/operations/redis-ha.md`
 - [ ] **GAP-01** — Scheduled transactional email: cancel + reconcile coverage · M (3.40) — top of register · ⚠ atomic claims landed `7f445f2` (R-26); verify cancel/reconcile remainder · → OB Phase 1
 - [ ] **GAP-02** ◆ residual — Delivery & complaint signal ingestion · M (2.85) — core landed `6d2d7c0`:
   - [ ] Legacy `/webhooks/bounce` parity
@@ -529,7 +529,7 @@ sending → sent (all messages processed)
 - [ ] **GAP-44** — Per-API-key rate limits · M (2.15) — ⚠ in-flight uncommitted (api-key-usage tracking, §0.3); verify when committed
 - [ ] **GAP-45** — Blob usage reporting & orphan GC · M (1.45) — adjacent to OB Phase 3/6 (message storage); ⚠ storage half landed in OB-3 wave W2 (2026-11-07): mailstore content-addressed blob GC (per-hash advisory lock + grace period + audited `mail_blob_gc` event) and dedup-aware per-mailbox blob-byte reporting (`mailstore.MailboxUsage`); remaining: bytes-per-workspace reporting for the transactional blob store in AdminInventory and orphan-object enumeration (blobs without ref rows) with a dry-run report
 - [ ] **GAP-48** — Queue operations: per-queue latency metric + pause/throttle · M (2.40) — → OB Phase 1
-- [ ] **GAP-49** — Redis HA guidance & SPOF mitigation docs · M (2.40) — → OB Phase 6 / ADR-009
+- [x] **GAP-49** — Redis HA guidance & SPOF mitigation docs · M (2.40) — **landed 2026-11-11 (OB-6 W6)**: runbook at `docs/docs/operations/redis-ha.md` (per-role failure matrix citing verified fail-open/fail-closed callsites; managed-Redis replication guidance; queue durability on Postgres via `queue_reconcile`; failure drills; multi-replica checklist) + `compose.sentinel.yml` drill stack **verified end-to-end** (boot clean → 3-sentinel quorum consensus → primary stop → replica promoted ~10s → old primary rejoins as replica); sentinel-monitor-by-hostname caveat recorded (no quorum forms — monitor an IP/VIP)
 - [ ] **GAP-51** — Error-monitoring hook · S (2.05)
 - [ ] **GAP-16** — Admin-console IP allowlisting · S (1.80) — fail-open CIDR middleware on `/admin/*` via `IPAllowed`
 - [ ] **GAP-18** ◆ residual — Webhook test-fire endpoint · S (1.40) — replay landed `6d2d7c0`:

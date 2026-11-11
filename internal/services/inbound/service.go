@@ -107,6 +107,14 @@ type Service struct {
 	// feature (OB-2, ADR-002 decision 4); nil or disabled until SetVerp, and
 	// ingestion then behaves exactly as before (no bounce allowlist).
 	verp *Verp
+	// tlsrpt ingests RFC 8460 SMTP TLS reports from the inbound pipeline
+	// (SF-31, OB-6 W4, ADR-007 §5); nil until EnableTLSRPT, and ingestion
+	// then behaves exactly as before.
+	tlsrpt *tlsRptProcessor
+	// tlsrptAddr is the dedicated rua RCPT allowlist (the TLS-RPT sibling of
+	// the VERP bounce allowlist); nil until SetTLSRPTAddress, and the
+	// receiver then accepts no report addresses.
+	tlsrptAddr *TlsRptAllowlist
 	// dsn matches RFC 3464 delivery reports back to the original outbound
 	// message (OB-2 decision 4); nil until EnableDSN, and bounce ingestion
 	// then behaves exactly as before (no match-back).
@@ -408,6 +416,10 @@ func (s *Service) Ingest(ctx context.Context, p *ParsedEmail, source models.Inbo
 	// (a no-op unless EnableDMARC wired one). Never fails the ingestion.
 	s.processDMARC(ctx, rec)
 
+	// SF-31: offer the stored message to the TLS-RPT processor (a no-op
+	// unless EnableTLSRPT wired one). Never fails the ingestion.
+	s.processTLSRPT(ctx, rec)
+
 	// SF-22/23/24: verify SPF/DKIM/DMARC asynchronously — durable ingest
 	// already happened, so delivery never waits on DNS. The webhook path has
 	// no connecting-IP knowledge (the TCP peer is the forwarding provider,
@@ -479,6 +491,14 @@ func (s *Service) IngestRaw(ctx context.Context, raw []byte, envelopeFrom string
 	// the sender-suppression check (the sender is a remote mailer-daemon).
 	if d, bounceAddr, ok := s.resolveBounceRecipient(envelopeTo); ok {
 		return s.ingestSystemBounce(ctx, raw, envelopeFrom, envelopeTo, d, bounceAddr, source, clientIP)
+	}
+
+	// SF-31 (OB-6 W4, ADR-007 §5): a TLS-RPT rua recipient is likewise a
+	// system address — the dedicated allowlist resolves it to the tenant
+	// domain, and the report stores durably without routing-rule evaluation
+	// (no route can exist for tlsrpt@; that is the point of the allowlist).
+	if d, rptAddr, ok := s.ResolveTLSRPTRecipient(envelopeTo); ok {
+		return s.ingestSystemTLSRPT(ctx, raw, envelopeFrom, envelopeTo, d, rptAddr, source, clientIP)
 	}
 
 	domain, _, err := s.resolveDomain(envelopeTo)
@@ -759,6 +779,10 @@ func (s *Service) ApplyParsed(ctx context.Context, rec *models.InboundEmail, p *
 	// raw message), so ApplyParsed is where attachments first exist. Offer
 	// the parsed record to the DMARC processor (a no-op unless wired).
 	s.processDMARC(ctx, rec)
+
+	// SF-31: same for the TLS-RPT processor — attachments exist only after
+	// the parse pass (a no-op unless wired).
+	s.processTLSRPT(ctx, rec)
 
 	// OB-2: a quarantined record is under review — it never emits the
 	// ordinary "received" event.

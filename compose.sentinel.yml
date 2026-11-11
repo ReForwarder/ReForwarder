@@ -1,0 +1,97 @@
+# GAP-49 (ADR-009 §3): Redis HA drill stack — 1 primary + 1 replica + 3
+# sentinels, for failover drills and the redis-ha runbook's sentinel
+# quick-start (docs/docs/operations/redis-ha.md). Not part of the default
+# topology: Posta addresses a single Redis endpoint, so production self-hosted
+# HA needs a stable VIP/proxy in front of the sentinel-elected primary.
+#
+#   docker compose -f compose.sentinel.yml up -d
+#   docker compose -f compose.sentinel.yml exec sentinel-1 \
+#     redis-cli -p 26379 -a sentinelpass sentinel get-master-addr-by-name posta
+#
+# Failover drill: docker compose -f compose.sentinel.yml stop redis-primary →
+# the sentinel quorum promotes 172.28.0.11 (redis-replica) within ~10 s;
+# `start redis-primary` rejoins it as a replica of the new master.
+#
+# The Redis services get fixed addresses on a dedicated subnet because the
+# sentinel quorum votes on addresses, not names: monitoring a hostname keeps
+# the master stuck in subjective-down (no +odown, no election). Fixed IPs
+# keep the monitored address stable for the lifetime of the stack, which is
+# all a drill needs.
+
+x-redis-sentinel: &redis-sentinel
+  image: redis:7-alpine
+  depends_on:
+    - redis-primary
+    - redis-replica
+  restart: unless-stopped
+  # Sentinel needs a writable config file to persist its state; /tmp is
+  # enough for a drill stack (state is rebuilt on container recreate).
+  command: >
+    sh -c "printf 'sentinel monitor posta 172.28.0.10 6379 2\nsentinel down-after-milliseconds posta 5000\nsentinel failover-timeout posta 20000\nsentinel auth-pass posta redispw\n' > /tmp/sentinel.conf
+    && exec redis-server /tmp/sentinel.conf --sentinel --requirepass sentinelpass"
+
+services:
+  redis-primary:
+    image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "redispw", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory-policy", "noeviction"]
+    networks:
+      sentinelnetwork:
+        ipv4_address: 172.28.0.10
+    volumes:
+      - sentinel_primary_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a redispw ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  redis-replica:
+    image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "redispw", "--replicaof", "172.28.0.10", "6379", "--masterauth", "redispw", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    depends_on:
+      redis-primary:
+        condition: service_healthy
+    networks:
+      sentinelnetwork:
+        ipv4_address: 172.28.0.11
+    volumes:
+      - sentinel_replica_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a redispw ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  sentinel-1:
+    <<: *redis-sentinel
+    ports:
+      - "127.0.0.1:26379:26379"
+    networks:
+      sentinelnetwork:
+        ipv4_address: 172.28.0.20
+
+  sentinel-2:
+    <<: *redis-sentinel
+    networks:
+      sentinelnetwork:
+        ipv4_address: 172.28.0.21
+
+  sentinel-3:
+    <<: *redis-sentinel
+    networks:
+      sentinelnetwork:
+        ipv4_address: 172.28.0.22
+
+networks:
+  sentinelnetwork:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+          gateway: 172.28.0.1
+
+volumes:
+  sentinel_primary_data:
+  sentinel_replica_data:

@@ -27,6 +27,7 @@ import (
 
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/storage/repositories"
+	"github.com/goposta/posta/internal/services/reputation"
 	"gorm.io/gorm"
 )
 
@@ -51,7 +52,24 @@ type HealthService struct {
 	// ehloDomain is the process EHLO name (POSTA_MTA_EHLO_NAME); the PTR
 	// match check targets it, falling back to the sending domain.
 	ehloDomain string
+	// reputation supplies the OB-6 W3 additions to the report (per-IP
+	// reputation rollups, the domain's pool, the active warm-up ramp); a
+	// field so tests inject a fake. nil = the sections are omitted.
+	reputation ReputationReader
 }
+
+// ReputationReader supplies the OB-6 W3 (ADR-007 decision 7) extensions to
+// the R-07 report: the per-source-IP reputation rollups for the domain, the
+// pool the domain sends from, and its active warm-up ramp. Implemented by
+// the reputation service; nil keeps the report shape unchanged.
+type ReputationReader interface {
+	DomainReputationReport(scope repositories.ResourceScope, domain string, window time.Duration) (*reputation.DomainReport, error)
+	DomainPoolView(d *models.Domain) (*reputation.PoolView, error)
+	DomainWarmupView(d *models.Domain, now time.Time) (*reputation.WarmupView, error)
+}
+
+// SetReputationReader wires the reputation/pool/warm-up sections (OB-6 W3).
+func (s *HealthService) SetReputationReader(r ReputationReader) { s.reputation = r }
 
 func NewHealthService(db *gorm.DB, keyRepo *repositories.DomainSigningKeyRepository) *HealthService {
 	return &HealthService{
@@ -136,8 +154,16 @@ type HealthReport struct {
 	// PTR surfaces reverse-DNS guidance for the outbound bind IP (OB-1,
 	// ADR-001 §7 — guidance only, never enforced at delivery). nil when the
 	// domain is not in direct mode.
-	PTR       *PTRGuidance `json:"ptr,omitempty"`
-	CheckedAt time.Time    `json:"checked_at"`
+	PTR *PTRGuidance `json:"ptr,omitempty"`
+	// Reputation/Pool/Warmup are the OB-6 W3 additions (ADR-007 decision 7):
+	// the per-source-IP reputation rollups (bounce/deferred/complaint rates
+	// + trend) for the domain, the pool it sends from, and its active
+	// warm-up ramp. nil when the reputation reader is absent (or the domain
+	// has no pool / no active ramp for those sections).
+	Reputation *reputation.DomainReport `json:"reputation,omitempty"`
+	Pool       *reputation.PoolView     `json:"pool,omitempty"`
+	Warmup     *reputation.WarmupView   `json:"warmup,omitempty"`
+	CheckedAt  time.Time                `json:"checked_at"`
 }
 
 // PTR match verdicts for PTRGuidance.Match.
@@ -219,6 +245,22 @@ func (s *HealthService) report(d *models.Domain, window time.Duration, live *Ver
 				ComplaintRate: rateOf(stats.Complained, stats.Sent),
 				Since:         since,
 			}
+		}
+	}
+
+	// OB-6 W3 (ADR-007 decision 7): reputation rollups, pool, warm-up. The
+	// sections ride the same ownership gate as the sending stats; a failure
+	// in one is non-fatal — the section is omitted, never a failed report.
+	if s.reputation != nil && ownership {
+		scope := repositories.ResourceScope{UserID: d.UserID, WorkspaceID: d.WorkspaceID}
+		if rep, err := s.reputation.DomainReputationReport(scope, strings.ToLower(d.Domain), window); err == nil {
+			report.Reputation = rep
+		}
+		if pool, err := s.reputation.DomainPoolView(d); err == nil {
+			report.Pool = pool
+		}
+		if wu, err := s.reputation.DomainWarmupView(d, s.now()); err == nil {
+			report.Warmup = wu
 		}
 	}
 	return report
@@ -353,12 +395,10 @@ func rateOf(part, total int64) float64 {
 	return float64(part) / float64(total) * 100
 }
 
-// senderDomainExpr extracts the bare sending domain from emails.sender. Sender
-// carries either a bare address ("hello@example.com") or RFC 5322 display form
-// ("Acme <hello@example.com>"): prefer the <addr-spec> when present, then take
-// everything after the @. Lower-cased so the comparison matches how domains
-// are stored.
-const senderDomainExpr = `LOWER(SPLIT_PART(BTRIM(COALESCE(NULLIF(SUBSTRING(sender FROM '<([^>]+)>'), ''), sender)), '@', 2))`
+// senderDomainExpr mirrors the shared expression in
+// repositories.SenderDomainExpr (one source of truth lives there; this alias
+// keeps the queries below readable).
+const senderDomainExpr = repositories.SenderDomainExpr
 
 // gormSendingStats reads the sending numbers with plain SQL: per-domain bounce
 // rates need a join from bounces to their email rows and the sender's domain,

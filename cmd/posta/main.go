@@ -24,6 +24,7 @@ import (
 	// same on hosts without /usr/share/zoneinfo.
 	_ "time/tzdata"
 
+	"github.com/goposta/posta/internal/observability"
 	"github.com/jkaninda/logger"
 	"github.com/jkaninda/okapi"
 	"github.com/jkaninda/okapi/okapicli"
@@ -42,6 +43,9 @@ func main() {
 	cli.Command("worker", "Start Posta worker", func(cmd *okapicli.Command) error {
 		logger.Info("Starting Posta Worker...")
 		if err := runWorker(); err != nil {
+			// OB-6 W5 (GAP-51): ship the fatal as an error event when
+			// POSTA_ERROR_WEBHOOK_URL is configured (no-op otherwise).
+			observability.CaptureGlobalFatal("worker server error: " + err.Error())
 			logger.Fatal("worker server error", "error", err)
 		}
 		return nil
@@ -53,6 +57,9 @@ func main() {
 	cli.DefaultCommand("server")
 
 	if err := cli.Execute(); err != nil {
+		// OB-6 W5 (GAP-51): ship the fatal as an error event when
+		// POSTA_ERROR_WEBHOOK_URL is configured (no-op otherwise), then exit.
+		observability.CaptureGlobalFatal(err.Error())
 		logger.Fatal(err.Error())
 	}
 }

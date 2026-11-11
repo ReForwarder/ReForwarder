@@ -22,6 +22,8 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"time"
 
 	"github.com/goposta/posta/internal/cron"
 	"github.com/goposta/posta/internal/queues"
@@ -41,6 +43,11 @@ type DailyReportPayload struct {
 // is delivered to the workspace's owners and admins.
 type DailyReportJob struct {
 	workspaceRepo *repositories.WorkspaceRepository
+	// claims, when set, guards one report enqueue per workspace per day
+	// (GAP-03): the leader lease keeps one replica per tick, but a crash
+	// between lease acquire and enqueue — or a failover edge — could
+	// double-enqueue a customer-facing digest.
+	claims cron.ClaimStore
 }
 
 // dailyReportTask implements cron.Job for enqueueing a single workspace's report.
@@ -58,16 +65,31 @@ func NewDailyReportJob(workspaceRepo *repositories.WorkspaceRepository) *DailyRe
 func (j *DailyReportJob) Name() string     { return "daily-report" }
 func (j *DailyReportJob) Schedule() string { return "0 7 * * *" } // daily at 07:00 UTC
 
-func (j *DailyReportJob) Run(_ context.Context, client *asynq.Client) error {
+// SetClaimStore installs the per-recipient dedup guard (GAP-03). Nil keeps
+// single-replica behavior unchanged.
+func (j *DailyReportJob) SetClaimStore(cs cron.ClaimStore) { j.claims = cs }
+
+func (j *DailyReportJob) Run(ctx context.Context, client *asynq.Client) error {
 	workspaces, err := j.workspaceRepo.FindAll()
 	if err != nil {
 		logger.Error("daily report: failed to find workspaces", "error", err)
 		return err
 	}
 
+	today := time.Now().UTC().Format("20060102")
 	enqueued := 0
 	for _, ws := range workspaces {
+		// One report enqueue per workspace per day (GAP-03); cleared when the
+		// enqueue fails so the next leader can retry. Fails open on a Redis
+		// outage — a possible duplicate beats a missing report.
+		dedupKey := fmt.Sprintf("cron:dedup:daily-report:%d:%s", ws.ID, today)
+		if j.claims != nil && !j.claims.ClaimOnce(ctx, dedupKey, 48*time.Hour) {
+			continue
+		}
 		if err := cron.EnqueueJob(client, &dailyReportTask{workspaceID: ws.ID}, asynq.Queue(queues.Low)); err != nil {
+			if j.claims != nil {
+				j.claims.ClearClaim(ctx, dedupKey)
+			}
 			logger.Error("daily report: failed to enqueue", "workspace_id", ws.ID, "error", err)
 			continue
 		}

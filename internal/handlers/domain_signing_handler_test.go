@@ -60,8 +60,10 @@ import (
 const dskTestWorkspace = "3"
 
 var dskColumns = map[string][]string{
+	// pool_id: OB-6 W3 additive column (domains.pool_id) — Save() on the model
+	// emits it in every UPDATE's SET list, so the fake must know it.
 	"domains": {"id", "user_id", "workspace_id", "domain", "ownership_verified", "spf_verified",
-		"dkim_verified", "dmarc_verified", "verification_token", "created_at"},
+		"dkim_verified", "dmarc_verified", "verification_token", "created_at", "pool_id", "mta_sts_mode"},
 	"domain_signing_keys": {"id", "user_id", "workspace_id", "domain_id", "selector", "algorithm",
 		"private_key_pem", "status", "dns_state", "dns_published_at", "created_at", "updated_at"},
 	"events": {"id", "category", "type", "workspace_id", "actor_id", "actor_name", "client_ip",

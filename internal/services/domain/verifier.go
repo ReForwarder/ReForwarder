@@ -46,6 +46,17 @@ type DNSRecords struct {
 	SPF          DNSRecord `json:"spf"`
 	DKIM         DNSRecord `json:"dkim"`
 	DMARC        DNSRecord `json:"dmarc"`
+	// TLSRPT is the SMTP TLS reporting record (SF-31, OB-6 W4, ADR-007 §5,
+	// RFC 8460 §3): the rua endpoint receiving MTAs send their TLS reports
+	// to. Publish it once TLS-RPT ingestion should start; the dedicated
+	// tlsrpt@<domain> mailbox is accepted by this deployment's receiver.
+	TLSRPT DNSRecord `json:"tls_rpt"`
+	// MTASTS documents the MTA-STS Web Host requirement (SF-29, RFC 8461
+	// §3.3): mta-sts.<domain> must resolve (A/AAAA) to this deployment with
+	// a valid certificate, because the policy document is served at
+	// https://mta-sts.<domain>/.well-known/mta-sts.txt. It is an address
+	// record, not a TXT record.
+	MTASTS DNSRecord `json:"mta_sts"`
 }
 
 type DNSRecord struct {
@@ -76,6 +87,19 @@ func RequiredRecords(d *models.Domain) *DNSRecords {
 			Type:  recordTypeTXT,
 			Host:  "_dmarc." + d.Domain,
 			Value: "v=DMARC1; p=none; rua=mailto:dmarc@" + d.Domain,
+		},
+		TLSRPT: DNSRecord{
+			Type:  recordTypeTXT,
+			Host:  "_smtp._tls." + d.Domain,
+			Value: "v=TLSRPTv1; rua=mailto:tlsrpt@" + d.Domain,
+		},
+		// MTA-STS itself publishes no TXT record: senders discover the
+		// policy at the mta-sts.<domain> Web Host over HTTPS (RFC 8461
+		// §3.3). The A record points at this deployment.
+		MTASTS: DNSRecord{
+			Type:  "A",
+			Host:  "mta-sts." + d.Domain,
+			Value: "(this deployment's ingress address)",
 		},
 	}
 }

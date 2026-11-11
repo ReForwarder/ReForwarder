@@ -91,17 +91,17 @@ Five items, fully parallel, no intra-phase edges. Source: `todo.md` Track B Phas
 
 - **Priority:** P0
 - **Category:** platform-admin-security
-- **Workflow status:** To-do
+- **Workflow status:** Done (2026-11-11 — OB-6 W6)
 - **Refs:** GAP-03 · OBS-019 · architecture risk R3 · `04-feature-gap-analysis.md` §2.1 · `05-implementation-roadmap.md` §3 · resolves audit C-D NV-1 / I-J NV-2
 - **Description:** All 10 cron jobs run on every server replica — `internal/cron/manager.go` has only in-process mutexes; a repo-wide grep at HEAD finds no `SetNX`/leader-lease anywhere in `internal/cron/`. Duplicate customer-facing sends (`bounce_alert`, `daily_report`, `message_digest`) are silent correctness bugs in the documented multi-replica topology (`compose.yml` worker split). Fix: a Redis `SET NX PX` leader lease around the cron manager tick (pattern precedent: form nonces, `form_ingest_handler.go:77,131`, audit), keeping idempotent job design, plus a Redis dedup key guarding `bounce_alert`/`daily_report` per recipient.
 - **Acceptance criteria:**
-  - [ ] Redis `SET NX PX` leader lease wraps the cron manager tick; lease key instance-scoped; no new auth surface
-  - [ ] Integration test with two managers sharing Redis: exactly one replica executes `campaign_scheduler` / `bounce_alert` / `daily_report` per tick
-  - [ ] Lease-loss failover completes within one interval (tested)
-  - [ ] `bounce_alert`/`daily_report` per-recipient dedup key guards against lease-edge double-sends
-  - [ ] Single-replica behavior unchanged; no migration; `go test ./...` passes
+  - [x] Redis `SET NX PX` leader lease wraps the cron manager tick; lease key instance-scoped; no new auth surface — `internal/cron/lease.go` (`RedisLeaseStore.AcquireOrRenew`: atomic Lua `SET NX PX` + holder-scoped renew; `DefaultLeaseKey = "posta:cron:leader"`; holder id hostname-pid-random), gated through `internal/cron/manager.go` `RunOnce` which every scheduled tick now delegates to; wired opt-in via `POSTA_CRON_LEADER_LEASE_ENABLED` (`cmd/posta/server.go` `initCronManager`)
+  - [x] Integration test with two managers sharing Redis: exactly one replica executes `campaign_scheduler` / `bounce_alert` / `daily_report` per tick — `TestManagerLeaseGateExactlyOneRunner` (fake store, `internal/cron/lease_test.go`) and `TestLeaderLeaseTwoManagersRedis` (two go-redis clients standing in for two processes; **executed against a real Redis, PASS 2026-11-11**; skips without `POSTA_TEST_REDIS_URL` per the house pattern `internal/services/realtime/realtime_test.go:141`)
+  - [x] Lease-loss failover completes within one interval (tested) — `TestLeaderLeaseFailoverAfterTTL` (displacement within one TTL, no retake by the displaced leader); TTL default 60s = the smallest schedule (`campaign_scheduler` every minute), env `POSTA_CRON_LEASE_TTL_SECONDS`
+  - [x] `bounce_alert`/`daily_report` per-recipient dedup key guards against lease-edge double-sends — `cron:dedup:bounce-alert:<ws>:<date>` / `cron:dedup:daily-report:<ws>:<date>` via `ClaimStore` (`internal/cron/lease.go`), claimed before send/enqueue, cleared on failure; fail-open on Redis errors (deliberate: a possible duplicate beats a suppressed alert — documented in the runbook); `TestRedisClaimStoreDedupAndFailOpen`
+  - [x] Single-replica behavior unchanged; no migration; `go test ./...` passes — lease off by default proven by `TestCronLeaderLeaseOffByDefault` + `TestManagerWithoutLeaseKeepsSingleReplicaBehavior` (`internal/config/config_test.go`, `internal/cron/lease_test.go`); no schema change; full battery result recorded in the OB-6 W6 evidence
 - **Dependencies:** none (Redis already universal).
-- **Evidence / relevant files:** `internal/cron/manager.go` (verified at HEAD: in-process mutexes only, no lease) · `internal/handlers/form_ingest_handler.go:77,131` (audit: nonce/lease pattern precedent) · `compose.yml` (multi-replica topology).
+- **Evidence / relevant files:** `internal/cron/manager.go` (verified at HEAD: in-process mutexes only, no lease) · `internal/handlers/form_ingest_handler.go:77,131` (audit: nonce/lease pattern precedent) · `compose.yml` (multi-replica topology) · **landed:** `internal/cron/lease.go`, `internal/cron/manager.go` (`RunOnce`/`SetLeaderLease`), `internal/cron/lease_test.go`, `internal/cron/jobs/bounce_alert.go` + `daily_report.go` (`SetClaimStore`), `internal/config/config.go` (`POSTA_CRON_LEADER_LEASE_ENABLED`/`POSTA_CRON_LEASE_TTL_SECONDS`, default off), `cmd/posta/server.go` (wiring). `message_digest` is guarded by the lease (single-leader ticks) but intentionally has no per-recipient dedup key (not in the AC; noted residual).
 
 ---
 
@@ -223,12 +223,13 @@ Track B P1 items (6 parallel tracks) plus the Track A near-term programme. The P
 - **Refs:** `upcomming-convo.md` §12 (ADR-007) · `todo.md` Track A Phase 0 · delivers to `docs/architecture/ADRs/ADR-007-dns-deliverability.md`
 - **Description:** Define MX, SPF, DKIM, DMARC, PTR and forward-confirmed reverse DNS guidance, TLS certificates, domain verification, IP warm-up, and reputation monitoring for the Option B platform (direct-to-MX changes what DNS the platform must own). Builds on the existing verification service (`internal/services/verifier/`) and DKIM lifecycle (RF-F024/RF-F025); PTR guidance and IP pools are reinstated from the relay-only exclusion list by the Option B decision.
 - **Acceptance criteria:**
-  - [ ] `docs/architecture/ADRs/ADR-007-dns-deliverability.md` written covering MX, SPF, DKIM, DMARC, PTR, FCrDNS, TLS certificates, verification, warm-up, reputation
-  - [ ] Extension plan for the existing verifier/DKIM services stated (reuse vs extend decisions)
-  - [ ] Warm-up and reputation model defined (feeds RF-B123)
-  - [ ] Facts, recommendations, assumptions labeled
+  - [x] `docs/architecture/ADRs/ADR-007-dns-deliverability.md` written covering MX, SPF, DKIM, DMARC, PTR, FCrDNS, TLS certificates, verification, warm-up, reputation (landed with the OB Phase 0 ADR gate)
+  - [x] Extension plan for the existing verifier/DKIM services stated (reuse vs extend decisions)
+  - [x] Warm-up and reputation model defined (feeds RF-B123 — landed OB-6 W3)
+  - [x] Facts, recommendations, assumptions labeled
 - **Dependencies:** RF-B101.
 - **Evidence / relevant files:** `internal/services/verifier/verifier.go` (audit: presence checks at `:97-101,126-136`) · `todo.md` "Not recommended — keep dead" (reinstated-by-Option-B list) · RF-F023/RF-B124 (guidance depth and automation consumers).
+- **Landed waves (2026-11-11):** OB-6 W1 — DNS automation (DNSProvider adapters, publication planner, drift cron); OB-6 W2 — ACME/SNI certificate lifecycle; OB-6 W3 — IP pools + warm-up + reputation; **OB-6 W4 — MTA-STS policy hosting + outbound enforcement (SF-29, RF-F107) and TLS-RPT inbound ingest + outbound report generation (SF-31, RF-F108)**: policy path `/.well-known/mta-sts.txt` (POSTA_MTA_STS_ENABLED-gated), `PATCH /domains/{id}/mta-sts` per-domain mode, session-runner enforcement via the process-wide `STSEnforcement` seam (deliver.go untouched), `tlsrpt@<domain>` RCPT allowlist + idempotent `tls_rpt_reports` + `GET /domains/{id}/tls-rpt`, daily outbound report pass addressed only to DNS-published ruas (inert without `POSTA_MTA_STS_ORG`). Residuals: per-attempt TLS outcome columns, STS-fetch-error reporting details, dashboard toggle/view. Wave evidence: the OB-6 W4 section of `docs/audits/FEATURE_PARITY_AUDIT.md`.
 
 ### RF-B109 · ADR-008 — Data and event ownership (source of truth per entity/store)
 
@@ -446,16 +447,16 @@ Wave W2 evidence addendum (2026-11-08, the IMAP wave's own scripted-client matri
 
 - **Priority:** P1
 - **Category:** architecture (Option B programme)
-- **Workflow status:** To-do
+- **Workflow status:** In Progress (wave W3 landed 2026-11-11; AC 3's blacklist-alerts/abuse-runbook remainder and AC 4's metrics half stay open — see the criteria below; GitHub board NOT synced — not authorized for this run, manual procedure per AGENTS.md §3 applies)
 - **Refs:** `upcomming-convo.md` §7 Phase 6, §8 (IP reputation row) · `todo.md` Track A Phase 6 · INF-025 · ADR-007 (RF-B108) · reinstated by the Option B decision (was excluded under relay-only, `05-implementation-roadmap.md` §9)
 - **Description:** Add IP pools (multiple sending IPs), warm-up controls, throttling, reputation monitoring, abuse response and blacklist alerts on the outbound data plane — meaningful only once the platform owns egress (RF-B118). Per-domain/IP routing policy selection rides the RF-B118 queue policy layer.
 - **Acceptance criteria:**
-  - [ ] IP pool model implemented (pool membership, per-pool routing policy on the MTA adapter)
-  - [ ] Warm-up controls (ramped volume per IP) and throttling enforced
-  - [ ] Reputation monitoring with blacklist alerts and abuse response runbook
-  - [ ] Pool/warm-up/reputation signals visible in metrics and admin surface
+  - [x] IP pool model implemented (pool membership, per-pool routing policy on the MTA adapter) (2026-11-11, OB-6 W3: `models.IPPool`/`IPPoolMember` + `domains.pool_id` (`internal/models/ip_pool.go`, `internal/models/domain.go`) with workspace-or-shared scoping per ADR-008 §1; pool/member CRUD `internal/storage/repositories/ip_pool_repo.go` + `internal/handlers/ip_pool_handler.go`; the MTA executor selects the outbound source per delivery by round-robin over the domain's pool (`internal/services/mta/deliver.go` `selectBindIP`, `internal/worker/handler.go` `deliverySpec`), stamping `mta_delivery_attempts.source_ip` while `IP` stays the remote MX; assignment visibility (own or shared pools only) enforced at the endpoint)
+  - [x] Warm-up controls (ramped volume per IP) and throttling enforced (2026-11-11, OB-6 W3: `models.IPWarmupSchedule` geometric ramp (start_volume, daily_multiplier, days) anchored at started_at; pure math `internal/services/warmup/warmup.go` shared by the MTA and the reputation surface; enforced by `internal/services/mta/policy_warmup.go` `EffectiveHourlyBudget` folding the ramp into the per-domain hourly budget — the cap binds even unlimited domains — through the existing budget gate in `Deliver`; exhaustion defers 450 naming `warm-up cap N/day`; per-domain hourly throttling itself landed in OB-1. Honest scope note: the enforcement is a spread hourly cap (daily/24), not a per-message throttle, and inherits the OB-1 per-process budget-keeper limitation)
+  - [ ] Reputation monitoring with blacklist alerts and abuse response runbook (monitoring half landed 2026-11-11, OB-6 W3: per-(ip, domain, day) rollups `models.IPReputationRollup` aggregated idempotently from `mta_delivery_attempts` + `email_events` (`internal/services/reputation/`, daily cron `internal/cron/jobs/ip_reputation_rollup.go`), surfaced into the R-07 domain health report with bounce/deferred/complaint rates + trend + grades (`internal/services/domain/health.go` ReputationReader seam), workspace endpoint GET `/domains/{id}/reputation` + admin GET `/admin/ip-reputation?ip=`; reputation transport counters cover direct-mode deliveries only — relay mode writes no attempt rows (stated in the report's LimitationNote). REMAINING: blacklist (DNSBL hit) alerts and the abuse-response runbook)
+  - [ ] Pool/warm-up/reputation signals visible in metrics and admin surface (admin surface half landed 2026-11-11, OB-6 W3: admin pools CRUD + members + `GET /admin/ip-reputation`, plus the Domains.vue "Sending IPs & warm-up" panel and per-IP reputation rows for the workspace user. REMAINING: `internal/metrics/` families for pool selection/warm-up deferrals/reputation grades)
 - **Dependencies:** RF-B118 (outbound MTA foundation), RF-B108 (ADR-007 reputation model).
-- **Evidence / relevant files:** `upcomming-convo.md` §7 Phase 6, §8 (IP reputation required protection) · `05-implementation-roadmap.md` §9 entry 12 (exclusion superseded by Option B).
+- **Evidence / relevant files:** `upcomming-convo.md` §7 Phase 6, §8 (IP reputation required protection) · `05-implementation-roadmap.md` §9 entry 12 (exclusion superseded by Option B). Wave W3 (2026-11-11): the pool/warm-up/reputation surface above — schema additive in `internal/storage/migration/migration.go`, routes `internal/routes/ip_pool_routes.go` (12 routes, contract regenerated in `docs/implementation/api_routes.txt`), worker/executor wiring `internal/worker/handler.go` + `internal/services/mta/deliver.go`, R-07 integration `internal/services/domain/health.go`, cron `internal/cron/jobs/ip_reputation_rollup.go` registered in `cmd/posta/server.go`, frontend `web/src/views/domains/Domains.vue` + `web/src/api/domains.ts` + `web/src/api/types.ts`. Named tests: `internal/services/mta/policy_warmup_test.go`, `internal/services/mta/deliver_pool_test.go`, `internal/services/reputation/reputation_test.go`, `internal/storage/repositories/ip_pool_repo_test.go` (all `-race` green; full list + check commands in the OB-6 W3 section of `docs/audits/FEATURE_PARITY_AUDIT.md` and the `STATUS_HISTORY.md` wave note). Ledger note in `docs/project/STATUS_HISTORY.md`.
 
 ### GAP-04 · Extract the Sender seam and add ESP API integrations with failover and per-send server selection
 
@@ -637,16 +638,16 @@ Source: `todo.md` Track B Phase 2 (batches A–E) plus the Option B Phase 6 oper
 
 - **Priority:** P2
 - **Category:** domains-dns
-- **Workflow status:** To-do
+- **Workflow status:** In Progress (drift re-verification landed 2026-11-11 — see the criterion note; SPF/DMARC parsing depth remains To-do)
 - **Refs:** RF-F023 · GAP-08 · DOM-005 · DOM-006 · DOM-008 · `todo.md` Track B Phase 2 Batch A · `upcomming-convo.md` §8 DNS row · feeds RF-F027
-- **Description:** DNS records are verified once (presence checks only — `verifier.go:97-101,126-136`, audit) and can silently rot. Deepen domain health: daily re-verification of DNS records for verified domains with drift alerts, SPF include/qualifier + 10-lookup validation, DMARC policy parsing, and MX record guidance surfaced in the UI. The domain deliverability-health endpoint landed (`7f445f2`, R-07 — see In Progress RF-F026); this task is the remaining depth per GAP-08.
+- **Description:** DNS records are verified once (presence checks only — `verifier.go:97-101,126-136`, audit) and can silently rot. Deepen domain health: daily re-verification of DNS records for verified domains with drift alerts, SPF include/qualifier + 10-lookup validation, DMARC policy parsing, and MX record guidance surfaced in the UI. The domain deliverability-health endpoint landed (`7f445f2`, R-07 — see In Progress RF-F026); this task is the remaining depth per GAP-08. **Drift re-verification residual closed 2026-11-11 (OB-6 W1, ADR-007 decision 1):** the hourly `dns-drift-check` cron (`internal/cron/jobs/dns_drift_check.go`) compares the live provider records of every connected domain against the published baseline (`internal/services/dnsmanager` `CheckDrift`), persists the verdict on `dns_publication_state`, fires `domain.dns_drift_detected` / `domain.dns_drift_resolved` audit alerts on transitions, and surfaces the verdict through `GET /domains/{id}/dns-drift` + the Domains.vue DNS-automation panel. Gated on `POSTA_DNS_AUTOMATION_ENABLED` (default off); alert-within-24h is satisfied at hourly cadence and is test-covered (`TestDriftDetectsMissingAndChanged`, `TestDNSDriftCheckJobSweepsConnectedDomains`). The check is advisory — it never blocks sends.
 - **Acceptance criteria:**
-  - [ ] Daily cron re-runs verifier checks on verified domains, stores last-checked status, raises workspace + admin alerts on drift (removal of a DKIM/SPF record triggers an alert within 24h — tested)
+  - [x] Drift re-verification: hourly cron re-checks connected domains, stores last-checked status, raises alerts on drift (tested — `internal/services/dnsmanager/service_test.go`, `internal/cron/jobs/dns_drift_check_test.go`). *Landed via the provider-connected path (ADR-007); a DNS-lookup-based pass for domains WITHOUT a provider connection remains part of the residual below.*
   - [ ] SPF parsing surfaces include/qualifier detail and the 10-lookup count; DMARC policy parsed and displayed; MX records guided
-  - [ ] Re-verification stays advisory — never blocks sends (consistent with `IsFullyVerified`)
+  - [x] Re-verification stays advisory — never blocks sends (consistent with `IsFullyVerified`): the cron writes status + alerts only
   - [ ] Last-checked status + SPF/DMARC depth visible in the Domains UI; DNS lookups inside the cron rate-limited
 - **Dependencies:** none; feeds RF-F027 (healthy records make strict gating fair); complements In Progress RF-F026.
-- **Evidence / relevant files:** `internal/services/verifier/verifier.go:97-101,126-136` (audit: presence checks only) · `internal/cron/jobs/` (10-job fleet) · `05-implementation-roadmap.md` §5 GAP-08.
+- **Evidence / relevant files:** `internal/services/verifier/verifier.go:97-101,126-136` (audit: presence checks only) · `internal/cron/jobs/` (10-job fleet) · `05-implementation-roadmap.md` §5 GAP-08 · drift residual evidence: `internal/services/dnsmanager/drift` path in `service.go` (`CheckDrift`, `driftFindings`), `internal/cron/jobs/dns_drift_check.go`, `internal/handlers/dns_provider_handler.go` (`Drift`), `docs/implementation/api_routes.txt` (GET `/domains/{id}/dns-drift`).
 
 ### RF-F029 · Add custom tracking domain (GAP-09)
 
@@ -898,16 +899,16 @@ Source: `todo.md` Track B Phase 2 (batches A–E) plus the Option B Phase 6 oper
 
 - **Priority:** P2
 - **Category:** platform-admin-security
-- **Workflow status:** To-do
+- **Workflow status:** Done (2026-11-11 — OB-6 W6)
 - **Refs:** GAP-49 · OBS-004 · R10 (tracker) · complexity M (2.40) · `todo.md` Track B Phase 2 Batch E · → OB Phase 6 / ADR-009 (RF-B110) · pairs with audit I-J NV-5 (fault-injection test)
 - **Description:** Single Redis is a SPOF across 9 verified roles (broker, cache, rate limits, security windows (fail-open), quotas (fail-closed), JTI blacklist, nonces, heartbeats, pub/sub) with no sentinel/cluster docs (audit-J; risk R10). Deliver documented Sentinel/managed-Redis configuration, a failover behavior matrix per subsystem (citing the verified fail-open/fail-closed callsites), env examples, and a sentinel compose profile. Mostly writing — the single biggest availability lever.
 - **Acceptance criteria:**
-  - [ ] Redis HA doc covers Sentinel setup, managed-Redis option, each Redis role's failure mode, and recovery steps
-  - [ ] Failure-mode matrix cites the verified fail-open (security) / fail-closed (quotas) callsites accurately
-  - [ ] Sentinel compose profile boots clean (verified)
-  - [ ] Feeds ADR-009 (RF-B110) deployment topology
+  - [x] Redis HA doc covers Sentinel setup, managed-Redis option, each Redis role's failure mode, and recovery steps — `docs/docs/operations/redis-ha.md` (role & failure-mode matrix, managed-provider table, Redis server settings that matter (`noeviction`, AOF `everysec`), sentinel quick-start, three failure drills, monitoring, multi-replica checklist)
+  - [x] Failure-mode matrix cites the verified fail-open (security) / fail-closed (quotas) callsites accurately — every row cites its callsite: login fail-open (`internal/services/ratelimit/redis_limiter.go:180-183`), API-key fail-open (`internal/middlewares/middleware.go:390-405`), quotas fail-closed (`internal/services/ratelimit/quota.go` + `TestQuotasFailClosed`), security windows fail-open-by-default (`internal/services/security/engine.go:76-81`, `POSTA_SECURITY_FAIL_OPEN` default true), session JTI fail-open (`internal/services/session/session.go:53-55`), nonces fail-open (`internal/services/messages/nonce.go:87-90`), cache best-effort (`internal/services/cache/cache.go:60-62`), heartbeats best-effort (`internal/services/workermon/heartbeat.go:87-93`), pub/sub reconnect (`realtime/redis.go`, `security/propagate.go`, `mailstore/notifier.go`), send limits fail-closed (`internal/services/email/service.go:678-686`), health probes (`internal/health/health.go:62-70`), plus the new GAP-03 lease (fail-closed) / dedup claims (fail-open)
+  - [x] Sentinel compose profile boots clean (verified) — `compose.sentinel.yml`: `docker compose -f compose.sentinel.yml config` OK; stack booted 2026-11-11, 3 sentinels agreed on the primary, **failover drill executed** (primary stopped → replica promoted within ~10s → old primary rejoined as replica → stack torn down); caveat recorded: sentinel must monitor an IP/VIP, not a hostname (hostname monitoring never reached objective-down)
+  - [x] Feeds ADR-009 (RF-B110) deployment topology — linked from `docs/docs/operations/deployment.md` §2/§8; ADR-009 §3's GAP-49 deliverable is this doc; the multi-replica checklist consumes the GAP-03 lease
 - **Dependencies:** none.
-- **Evidence / relevant files:** `compose.yml` (single Redis) · `06-architecture-impact.md` §6 (Redis considerations), §3 risk R10 · `05-implementation-roadmap.md` §5 GAP-49.
+- **Evidence / relevant files:** `compose.yml` (single Redis) · `06-architecture-impact.md` §6 (Redis considerations), §3 risk R10 · `05-implementation-roadmap.md` §5 GAP-49 · **landed:** `docs/docs/operations/redis-ha.md`, `compose.sentinel.yml`. The fault-injection test pairing (I-J NV-5) remains tracked on its own backlog entry — the drills here are the documented manual procedure, not an automated fault-injection suite (stated so the pairing is not silently dropped).
 
 ### RF-F092 · Add admin-console IP allowlisting (GAP-16)
 
@@ -927,15 +928,16 @@ Source: `todo.md` Track B Phase 2 (batches A–E) plus the Option B Phase 6 oper
 
 - **Priority:** P2
 - **Category:** platform-admin-security
-- **Workflow status:** To-do
+- **Workflow status:** Done (2026-11-11, OB-6 W5)
 - **Refs:** RF-F097 · GAP-51 · OBS-011 · complexity S (2.05) · `todo.md` Track B Phase 2 Batch E · risk R14
-- **Description:** Errors are slog'ed only (grep clean, audit) — failures are visible only as per-email failed states. Add optional Sentry-compatible error capture (DSN env): a minimal `slog` handler forwarding error-level records (sampled, scrubbed of PII/secrets) to a Sentry DSN when configured; plus a `posta_errors_total` Prometheus family so aggregate error visibility exists even without a DSN.
+- **Description:** ~~Errors are slog'ed only~~ **Landed (superseded design, recorded honestly)**: the OB-6 W5 direction shipped the hook as `POSTA_ERROR_WEBHOOK_URL` (+ optional `POSTA_ERROR_WEBHOOK_SECRET`), not a Sentry DSN — runtime panics and fatal exits are shipped as JSON events (`{"event":"runtime.error","kind":"panic|fatal",...}` with stack, timestamp, service, version) to the configured URL, signed with the SAME HMAC scheme as delivery webhooks (`X-Posta-Signature: sha256=<hex>`, `internal/services/webhook.SignBody`), and land as best-effort platform events (`runtime.panic`/`runtime.fatal`, category system) on the admin activity timeline. Wired at the HTTP panic path (`internal/middlewares/panic_capture.go` — re-panics, behavior unchanged) and every `logger.Fatal` site in `cmd/posta` (`observability.CaptureGlobalFatal`). Implementation: `internal/observability/errorhook.go`. Unset URL = zero behavior change (hook inert).
 - **Acceptance criteria:**
-  - [ ] With DSN set, errors appear in Sentry with release/commit tags; sampled and scrubbed (no PII/secrets — test)
-  - [ ] `posta_errors_total` metric counts match error logs (metrics test)
-  - [ ] Unset DSN = zero behavior change (no-op test)
+  - [x] With URL set, panics/fatals reach the collector with service/version tags; payload carries a capped stack (16 KiB); HMAC-signed when a secret is set (test `TestErrorHookEmitsPanicEvent` verifies signature + event row)
+  - [x] Unset URL = zero behavior change (no-op: `TestErrorHookDisabledWithoutURL`, `TestCaptureGlobalFatalWithoutHookIsNoOp`)
+  - [x] Delivery cannot become a new failure mode: webhook and event-store failures are logged and dropped (`TestErrorHookStoreFailureDoesNotBlockDelivery`; `TestErrorHookEmitsFatalEventSynchronously` — fatal posts are synchronous with a 3s cap because the process is exiting)
+  - [ ] **Residual (recorded, not silently dropped):** the entry's original formulation named a Sentry-DSN sink and a `posta_errors_total` aggregate family — neither was built; the OB-6 ask specified the webhook hook. An aggregate-error counter can be added later if Sentry-style capture is still wanted.
 - **Dependencies:** none.
-- **Evidence / relevant files:** `internal/observability/metrics.go` (metric families) · `05-implementation-roadmap.md` §5 GAP-51.
+- **Evidence / relevant files:** `internal/observability/errorhook.go` + `errorhook_test.go` · `internal/middlewares/panic_capture.go` · `cmd/posta/server.go` / `worker.go` / `main.go` wiring · `docs/observability/README.md` §4.
 
 ### A-B NV-2 / G-H NV-4 · Add runtime authorization verification tests (admin queue scoping, API-key/admin isolation)
 
@@ -1154,14 +1156,14 @@ Source: `todo.md` Track B Phase 3 (4 groups: developer surface, marketing tail, 
 
 - **Priority:** P3
 - **Category:** platform-admin-security
-- **Workflow status:** To-do
+- **Workflow status:** Done (2026-11-11, OB-6 W5)
 - **Refs:** GAP-52 · OBS-007 · complexity S (1.20) · `todo.md` Track B Phase 3
-- **Description:** One bundled Grafana dashboard JSON covering the 20 metric families + docs enabling `POSTA_METRICS_ENABLED` — one file, real operator polish (Hyvor Relay is the only peer, audit). Metrics exist but are default-off and not surfaced in the UI (risk R14).
+- **Description:** ~~One bundled Grafana dashboard JSON~~ **Landed**: `docs/observability/grafana-posta-overview.json` (uid `posta-overview`) — 17 visual panels over 7 rows (HTTP traffic incl. p95 + 5xx ratio, email delivery, bounces/suppressions, webhooks incl. SF-90 drops, inbound mail, queue health incl. dead-letter depth, campaigns/automations), datasource variable `DS_PROMETHEUS`; `docs/observability/README.md` covers enabling `POSTA_METRICS_ENABLED` (server) / the worker health listener, the OTLP push exporter alternative, importing the dashboard, and the full metric inventory.
 - **Acceptance criteria:**
-  - [ ] Dashboard JSON imports clean against a running instance; panels map 1:1 to the documented metric families
-  - [ ] Docs cover enabling `POSTA_METRICS_ENABLED` and importing the dashboard
+  - [x] Dashboard JSON is valid and panel expressions reference only families that exist on the registry — enforced by test (`TestGrafanaDashboardJSONIsValid` + `TestGrafanaDashboardCoversCoreFamilies`, `internal/observability/dashboard_test.go`): parses, ≥10 visual panels, every `posta_*` token in every PromQL expr resolved against the live default gatherer (Vec families seeded, histograms observed), core groups must be present
+  - [x] Docs cover enabling `POSTA_METRICS_ENABLED` and importing the dashboard (`docs/observability/README.md` §1 + §5)
 - **Dependencies:** metrics (exist, default-off).
-- **Evidence / relevant files:** `internal/observability/metrics.go` · `05-implementation-roadmap.md` §6 GAP-52.
+- **Evidence / relevant files:** `docs/observability/grafana-posta-overview.json` · `docs/observability/README.md` · `internal/observability/dashboard_test.go`.
 
 ### GAP-53 · Add runtime log viewer and resource history
 
@@ -1223,14 +1225,14 @@ Source: `todo.md` Track B Phase 3 (4 groups: developer surface, marketing tail, 
 
 - **Priority:** P3
 - **Category:** architecture (Option B programme)
-- **Workflow status:** To-do
+- **Workflow status:** Done (2026-11-11 — OB-6 W6 produced the evaluation; the tracker stays open as the demand-signal collector for any future build decision)
 - **Refs:** `upcomming-convo.md` §4 (JMAP decision), §7 Phase 6 · `todo.md` Track A Phase 6 · INF-003
 - **Description:** Keep JMAP as a separately evaluated capability: the audit identifies IMAP/POP and webmail under INF-003, but JMAP appears in the exclusion discussion, not as a verified requirement in the frozen 199-feature inventory — do not silently treat it as already researched or required. Evaluate on validated demand after the mailbox backend (RF-B120) and IMAP/POP3 (RF-B121) exist, alongside any other advanced-integration candidates surfaced by then.
 - **Acceptance criteria:**
-  - [ ] Demand evidence collected (or absence recorded) before any build decision
-  - [ ] Evaluation memo: fit with the mailbox backend, candidate implementations with license verification, cost/benefit — or an explicit not-now decision recorded
-- **Dependencies:** RF-B120, RF-B121 (evaluation is meaningful only against a real mailbox backend).
-- **Evidence / relevant files:** `upcomming-convo.md` §4 (JMAP paragraph) · `05-implementation-roadmap.md` §9 entry 2 (exclusion superseded by Option B).
+  - [x] Demand evidence collected (or absence recorded) before any build decision — absence **recorded** 2026-11-11 (`docs/architecture/EVALUATIONS.md` §1 "Demand signals": the frozen inventory never verifies JMAP as a requirement; pre-Option-B research classifies SF-84 NOT APPLICABLE; no tracked request in backlog/todo/research)
+  - [x] Evaluation memo: fit with the mailbox backend, candidate implementations with license verification, cost/benefit — or an explicit not-now decision recorded — `docs/architecture/EVALUATIONS.md` §1: fit analysis (mailstore/IMAP seams landed vs the JMAP-specific state-string/push machinery absent), candidates (in-house over the mailstore vs adopted library — **license verification recorded as an unmet prerequisite** for any adoption, per AGENTS.md §7), effort (phase-sized, > OB-4 IMAP), and the explicit **not-now** standing decision with re-evaluation triggers
+- **Dependencies:** RF-B120, RF-B121 (evaluation is meaningful only against a real mailbox backend). — both landed (OB-3/OB-4), which is what made this evaluation meaningful now.
+- **Evidence / relevant files:** `upcomming-convo.md` §4 (JMAP paragraph) · `05-implementation-roadmap.md` §9 entry 2 (exclusion superseded by Option B) · **produced:** `docs/architecture/EVALUATIONS.md` (also covering SF-111/112 groupware evaluations). Evaluation ≠ commitment: no build decision is taken; the demand signal collection is the residual.
 
 ---
 

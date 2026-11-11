@@ -849,6 +849,21 @@ func (r *Router) workspaceResourceRoutes() []okapi.RouteDefinition {
 				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
+		{
+			Method:      http.MethodPatch,
+			Path:        pathDomainByID + "/mta-sts",
+			Handler:     okapi.H(r.h.domain.SetMTASTSMode),
+			Group:       opsGroup,
+			Summary:     "Set domain MTA-STS policy mode",
+			Description: "Publishes the domain's MTA-STS policy mode (SF-29, OB-6 W4, RFC 8461): '' (no policy served), 'none' (monitoring), 'testing' (announce, don't refuse) or 'enforce'. Requires a verified domain; the policy document is served at https://mta-sts.<domain>/.well-known/mta-sts.txt when POSTA_MTA_STS_ENABLED is on, and the _smtp._tls TXT guidance (TLS-RPT rua) travels with the DNS-records surface.",
+			Request:     &handlers.SetMTASTSModeRequest{},
+			Response:    &dto.Response[any]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Domain ID"),
+				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
 
 		// ==================== Managed DKIM signing keys (R-02) ====================
 		// Literal paths (rotate) are registered before param paths ({keyId}).
@@ -970,6 +985,90 @@ func (r *Router) workspaceResourceRoutes() []okapi.RouteDefinition {
 				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
+	}...)
+
+	// OB-6 DNS automation (ADR-007 decision 1): provider connect/revoke,
+	// record-set publication (always followed by the R-07 verification flow),
+	// and the drift health surface. Registered only when the deployment
+	// enabled the feature (POSTA_DNS_AUTOMATION_ENABLED, default off per
+	// ADR-009 §8); the dashboard hides the panel when the feature is off.
+	if r.cfg.DNSAutomationEnabled {
+		routes = append(routes, []okapi.RouteDefinition{
+			{
+				Method:      http.MethodPost,
+				Path:        pathDomainDNSProvider,
+				Handler:     okapi.H(r.h.dnsProvider.Connect),
+				Group:       opsGroup,
+				Summary:     "Connect a DNS provider",
+				Description: "Stores the domain's DNS provider credentials (Cloudflare, Route53 or DigitalOcean) encrypted at rest and validates them with a read-only access check before anything is stored. The credential is never returned again — only a masked fingerprint.",
+				Request:     &handlers.DNSConnectRequest{},
+				Options: []okapi.RouteOption{
+					okapi.DocPathParam("id", "integer", "Domain ID"),
+					okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+					okapi.DocErrorResponse(401, &dto.ErrorResponseBody{}),
+					okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				},
+			},
+			{
+				Method:      http.MethodGet,
+				Path:        pathDomainDNSProvider,
+				Handler:     okapi.H(r.h.dnsProvider.Status),
+				Group:       opsGroup,
+				Summary:     "Get DNS automation status",
+				Description: "The masked provider connection, the planned DNS record set (verification/SPF/DKIM/DMARC plus MX/return-path when mail routing is enabled), and the last publication outcome. No provider traffic.",
+				Response:    &dto.Response[handlers.DNSStatusView]{},
+				Options: []okapi.RouteOption{
+					okapi.DocPathParam("id", "integer", "Domain ID"),
+					okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				},
+			},
+			{
+				Method:      http.MethodDelete,
+				Path:        pathDomainDNSProvider,
+				Handler:     okapi.H(r.h.dnsProvider.Disconnect),
+				Group:       opsGroup,
+				Summary:     "Revoke the DNS provider connection",
+				Description: "Removes the domain's stored provider credential (per-domain revocation). Publication and drift history is kept; drift checks stop without a connection.",
+				Response:    &dto.Response[any]{},
+				Options: []okapi.RouteOption{
+					okapi.DocPathParam("id", "integer", "Domain ID"),
+					okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				},
+			},
+			{
+				Method:      http.MethodPost,
+				Path:        pathDomainDNSPublish,
+				Handler:     okapi.H(r.h.dnsProvider.Publish),
+				Group:       opsGroup,
+				Summary:     "Publish the planned DNS record set",
+				Description: "Writes the planned records through the connected provider and ALWAYS re-runs the domain verification flow afterwards (auto-publish never skips verification). Refused for ownership-unverified domains; a mis-scoped provider token fails with a typed error before any zone write.",
+				Response:    &dto.Response[handlers.DNSPublishResult]{},
+				Options: []okapi.RouteOption{
+					okapi.DocPathParam("id", "integer", "Domain ID"),
+					okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+					okapi.DocErrorResponse(401, &dto.ErrorResponseBody{}),
+					okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+					okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+					okapi.DocErrorResponse(429, &dto.ErrorResponseBody{}),
+				},
+			},
+			{
+				Method:      http.MethodGet,
+				Path:        pathDomainDNSDrift,
+				Handler:     okapi.H(r.h.dnsProvider.Drift),
+				Group:       opsGroup,
+				Summary:     "Get DNS drift status",
+				Description: "The stored drift verdict for the domain (ok / drift / unknown) with the per-record findings: what the hourly re-verification cron last compared between the published baseline and the live provider records. No provider traffic.",
+				Response:    &dto.Response[handlers.DNSDriftStatusView]{},
+				Options: []okapi.RouteOption{
+					okapi.DocPathParam("id", "integer", "Domain ID"),
+					okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				},
+			},
+		}...)
+	}
+
+	routes = append(routes, []okapi.RouteDefinition{
 		{
 			Method:      http.MethodGet,
 			Path:        pathDomainByID + "/dmarc",
@@ -978,6 +1077,19 @@ func (r *Router) workspaceResourceRoutes() []okapi.RouteDefinition {
 			Summary:     "Get DMARC aggregate reports",
 			Description: "The stored RFC 7489 aggregate-report view for this domain (R-17): record and message counts, message-weighted DKIM/SPF alignment ratios, the disposition breakdown, the newest report window, and the newest stored records receiving providers sent about the domain.",
 			Response:    &dto.Response[handlers.DomainDMARCResponse]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Domain ID"),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodGet,
+			Path:        pathDomainByID + "/tls-rpt",
+			Handler:     okapi.H(r.h.tlsrpt.Get),
+			Group:       opsGroup,
+			Summary:     "Get SMTP TLS reports",
+			Description: "The stored RFC 8460 TLS-report view for this domain (SF-31, OB-6 W4): session totals the reporting MTAs sent about the domain, the newest report windows and ids, and the newest stored policy entries with their failure details. Reports arrive at the domain's tlsrpt@ rua address.",
+			Response:    &dto.Response[handlers.DomainTLSRPTResponse]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Domain ID"),
 				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),

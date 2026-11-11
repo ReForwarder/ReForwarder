@@ -49,6 +49,10 @@ func Run(db *gorm.DB) error {
 		&models.InboundForwardTarget{}, // OB-2: confirmed forward destinations (ADR-002 decision 2)
 		&models.InboundQuarantine{},    // OB-2: quarantine review (ADR-002 decision 3)
 		&models.DMARCReport{},
+		// OB-6 W4 (SF-31, ADR-007 §5): inbound SMTP TLS reports per the
+		// ADR-002 ingestion pattern — additive table, idempotent on
+		// (user_id, report_id, policy_domain).
+		&models.TLSRPTReport{},
 		&models.StyleSheet{},
 		&models.Template{},
 		&models.TemplateVersion{},
@@ -117,6 +121,26 @@ func Run(db *gorm.DB) error {
 		// ownership + ADR-006 malware verdict per uploaded blob ref. Additive
 		// table; the attachment bytes themselves live in the blob store.
 		&models.MailAttachmentUpload{},
+		// OB-6 W3 (ADR-007 decision 7): IP pools, warm-up schedules and
+		// reputation rollups — additive tables only; every row carries
+		// workspace_id (or an explicit nil for deployment-wide pools), per
+		// ADR-008 §1. domains.pool_id is added by the Domain AutoMigrate
+		// above; mta_delivery_attempts.source_ip likewise. No upgrade step is
+		// needed: the additions are new tables/columns with defaults, so the
+		// AutoMigrate upgrades existing deployments in place (the
+		// mta_delivery_attempts OB-1 precedent).
+		&models.IPPool{},
+		&models.IPPoolMember{},
+		&models.IPWarmupSchedule{},
+		&models.IPReputationRollup{},
+		// OB-6 W1 DNS automation (ADR-007 decision 1): per-domain provider
+		// credentials (encrypted at rest, SF-78) + the publication/drift
+		// baseline the drift re-verification cron compares against. Additive
+		// tables; every row carries the workspace ownership columns per
+		// ADR-008 §1, and domain_id is unique (one connection / baseline per
+		// domain).
+		&models.DNSProviderCredential{},
+		&models.DNSPublicationState{},
 	); err != nil {
 		return fmt.Errorf("failed to migrate database: %w", err)
 	}

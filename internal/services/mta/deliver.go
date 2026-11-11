@@ -27,6 +27,7 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/goposta/posta/internal/models"
@@ -67,6 +68,14 @@ type DeliverySpec struct {
 	DomainVerified bool
 	BindIP         string
 	Policy         Policy
+	// PoolIPs lists the enabled member IPs of the domain's assigned pool
+	// (OB-6 W3, ADR-007 decision 7); the executor rotates across them per
+	// delivery. Empty = no pool — BindIP alone applies.
+	PoolIPs []string
+	// Warmup is the domain's active warm-up ramp; nil = none. While active,
+	// its daily cap — spread evenly over the day's hours — caps the policy's
+	// hourly budget (see EffectiveHourlyBudget).
+	Warmup *WarmupSchedule
 }
 
 // Envelope is the delivery payload: the validated envelope plus the built
@@ -98,6 +107,9 @@ type Executor struct {
 	numberer AttemptNumberer
 	// heloDomain is the EHLO identifier presented to remote MX hosts.
 	heloDomain string
+	// pickCounter round-robins pool member selection across concurrent
+	// deliveries (atomic; wrapped only for determinism, not correctness).
+	pickCounter atomic.Uint64
 	// tlsConfigFor builds the STARTTLS config per remote host; certificate
 	// verification is always on (tests inject a RootCAs pool for in-process
 	// servers).
@@ -138,13 +150,26 @@ func (e *Executor) SetTLSConfigFor(fn func(host string) *tls.Config) {
 
 // Deliver performs one direct-to-MX delivery for a claimed email.
 //
-// Flow (ADR-001 §5/§6): fail-closed sender-domain check → per-recipient-domain
-// policy (hourly budget; exhaustion defers) → MX resolution → attempt per MX
-// host, bounded by policy → one durable attempt row per attempt → 2xx at
-// end-of-DATA is the only delivered signal. Transient failures and permanent
-// rejections surface as *email.SendError so the worker's existing R-05
-// classifier, bounce and suppression chains apply unchanged.
+// Flow (ADR-001 §5/§6): fail-closed sender-domain check → source-IP selection
+// (the domain's pool, rotating round-robin, else the static bind IP — OB-6
+// W3, ADR-007 decision 7) → per-recipient-domain policy (hourly budget, with
+// the active warm-up cap folded in; exhaustion defers) → MX resolution →
+// attempt per MX host, bounded by policy → one durable attempt row per
+// attempt → 2xx at end-of-DATA is the only delivered signal. Transient
+// failures and permanent rejections surface as *email.SendError so the
+// worker's existing R-05 classifier, bounce and suppression chains apply
+// unchanged.
 func (e *Executor) Deliver(ctx context.Context, spec DeliverySpec, env Envelope) (*DeliveryResult, error) {
+	// Source-IP selection happens before any attempt is recorded so every
+	// attempt row carries the address the delivery would have gone out from.
+	bindIP := e.selectBindIP(spec)
+
+	// Warm-up cap (ADR-007 decision 7): fold the active ramp's hourly cap
+	// into the policy budget before the gate — the exhaustion/defer machinery
+	// is shared, only the effective number changes.
+	policy := spec.Policy
+	policy.HourlyBudget = EffectiveHourlyBudget(spec.Policy, spec.Warmup, nowFunc())
+
 	// Fail closed (non-negotiable #1): no direct attempt for an unverified
 	// sender domain. Recorded durably like every other refusal.
 	if !spec.DomainVerified {
@@ -152,7 +177,7 @@ func (e *Executor) Deliver(ctx context.Context, spec DeliverySpec, env Envelope)
 			Reason:                 fmt.Sprintf("direct delivery refused: sender domain %q is not verified", spec.SenderDomain),
 			UnverifiedSenderDomain: true,
 		}
-		e.record(env, attemptRow(env, e.nextAttempt(env), "", "", 0, refusal.Reason,
+		e.record(env, attemptRow(env, e.nextAttempt(env), "", "", bindIP, 0, refusal.Reason,
 			models.MTAAttemptRefusedUnverifiedSender, nowFunc(), nowFunc()))
 		return nil, refusal
 	}
@@ -171,12 +196,13 @@ func (e *Executor) Deliver(ctx context.Context, spec DeliverySpec, env Envelope)
 	for _, domain := range domains {
 		rcpts := groups[domain]
 
-		// Per-domain policy: hourly budget. Exhaustion defers the message
-		// without contacting the MX (honor-throttle, ADR-001 §8).
+		// Per-domain policy: hourly budget (possibly capped by the active
+		// warm-up ramp). Exhaustion defers the message without contacting
+		// the MX (honor-throttle, ADR-001 §8).
 		if e.budget != nil {
-			if ok, delay := e.budget.Allow(domain, spec.Policy, nowFunc()); !ok {
-				e.record(env, attemptRow(env, attemptBase, "", "", 450,
-					fmt.Sprintf("4.7.1 hourly budget exhausted for %s; defer %s", domain, delay),
+			if ok, delay := e.budget.Allow(domain, policy, nowFunc()); !ok {
+				e.record(env, attemptRow(env, attemptBase, "", "", bindIP, 450,
+					deferredBudgetText(domain, delay, spec.Warmup),
 					models.MTAAttemptDeferredBudget, nowFunc(), nowFunc()))
 				return result, &email.SendError{
 					Stage: "POLICY", Code: 450,
@@ -189,14 +215,14 @@ func (e *Executor) Deliver(ctx context.Context, spec DeliverySpec, env Envelope)
 
 		hosts, rerr := e.resolver.Resolve(ctx, domain)
 		if rerr != nil {
-			e.record(env, attemptRow(env, attemptBase, "", "", 0, rerr.Error(),
+			e.record(env, attemptRow(env, attemptBase, "", "", bindIP, 0, rerr.Error(),
 				models.MTAAttemptDNSFailure, nowFunc(), nowFunc()))
 			// DNS failures are transient by classification (the error text
 			// carries the resolver verdict); the retry path re-resolves.
 			return result, email.WrapSendError("MX", "", fmt.Errorf("MX resolution failed for %s: %w", domain, rerr))
 		}
 		if len(hosts) == 0 {
-			e.record(env, attemptRow(env, attemptBase, "", "", 550,
+			e.record(env, attemptRow(env, attemptBase, "", "", bindIP, 550,
 				fmt.Sprintf("5.1.2 no MX or address records for %s", domain),
 				models.MTAAttemptPermanentFailure, nowFunc(), nowFunc()))
 			return result, &email.SendError{
@@ -206,7 +232,7 @@ func (e *Executor) Deliver(ctx context.Context, spec DeliverySpec, env Envelope)
 			}
 		}
 
-		bound := boundAttempts(spec.Policy, len(hosts))
+		bound := boundAttempts(policy, len(hosts))
 		var lastErr error
 		for _, h := range hosts[:bound] {
 			if err := ctx.Err(); err != nil {
@@ -219,7 +245,7 @@ func (e *Executor) Deliver(ctx context.Context, spec DeliverySpec, env Envelope)
 				Addr:       h.Addr(),
 				ServerName: h.Host,
 				HeloDomain: e.heloDomain,
-				BindIP:     parseBindIP(spec.BindIP),
+				BindIP:     parseBindIP(bindIP),
 				Target:     TargetMX,
 				TLSConfig:  e.tlsConfigFor(h.Host),
 			}
@@ -234,7 +260,7 @@ func (e *Executor) Deliver(ctx context.Context, spec DeliverySpec, env Envelope)
 				}
 			}
 			outcome, code, text := classifySession(sres, serr)
-			e.record(env, attemptRow(env, attemptNo, h.Host, ip, code, text, outcome, startedAt, finishedAt))
+			e.record(env, attemptRow(env, attemptNo, h.Host, ip, bindIP, code, text, outcome, startedAt, finishedAt))
 
 			if serr == nil {
 				result.Delivered = true
@@ -278,6 +304,40 @@ func boundAttempts(p Policy, n int) int {
 		return max
 	}
 	return n
+}
+
+// selectBindIP picks the outbound source address for one delivery: a
+// round-robin member of the sender domain's pool when one is configured
+// (OB-6 W3, ADR-007 decision 7), otherwise the domain's static bind IP,
+// otherwise the OS default (empty string). Blank pool entries are skipped so
+// a hand-edited member row cannot blank the source; an all-blank pool falls
+// back to the static bind IP.
+func (e *Executor) selectBindIP(spec DeliverySpec) string {
+	if len(spec.PoolIPs) > 0 {
+		ips := make([]string, 0, len(spec.PoolIPs))
+		for _, ip := range spec.PoolIPs {
+			if t := strings.TrimSpace(ip); t != "" {
+				ips = append(ips, t)
+			}
+		}
+		if len(ips) > 0 {
+			n := e.pickCounter.Add(1) - 1
+			return ips[int(n)%len(ips)]
+		}
+	}
+	return spec.BindIP
+}
+
+// deferredBudgetText is the response text recorded on a budget-deferred
+// attempt. When a warm-up ramp produced the effective cap, the text says so —
+// an operator reading the attempt log must be able to tell a warm-up deferral
+// from a plain per-domain budget exhaustion.
+func deferredBudgetText(domain string, delay time.Duration, warmup *WarmupSchedule) string {
+	if warmup != nil && warmup.Days > 0 && WarmupDailyCap(warmup, nowFunc()) > 0 {
+		return fmt.Sprintf("4.7.1 hourly budget exhausted for %s (warm-up cap %d/day); defer %s",
+			domain, WarmupDailyCap(warmup, nowFunc()), delay)
+	}
+	return fmt.Sprintf("4.7.1 hourly budget exhausted for %s; defer %s", domain, delay)
 }
 
 func parseBindIP(s string) net.IP {
@@ -358,14 +418,18 @@ func classifySession(sres *SessionResult, serr error) (outcome string, code int,
 	return models.MTAAttemptTransientFailure, 0, "unknown session failure"
 }
 
-// attemptRow builds one durable attempt record.
-func attemptRow(env Envelope, attempt int, mxHost, ip string, code int, text, outcome string, startedAt, finishedAt time.Time) models.MTADeliveryAttempt {
+// attemptRow builds one durable attempt record. sourceIP is the outbound
+// source address the attempt went out from (pool member or static bind IP;
+// blank when neither is configured) — the attribution key for per-IP
+// reputation rollups (OB-6 W3).
+func attemptRow(env Envelope, attempt int, mxHost, ip, sourceIP string, code int, text, outcome string, startedAt, finishedAt time.Time) models.MTADeliveryAttempt {
 	return models.MTADeliveryAttempt{
 		WorkspaceID:  env.WorkspaceID,
 		EmailID:      env.EmailID,
 		Attempt:      attempt,
 		MXHost:       mxHost,
 		IP:           ip,
+		SourceIP:     sourceIP,
 		ResponseCode: code,
 		ResponseText: truncateResponse(text),
 		Outcome:      outcome,

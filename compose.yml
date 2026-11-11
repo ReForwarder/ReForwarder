@@ -5,6 +5,12 @@ services:
       dockerfile: docker/Dockerfile
     ports:
       - "9000:9000"
+      # Mail listeners — uncomment together with the matching env block above.
+      # - "587:587"    # submission (POSTA_SUBMISSION_ENABLED)
+      # - "143:143"    # imap (POSTA_IMAP_ENABLED)
+      # - "993:993"    # imap implicit TLS (POSTA_IMAP_TLS_PORT)
+      # - "110:110"    # pop3 (POSTA_POP3_ENABLED)
+      # - "995:995"    # pop3 implicit TLS (POSTA_POP3_TLS_PORT)
     environment:
       POSTA_DB_URL: "host=posta-db user=posta password=posta dbname=posta port=5432 sslmode=disable"
       POSTA_REDIS_ADDR: "posta-redis:6379"
@@ -15,6 +21,42 @@ services:
       POSTA_JWT_SECRET: "change-me-in-production"
       POSTA_ADMIN_EMAIL: "admin@example.com"
       POSTA_ADMIN_PASSWORD: "admin1234"
+      # ------------------------------------------------------------------
+      # Optional mail listeners (OB phases; ADR-009 §1) — all default OFF in
+      # the binary. Uncomment to enable, and uncomment the matching port
+      # mappings below. Full guidance: docs/docs/operations/deployment.md.
+      #
+      # Submission (MSA, 587; ADR-001 §10):
+      # - POSTA_SUBMISSION_ENABLED: "true"
+      # - POSTA_SUBMISSION_PORT: "587"
+      #
+      # IMAP4rev1 (OB-4; app-password auth, STARTTLS required on 143,
+      # implicit TLS on 993):
+      # - POSTA_IMAP_ENABLED: "true"
+      # - POSTA_IMAP_PORT: "143"
+      # - POSTA_IMAP_TLS_PORT: "993"
+      #
+      # POP3 (OB-4; app-password auth, STLS required on 110, implicit TLS on
+      # 995):
+      # - POSTA_POP3_ENABLED: "true"
+      # - POSTA_POP3_PORT: "110"
+      # - POSTA_POP3_TLS_PORT: "995"
+      #
+      # ACME certificate lifecycle (POSTA_ACME_*, default off — in flight):
+      # - POSTA_ACME_ENABLED: "true"
+      # - POSTA_ACME_EMAIL: "ops@example.com"
+      # - POSTA_ACME_DOMAINS: "mail.example.com"
+      #
+      # Multi-replica deployments: set this on EVERY server replica so only
+      # one runs the cron schedules (GAP-03; see
+      # docs/docs/operations/redis-ha.md):
+      # - POSTA_CRON_LEADER_LEASE_ENABLED: "true"
+      # - POSTA_CRON_LEASE_TTL_SECONDS: "60"
+      #
+      # Inbound SMTP (OB-2) and the relay/listener TLS pairing (MTA-STS) are
+      # also config-gated — POSTA_INBOUND_ENABLED, POSTA_SMTP_RELAY_ENABLED,
+      # POSTA_MTA_STS_ENABLED — and are documented on the deployment page.
+      # ------------------------------------------------------------------
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9000/healthz"]
       interval: 30s

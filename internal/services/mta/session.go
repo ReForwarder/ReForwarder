@@ -23,6 +23,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net"
 	"net/smtp"
 	"time"
@@ -77,6 +78,14 @@ type SessionOptions struct {
 	CommandTimeout time.Duration
 	// OverallBudget bounds the whole session from dial. 0 → the R-22 budget.
 	OverallBudget time.Duration
+	// STS is the outbound MTA-STS enforcement hook (SF-29, OB-6 W4,
+	// ADR-007 §5) behind the small STSEnforcement interface. nil (the zero
+	// value) falls back to the process-wide default (DefaultSTS, armed by the
+	// executor wiring in cmd/posta); both nil = enforcement off and the
+	// session behaves exactly as before. Only direct-MX sessions carry an
+	// STS hook — smarthost/relay sessions are configured by operators, not
+	// discovered, so MTA-STS does not apply to them (RFC 8461 §2 scope).
+	STS STSEnforcement
 }
 
 // SessionResult is the outcome of one session: Delivered true exactly when
@@ -119,6 +128,37 @@ func runSession(ctx context.Context, opts SessionOptions, from string, rcpts []s
 		return nil, errors.New("mta: AUTH is not permitted on MX sessions")
 	}
 
+	// MTA-STS outbound enforcement (SF-29, ADR-007 §5): resolve the
+	// recipient domain's policy once, before the dial. The recipient domain
+	// is re-derived from the validated recipients — never taken from client
+	// input (ADR-001 non-negotiable #2). Deliver.go groups recipients by
+	// domain before calling the runner, so the first parsable domain is the
+	// session's domain; an unparsable set disables enforcement and lets the
+	// existing recipient validation reject it. Discovery failures fall open
+	// (a nil rule = no policy = the pre-existing opportunistic posture).
+	var stsRule *STSRule
+	if opts.Target == TargetMX {
+		sts := opts.STS
+		if sts == nil {
+			sts = DefaultSTS()
+		}
+		if sts != nil && len(rcpts) > 0 {
+			if d := domainOf(email.EnvelopeAddress(rcpts[0])); d != "" {
+				stsRule = sts.SessionRule(ctx, d)
+			}
+		}
+	}
+	if stsRule.Enforced() && !stsRule.HostAllowed(opts.ServerName) {
+		// RFC 8461 §10.5: a delivery path the policy forbids is a temporary
+		// failure — the runner reports it and the executor's loop moves to
+		// the next MX host (or defers), never a permanent user-facing bounce.
+		return nil, &email.SendError{
+			Stage: "STS", Code: 421,
+			Msg: fmt.Sprintf("4.7.0 MTA-STS policy for the recipient domain does not include MX host %s", opts.ServerName),
+			Err: fmt.Errorf("mta: MTA-STS: MX host %s is not in the recipient domain's enforce policy", opts.ServerName),
+		}
+	}
+
 	overallEnd := nowFunc().Add(opts.OverallBudget)
 
 	conn, client, err := email.DialSMTPWithBind(opts.Addr, opts.ServerName, opts.BindIP)
@@ -158,7 +198,18 @@ func runSession(ctx context.Context, opts SessionOptions, from string, rcpts []s
 	// STARTTLS is mandatory when the remote offers it (ADR-001 §4). The TLS
 	// handshake verifies the certificate chain against tlsConfig — plain
 	// continues only when the remote offers no STARTTLS at all.
-	if offered, _ := client.Extension("STARTTLS"); offered {
+	offered, _ := client.Extension("STARTTLS")
+	if !offered && stsRule.Enforced() {
+		// RFC 8461 §10.3: mode=enforce requires TLS; a policy-relevant MX
+		// that does not advertise STARTTLS yields a temporary failure (the
+		// message defers; it must not fall back to plaintext delivery).
+		return res, &email.SendError{
+			Stage: "STS", Code: 421,
+			Msg: "4.7.0 MTA-STS policy requires STARTTLS but the MX host does not offer it",
+			Err: fmt.Errorf("mta: MTA-STS: MX host %s does not offer STARTTLS under an enforce policy", opts.ServerName),
+		}
+	}
+	if offered {
 		budget()
 		if err := client.StartTLS(tlsConfig); err != nil {
 			return res, email.WrapSendError("STARTTLS", "", err)

@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/goposta/posta/internal/cron"
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/notification"
 	"github.com/goposta/posta/internal/storage/repositories"
@@ -41,6 +42,10 @@ type BounceAlertJob struct {
 	notifier        *notification.Service
 	bounceRepo      *repositories.BounceRepository
 	suppressionRepo *repositories.SuppressionRepository
+	// claims, when set, guards one alert per workspace per day (GAP-03):
+	// the leader lease keeps one replica per tick, but a crash between
+	// lease acquire and send — or a failover edge — could still double-send.
+	claims cron.ClaimStore
 }
 
 func NewBounceAlertJob(
@@ -60,7 +65,11 @@ func NewBounceAlertJob(
 func (j *BounceAlertJob) Name() string     { return "bounce-alert" }
 func (j *BounceAlertJob) Schedule() string { return "0 9 * * *" } // daily at 09:00 UTC
 
-func (j *BounceAlertJob) Run(_ context.Context, _ *asynq.Client) error {
+// SetClaimStore installs the per-recipient dedup guard (GAP-03). Nil keeps
+// single-replica behavior unchanged.
+func (j *BounceAlertJob) SetClaimStore(cs cron.ClaimStore) { j.claims = cs }
+
+func (j *BounceAlertJob) Run(ctx context.Context, _ *asynq.Client) error {
 	if j.notifier == nil || !j.notifier.IsConfigured() {
 		return nil
 	}
@@ -102,6 +111,16 @@ func (j *BounceAlertJob) Run(_ context.Context, _ *asynq.Client) error {
 			Where("workspace_id = ? AND created_at >= ?", wc.WorkspaceID, from).
 			Count(&suppressionCount)
 
+		// One alert per workspace per day (GAP-03): claim before sending so a
+		// failover edge cannot double-send; clear the claim when the send
+		// fails so the next leader can retry. The claim store fails open on
+		// a Redis outage — a possible duplicate beats a suppressed alert.
+		dedupKey := fmt.Sprintf("cron:dedup:bounce-alert:%d:%s", wc.WorkspaceID, now.Format("20060102"))
+		if j.claims != nil && !j.claims.ClaimOnce(ctx, dedupKey, 48*time.Hour) {
+			logger.Info("bounce-alert: workspace already alerted today; skipping", "workspace_id", wc.WorkspaceID)
+			continue
+		}
+
 		if err := j.notifier.SendToWorkspaceAdmins(wc.WorkspaceID, "Bounce Rate Alert", notification.TemplateBounceAlert, map[string]any{
 			"BounceRate":       fmt.Sprintf("%.1f", bounceRate),
 			"Threshold":        fmt.Sprintf("%.0f", bounceRateThreshold),
@@ -109,6 +128,9 @@ func (j *BounceAlertJob) Run(_ context.Context, _ *asynq.Client) error {
 			"BounceCount":      bounceCount,
 			"SuppressionCount": suppressionCount,
 		}); err != nil {
+			if j.claims != nil {
+				j.claims.ClearClaim(ctx, dedupKey)
+			}
 			logger.Error("bounce-alert: failed to send", "workspace_id", wc.WorkspaceID, "error", err)
 			continue
 		}

@@ -1,0 +1,350 @@
+{
+  "uid": "posta-overview",
+  "title": "Posta — Platform Overview",
+  "description": "OB-6 (GAP-52) sample dashboard over the Prometheus families ReForwarder exposes on /metrics (and via the OTLP push exporter, POSTA_OTLP_ENDPOINT). Import in Grafana: Dashboards → New → Import. Panels cover HTTP traffic, email delivery, bounces, webhooks, inbound mail, queue health, and campaign/automation throughput. References docs/observability/README.md for the metric inventory and the SF-96 alert-rule format.",
+  "tags": ["posta", "reforwarder", "observability"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "label": "Prometheus datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "hide": 0,
+        "current": {},
+        "options": []
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "name": "Metric alerts",
+        "type": "tags",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "enable": true,
+        "hide": false,
+        "iconColor": "red",
+        "tags": ["posta"]
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "HTTP traffic",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "HTTP request rate (req/s by status)",
+      "description": "posta_http_requests_total",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(posta_http_requests_total[$__rate_interval]))",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "HTTP request duration p95 / p50",
+      "description": "posta_http_request_duration_seconds histogram",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(posta_http_request_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(posta_http_request_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "p50"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "HTTP 5xx ratio (5m)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.01 },
+              { "color": "red", "value": 0.05 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(posta_http_requests_total{status=~\"5..\"}[$__rate_interval])) / sum(rate(posta_http_requests_total[$__rate_interval]))",
+          "legendFormat": "5xx ratio"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Email delivery",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Sends: success vs failure (rate)",
+      "description": "posta_emails_sent_total / posta_emails_failed_total",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        { "expr": "rate(posta_emails_sent_total[$__rate_interval])", "legendFormat": "sent" },
+        { "expr": "rate(posta_emails_failed_total[$__rate_interval])", "legendFormat": "failed" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Outbound queue size + retries",
+      "description": "posta_emails_queue_size gauge; posta_email_retries_total",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "expr": "posta_emails_queue_size", "legendFormat": "queue size" },
+        { "expr": "rate(posta_email_retries_total[$__rate_interval])", "legendFormat": "retries/s" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Bounces & suppressions",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Bounces by type (rate)",
+      "description": "posta_bounces_total{type=hard|soft|complaint}",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (type) (rate(posta_bounces_total[$__rate_interval]))",
+          "legendFormat": "{{type}}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "New suppressions (1h)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 19 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "expr": "increase(posta_suppressions_total[1h])", "legendFormat": "suppressions" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Webhooks",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 27 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Webhook deliveries by status (rate)",
+      "description": "posta_webhook_deliveries_total{status=success|failed}",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 28 },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(posta_webhook_deliveries_total[$__rate_interval]))",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Webhook delivery duration p95",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 28 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(posta_webhook_delivery_duration_seconds_bucket[$__rate_interval]))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Webhook events dropped (SF-90 cap)",
+      "description": "posta_webhook_events_dropped_total — growth means a per-endpoint pending buffer is saturating",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 28 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "expr": "increase(posta_webhook_events_dropped_total[1h])", "legendFormat": "dropped" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Inbound mail",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 36 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Inbound received by source / forwarded vs failed",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 37 },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (source) (rate(posta_inbound_messages_received_total[$__rate_interval]))",
+          "legendFormat": "recv {{source}}"
+        },
+        { "expr": "rate(posta_inbound_messages_forwarded_total[$__rate_interval])", "legendFormat": "forwarded" },
+        { "expr": "rate(posta_inbound_messages_failed_total[$__rate_interval])", "legendFormat": "failed" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Inbound rejected by reason (rate)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 37 },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(posta_inbound_messages_rejected_total[$__rate_interval]))",
+          "legendFormat": "{{reason}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Inbound ingest duration p95 + bytes in",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 37 },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "axisPlacement": "auto" },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(posta_inbound_ingest_duration_seconds_bucket[$__rate_interval]))",
+          "legendFormat": "ingest p95"
+        },
+        {
+          "expr": "rate(posta_inbound_bytes_total[$__rate_interval])",
+          "legendFormat": "bytes/s"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Queue health",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 45 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Dead-letter (archived) tasks by queue",
+      "description": "posta_queue_archived_tasks — growth here is exhausted send tasks (R-12 dead-letter view)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 46 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum by (queue) (posta_queue_archived_tasks)",
+          "legendFormat": "{{queue}}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Active workers",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 46 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "expr": "posta_active_workers", "legendFormat": "workers" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Campaigns & automations",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 54 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Campaign lifecycle (rate)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 55 },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        { "expr": "rate(posta_campaigns_started_total[$__rate_interval])", "legendFormat": "started" },
+        { "expr": "rate(posta_campaigns_completed_total[$__rate_interval])", "legendFormat": "completed" },
+        { "expr": "rate(posta_campaign_messages_queued_total[$__rate_interval])", "legendFormat": "messages queued" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Automation journeys (rate) + node failures",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 55 },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        { "expr": "rate(posta_automation_journeys_enrolled_total[$__rate_interval])", "legendFormat": "enrolled" },
+        { "expr": "rate(posta_automation_journeys_completed_total[$__rate_interval])", "legendFormat": "completed" },
+        { "expr": "rate(posta_automation_journeys_failed_total[$__rate_interval])", "legendFormat": "failed" },
+        {
+          "expr": "sum by (node_type) (rate(posta_automation_node_failures_total[$__rate_interval]))",
+          "legendFormat": "node fail {{node_type}}"
+        }
+      ]
+    }
+  ]
+}

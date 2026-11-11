@@ -54,6 +54,11 @@ type MTADeliveryAttempt struct {
 	Attempt      int       `json:"attempt" gorm:"not null;default:0;index:idx_mta_delivery_attempts_email_attempt,priority:2"`
 	MXHost       string    `json:"mx_host" gorm:"size:255"`
 	IP           string    `json:"ip" gorm:"size:64"`
+	// SourceIP is the outbound source address this attempt was made from —
+	// the pool member selected for the delivery (OB-6 W3, ADR-007 decision
+	// 7) or the domain's static bind IP. Blank for relay-era rows and older
+	// attempts. Distinct from IP, which is the remote MX host's address.
+	SourceIP     string    `json:"source_ip" gorm:"size:64"`
 	ResponseCode int       `json:"response_code"`
 	ResponseText string    `json:"response_text" gorm:"type:text"`
 	Outcome      string    `json:"outcome" gorm:"size:40;not null"`

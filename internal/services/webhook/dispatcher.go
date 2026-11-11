@@ -512,6 +512,16 @@ func signPayload(secret string, body []byte) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
+// SignBody is the exported form of the dispatcher's payload signature
+// (OB-6 observability, GAP-51/SF-96): the error-monitoring hook and the
+// metric-alert engine sign their POSTs with the same HMAC-SHA256 scheme and
+// the same X-Posta-Signature header so receivers verify every Posta webhook
+// stream with one verification path. This adds no new scheme — it re-uses
+// signPayload verbatim.
+func SignBody(secret string, body []byte) string {
+	return signPayload(secret, body)
+}
+
 // post sends a single HTTP POST to the webhook URL with an HMAC signature and
 // returns the status code plus the (truncated) response body so the attempt
 // history can keep what the endpoint answered. The SSRF policy is enforced

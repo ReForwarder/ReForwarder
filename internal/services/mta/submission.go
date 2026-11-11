@@ -182,6 +182,13 @@ type SubmissionConfig struct {
 	TLSMode        string // "none" or "starttls"
 	TLSCertFile    string
 	TLSKeyFile     string
+	// TLSGetCertificate is the dynamic-certificate seam (OB-6 wave W2,
+	// SF-34/ADR-007 decision 3): with TLSMode=starttls and no static
+	// certificate files, the STARTTLS handshake serves certificates through
+	// this callback — the certmanager SNI map (per-domain ACME certs with
+	// the static fallback). A configured TLSCertFile/TLSKeyFile pair always
+	// wins; the callback is only consulted when no files are set.
+	TLSGetCertificate func(*tls.ClientHelloInfo) (*tls.Certificate, error)
 }
 
 // NewSubmissionServer configures the go-smtp server for the MSA listener.
@@ -204,13 +211,25 @@ func NewSubmissionServer(backend *SubmissionBackend, cfg SubmissionConfig) (*gos
 		// certificate. Operators can require STARTTLS via config.
 		srv.AllowInsecureAuth = true
 	case "starttls":
-		cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("load submission TLS cert: %w", err)
-		}
-		srv.TLSConfig = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12,
+		switch {
+		case cfg.TLSCertFile != "" && cfg.TLSKeyFile != "":
+			cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+			if err != nil {
+				return nil, fmt.Errorf("load submission TLS cert: %w", err)
+			}
+			srv.TLSConfig = &tls.Config{
+				Certificates: []tls.Certificate{cert},
+				MinVersion:   tls.VersionTLS12,
+			}
+		case cfg.TLSGetCertificate != nil:
+			// ACME SNI map (SF-34): per-domain certificates resolved at the
+			// STARTTLS handshake, cached in the blob store.
+			srv.TLSConfig = &tls.Config{
+				GetCertificate: cfg.TLSGetCertificate,
+				MinVersion:     tls.VersionTLS12,
+			}
+		default:
+			return nil, fmt.Errorf("submission TLS mode starttls requires POSTA_SUBMISSION_TLS_CERT_FILE/POSTA_SUBMISSION_TLS_KEY_FILE or an ACME certificate manager")
 		}
 	default:
 		return nil, fmt.Errorf("unsupported submission TLS mode %q (use none or starttls)", cfg.TLSMode)
