@@ -13,7 +13,7 @@
 | --- | --- |
 | `docs/product-roadmap/README.md` | Index & executive overview; count governance |
 | `docs/product-roadmap/01-oss-feature-inventory.md` | 199-feature registry (permanent IDs), 12 project profiles |
-| `docs/product-roadmap/02-competitor-comparison.md` | Capability matrices; architectural references (Postal, BillionMail, Listmonk, useSend) |
+| `docs/product-roadmap/02-competitor-comparison.md` | Capability matrices; architectural references (the reference platforms analyzed there) |
 | `docs/product-roadmap/03-existing-feature-audit.md` | Current-state audit at baseline `a6f1681` → `6d2d7c0` |
 | `docs/product-roadmap/04-feature-gap-analysis.md` | 53 gaps, D1–D9 duplicates, NV register, exclusions |
 | `docs/product-roadmap/05-implementation-roadmap.md` | **Track B source** — 52 remaining items, phases, scores, sequence |
@@ -52,7 +52,7 @@
 
 ### 0.3 In-flight (uncommitted working tree)
 
-- New `internal/handlers/api_key_usage_handler.go` + `internal/storage/repositories/api_key_usage_repo.go`, edits to api-key handler/model/routes/middleware/migration, `retry/worker.go` + `internal/worker/retry_bound_test.go` → **API-key usage tracking + retry bounding — likely GAP-44 groundwork**. Do not discard; reconcile when committed.
+- New `internal/handlers/api_key_usage_handler.go` + `internal/storage/repositories/api_key_usage_repo.go`, edits to api-key handler/model/routes/middleware/migration, `retry/worker.go` + `internal/worker/retry_bound_test.go` → **API-key usage tracking + retry bounding — likely GAP-44 groundwork**. Do not discard; reconcile when committed. → **Reconciled**: landed in commit `f5f0e92` — RF-F011 (per-API-key rate limits, GAP-44) and RF-F012 (per-API-key usage analytics, R-18) both Done; retry bounding in RF-F044.
 
 ---
 
@@ -178,9 +178,27 @@ flowchart TD
 
 > Source: `upcomming-convo.md` §7 + master prompt §12. Architecture-first: **do not start by implementing IMAP or building a webmail UI.** The original relay roadmap's P0 trust/correctness work (Track B Phase 0) is retained, not discarded.
 
+### Programme close-out accounting (2026-11-12 — final reconciliation at HEAD `ee38ca8`)
+
+**Commit evidence (each verified this session via `git log`/`git rev-parse`):** Phase 0 ADR gate `92378f6` (2026-11-07) → parity register frozen `a9e6ae7` → Phase-3 relay gaps P3-1..P3-5 + OB-1 MTA integration `cdfa066` (2026-11-07) → OB-2 inbound routing `b756f63` (2026-11-07) → OB-3 mailstore `be9883f` (2026-11-08) → documentation restructure `dc7ab00` (2026-11-08) → OB-4 IMAP/POP3 `183303a` (2026-11-08) → OB-5 webmail `3ef6291` (2026-11-10) → OB-6 convergence `ee38ca8` (2026-11-11, HEAD, pushed to `origin/main`). Provenance note: the programme tracker's pre-restructure hash labels for P3+OB-1/OB-2/OB-3 (`1552059`/`30a967c`/`8627972`) do not resolve in this history — the docs-restructure commit `dc7ab00` was inserted and the earlier hashes changed on the pushed branch; unit subjects match 1:1, and the hashes above are the verified ones.
+
+**What we added** (the six units, all landed as packages of the one Go binary):
+- OB-1 (ADR-001): outbound MTA — MX resolver (30s TTL cache, null-MX/implicit-MX fallback), ESMTP session runner (mandatory STARTTLS-when-offered, AUTH-never-to-MX), per-domain `relay|direct` `delivery_mode` with verified-sender fail-closed policy + hourly budget, durable `mta_delivery_attempts`, gated submission listener :587, PTR guidance slice.
+- OB-2 (ADR-002): inbound routing — rules engine (first-match, catch-all, sub-address, default-reject), durable forwarding with loop protection + confirmed targets, quarantine + review UI, VERP return-path + RFC 3464 DSN match-back, ADR-006 spam chain (scorer, allowlisted DNSBL, GTUBE, ClamAV clamd — GAP-47) , ARC/iprev annotate-only verification.
+- OB-3 (ADR-003): mailstore — mailbox/folder/message service with atomic UID claims + mod_seq flag CAS, content-addressed encrypted blob layer (zstd + AES-256-GCM, SHA-256 dedup, grace-perioded GC), Postgres FTS search, full quota policy (byte + count + workspace ceiling), retention sweep, inbound `deliver` ingestion seam with auto-provisioning.
+- OB-4 (ADR-004): IMAP4rev1 + POP3 servers over the mailstore — app-password-only auth, TLS, connection/session/command limits, audit events, scripted-client harness; gated listeners 143/993/110/995.
+- OB-5 (ADR-005): webmail + mailbox administration — fourteen `/api/v1/mail/*` endpoints, sanitized mail-view rendering, compose with scanned attachments + drafts + Sent filing, the Vue mail area, admin `/admin/mailboxes` provisioning/quota/suspend/cascade-delete.
+- OB-6 (ADR-007/008/009): convergence — DNS automation + drift (3 provider adapters), ACME/SNI certificate lifecycle, IP pools + warm-up + reputation, MTA-STS + TLS-RPT, observability completion (OTLP exporter, metric-alert engine, error hook, Grafana dashboard), cron leader lease (GAP-03), Redis-HA runbook + failover drill (GAP-49), deployment runbooks.
+
+**What is done:** Phases 0–6 exit criteria met with the residuals below; the 123-record parity register (`docs/audits/FEATURE_PARITY_AUDIT.md`) carries all programme units VERIFIED with per-record statuses (SF-85 COMPLETE, SF-75/77/79/80/83 COMPLETE, CA-01/CA-05 COMPLETE, SF-61/33/34/29/31/07/93/96 COMPLETE, SF-21 approved exclusion, SF-66/71/72 deferral-with-prerequisites per `docs/architecture/TENANCY-DECISION.md`, SF-84/111/112 not-now per `docs/architecture/EVALUATIONS.md`). The Done-bar test gate was run at each phase close (the OB-4 and OB-6 phase-close runs: exit 0, 48/56 packages ok under `-race`); the final-reconciliation battery at HEAD `ee38ca8` is recorded in `docs/project/STATUS_HISTORY.md`.
+
+**What will be done (post-programme; every tracker row keeps its permanent ID):** RF-B120 backup/restore/mailbox-migration tooling; RF-B125 AC 2 (blob/message + mailbox store backup coverage, restore drills) and AC 1 remainder (tested rollback); RF-B123 AC 3 remainder (blacklist alerts + abuse-response runbook) and AC 4 remainder (metrics families); RF-B124 AC 2 remainder (expiry monitoring/alerting); 8 more DNS-provider adapters behind the landed `DNSProvider` interface; DNS-01 via the reserved `CertSolver` seam (ADR-007 decision 3's documented path); GAP-48 queue pause/throttle + per-queue latency metric; RF-F048/GAP-01 remainder (scheduled-send cancel + reconcile coverage); RF-F099/GAP-02 residual (outbound `email.delivered`/`email.complained` webhook emission, delivered-state analytics/UI); the `/inbound-routes` rules-CRUD REST handler registration (the KNOWN_DRIFT integration pass); RF-F053 legacy bounce-webhook parity; SF-26 ARF report generation; GAP-45 remainder (orphan-object enumeration without ref rows + AdminInventory usage surfacing).
+
+**What is incomplete (and what was deliberately not adopted):** inside landed features, the documented residuals — per-workspace data keys (deployment-wide `POSTA_ENCRYPTION_KEY`), per-process budget keeper, relay-mode reputation transport counters, multi-recipient over-quota hold semantics, size-based retention, session-scoped TLS-RPT counts + per-attempt TLS columns, MTA-STS dashboard toggle + TLS-RPT dashboard view, STS-fetch-error reporting, in-memory alert breach state, compose threading headers (reply prefill-only), ADR-005 decision 4's transactional-compose product decision, SF-85's rev2/extensions absence, real-vendor-client interop (the scripted harness is the compatibility record). Deliberately **not adopted** (approved exclusions/decisions, not open work): SF-21 MT-PRIORITY (ADR-001 covers it, `docs/architecture/ADR-001-outbound-mta.md:5`, and Decision 8 `:25` fixes the sending policy as per-domain rate/budget controls with no priority classes), SRS (VERP covers the bounce-address case), ARC sealing (by design), Sieve interpreter (SF-46 — automation engine + filter consult is the documented alternative), SF-66/71/72 tenancy/SCIM/granular-role registry (deferral-with-prerequisites per `docs/architecture/TENANCY-DECISION.md` under ADR-008 §6's gate), SF-84 JMAP (ADR-004 covers it, `docs/architecture/ADR-004-imap-pop3.md:4`, keeping JMAP a Phase-6 revisit on validated demand with REST as the primary machine interface `:8`; the OB-6 evaluation is `docs/architecture/EVALUATIONS.md` §1 — demand absence recorded) / SF-111 groupware and SF-112 JMAP-FileNode file storage (ADR-003 decision 8, `docs/architecture/ADR-003-mailbox-storage.md:19`, scopes document-style storage out until Phase 6; the OB-6 evaluation is `EVALUATIONS.md` §2 — not now; SF-112's mail-attachment storage half is landed in OB-3).
+
 ## Phase 0 — Repository re-audit and architecture decisions (must happen first)
 
-> **DONE 2026-11-07** (Option B programme authorized by the user; ADRs Accepted). ADRs live flat at `docs/architecture/ADR-001-outbound-mta.md` … `ADR-009-deployment-topology.md` (no `ADRs/` subfolder — noted deviation from the original path sketch). Repository re-audit evidence: `docs/audits/REFERENCE-PLATFORM_FEATURE_PARITY_AUDIT.md` (115-record ledger, verification waves in flight) + `docs/audits/REFERENCE-PLATFORM_SOURCE_REGISTER.md`.
+> **DONE 2026-11-07** (Option B programme authorized by the user; ADRs Accepted). ADRs live flat at `docs/architecture/ADR-001-outbound-mta.md` … `ADR-009-deployment-topology.md` (no `ADRs/` subfolder — noted deviation from the original path sketch). Repository re-audit evidence: `docs/audits/FEATURE_PARITY_AUDIT.md` (123-record ledger, verification complete — the file was renamed origin-free from its original `REFERENCE-PLATFORM_`-prefixed name in the `dc7ab00` documentation restructure) + `docs/audits/SOURCE_REGISTER.md`.
 
 - [x] Inspect current branch, HEAD, working tree; reconcile the 7 audit docs with actual code (evidence-backed current-state matrix; include `7f445f2` + in-flight work per §0) — pre-flight `482d10b` recorded; reconciliation live in the parity register
 - [x] Verify existing SMTP relay, inbound receiver, queue, DKIM, provider-event ingestion, webhook behavior at HEAD — 2026-11-07 acceptance audit (commit `27c418a`) + verification waves V-B1/V-B2 at `482d10b`
@@ -248,14 +266,14 @@ flowchart TD
     O["Layer 3: manual retry<br>POST /emails/{id}/retry"] --> F
 ```
 
-- [ ] MTA adapter and lifecycle manager
-- [ ] Direct-to-MX delivery and upstream-relay modes
-- [ ] Outbound queue visibility, retry, hold and release
-- [ ] Delivery attempt records + durable transport events
-- [ ] IP binding, per-domain sending policy, rate limits
-- [ ] TLS, DKIM signing, SPF/DMARC alignment checks, PTR guidance
-- [ ] Test harnesses: SMTP responses, transient failures, permanent failures, remote throttling
-- [ ] Flow requirements: stable message identifier across systems · distinguish API acceptance / MTA queue acceptance / remote SMTP acceptance / final delivery evidence · idempotency + duplicate protection + durable retry · per-domain and per-IP rate limits · held queues + manual release · campaign traffic must not starve transactional traffic · record the MTA's **actual** response (queue acceptance ≠ delivery)
+- [x] MTA adapter and lifecycle manager — landed OB-1 (commit `cdfa066`, 2026-11-07): `internal/services/mta` — MX resolver with 30s TTL cache + null-MX/implicit-MX fallback per ADR-001 §3, ESMTP session runner, per-domain policy + hourly budget, delivery executor writing `mta_delivery_attempts`; coordinator route wiring in the same commit
+- [x] Direct-to-MX delivery and upstream-relay modes — per-domain `delivery_mode` (`relay` default | `direct`), `PATCH /domains/{id}/delivery_mode` with direct requiring sender-domain ownership verification (fail-closed), worker branch in `internal/worker/handler.go`
+- [ ] Outbound queue visibility, retry, hold and release — **PARTIAL**: visibility + retry landed (RF-F044/045/050 queue admin + retry layers; deferred 421/450 re-enqueue on the MTA path); per-queue pause/throttle + latency metric = **GAP-48 open** (Track B Batch E)
+- [x] Delivery attempt records + durable transport events — `mta_delivery_attempts` (additive migration, one row per attempt incl. failures); consumed downstream by the bounce match-back (OB-2 W4) and reputation rollups (OB-6 W3)
+- [x] IP binding, per-domain sending policy, rate limits — `domains.outbound_bind_ip`, per-domain policy + hourly budget + msgs-per-connection (OB-1); extended by IP pools + warm-up (OB-6 W3, commit `ee38ca8`)
+- [x] TLS, DKIM signing, SPF/DMARC alignment checks, PTR guidance — STARTTLS mandatory when offered (`internal/services/mta/session.go`), ACME/SNI certificate lifecycle (OB-6 W2, SF-33/34); DKIM signing R-02 on every delivery path; PTR guidance slice in `internal/services/domain/health.go`. Named caveat: outbound SPF/DMARC *alignment checking* was not an OB-1 deliverable (message-level SPF/DKIM/DMARC verification landed inbound, P3-1/SF-22-24; ARC sealing is never-by-design per ADR-002) — see the close-out accounting
+- [x] Test harnesses: SMTP responses, transient failures, permanent failures, remote throttling — the OB-1 named matrix (TestSession*/TestDirectDelivery* incl. transient 421/450 at MAIL FROM, permanent 550 at RCPT, budget-exhausted deferral; STATUS_HISTORY OB-1 entry)
+- [x] Flow requirements: stable message identifier across systems · distinguish API acceptance / MTA queue acceptance / remote SMTP acceptance / final delivery evidence · idempotency + duplicate protection + durable retry · per-domain and per-IP rate limits · held queues + manual release · campaign traffic must not starve transactional traffic · record the MTA's **actual** response (queue acceptance ≠ delivery) — landed with the caveats named above (held-queue manual release = GAP-48 remainder; campaign-vs-transactional is the weighted-queue probabilistic share, a documented non-goal for strict priority; delivery = MX 2xx only, actual responses on every attempt row)
 
 **Exit criteria:** controlled outbound delivery with traceable, recoverable message state. No production direct-to-MX launch until operational readiness gates pass.
 **Folds in from Track B:** GAP-04 (Sender seam), GAP-05 (idempotency), GAP-48 (queue ops), GAP-01 (durable record).
@@ -280,14 +298,14 @@ flowchart TD
     ST --> EV["Mailbox events"]
 ```
 
-- [ ] Inbound SMTP service integration
-- [ ] Recipient and domain validation
-- [ ] Aliases, forwarding, routing rules, catch-all policy
-- [ ] Spam and malware filtering interfaces
-- [ ] Bounce and return-path processing
-- [ ] Quarantine and manual review
-- [ ] Inbound event and audit trails
-- [ ] Flow requirements: validate recipients **before** accepting responsibility · handle unknown users/aliases/catch-all/forwarding explicitly · inbound delivery idempotent · never accept then silently lose a message · quarantine + operator review · per-mailbox and per-domain quotas · forwarding loop + abuse protection · mailbox delivery kept separate from marketing subscriber state
+- [x] Inbound SMTP service integration — landed OB-2 (commit `b756f63`, 2026-11-07): the go-smtp receiver (RF-F034) gains RCPT/DATA route validation (550 5.1.1 / 451 4.4.3), store-first ingest, and the post-ingest route-action executor (`internal/services/inbound/route_action.go`)
+- [x] Recipient and domain validation — `internal/services/inbound/router.go` `ResolveRecipient` (first-match-wins, exact beats higher-priority catch-all, sub-address → base rule, verified-domain fail-closed, unknown → explicit default-reject); ingest re-check in `internal/services/inbound/service.go`
+- [x] Aliases, forwarding, routing rules, catch-all policy — rule engine + durable `inbound_forward_tasks` queue + forwarding executor (R-26 CAS claims, `X-Posta-Forwarded-For` hop limit 3, per-target hourly/daily rate caps, single-use target confirmation) + cron sweep (`internal/services/inbound/forwarder.go`, `internal/cron/jobs/inbound_forward_queue.go`). Residual (KNOWN_DRIFT): the `/inbound-routes` rules-CRUD REST handler is not yet registered server-side — frontend client + UI landed, engine tested; the one open integration pass (see the close-out accounting)
+- [x] Spam and malware filtering interfaces — ADR-006 baseline (OB-2 W5): `internal/services/spamfilter` scorer (auth verdicts, allowlisted DNSBL, header heuristics, sender reputation, GTUBE), ClamAV clamd INSTREAM (**GAP-47 closed**), external filter consult (fail-open, escalate-only); threshold dispositions in platform settings
+- [x] Bounce and return-path processing — VERP signed return-path (`internal/services/inbound/verp.go`) + RFC 3464 DSN parser + match-back into `email_events` + the suppression chain (W4; **CA-05 / GAP-02 residual closed**)
+- [x] Quarantine and manual review — quarantine store + release-re-runs-routing + dashboard `web/src/views/inbound/Quarantine.vue` (W3)
+- [x] Inbound event and audit trails — `route.matched`/`inbound.rejected`/`inbound.forward_queued`/`inbound.quarantined`/`inbound.malware_detected`/`inbound.mail_delivered` events, persisted auth results, ARC/iprev annotations (W6, annotate-only per ADR-002 decision 6)
+- [x] Flow requirements: validate recipients **before** accepting responsibility · handle unknown users/aliases/catch-all/forwarding explicitly · inbound delivery idempotent · never accept then silently lose a message · quarantine + operator review · per-mailbox and per-domain quotas · forwarding loop + abuse protection · mailbox delivery kept separate from marketing subscriber state — landed with OB-3 W5's ingestion seam (over-quota deliveries quarantine with the durable archive copy retained throughout; release re-runs routing and files the message; `TestPGMailboxDeliveryLeavesTransactionalEmailAndSubscriberStateUntouched` pins the marketing-state separation)
 
 **Exit criteria:** accepted inbound messages durably routed, rejected or quarantined with observable outcomes.
 **Folds in from Track B:** GAP-02 residual (bounce/return-path), GAP-47 (antivirus hook).
@@ -304,12 +322,12 @@ flowchart TD
 
 > Progress 2026-11-08 (OB-3 wave W5, RF-B120): the ingestion seam (flow F13) landed — inbound messages whose matched route action is `deliver` file into the recipient's hosted INBOX via `mailstore.Append` (`internal/services/inbound/mailbox_delivery.go`: `MailboxDeliverer` seam + `MailboxDelivery`, executed by the route-action executor on both ingest paths — SMTP `IngestRaw` and webhook `Ingest` — and on quarantine release). Provisioning: the recipient mailbox (named by the full lowercased address, unique (user_id, name), via new `mailstore.FindMailboxByName`) is auto-provisioned for the tenant user on first delivery to a verified domain bound to that user, gated by new config `POSTA_MAILSTORE_AUTO_PROVISION` (default true); off → archive-only exactly as today. Quota-enforced: an append refused with the typed `*mailstore.QuotaError` quarantines the message per ADR-002 §3 with the stable typed reason `mailbox_quota_exceeded` + structured quota fields; release re-runs routing and files the message (never lost — the durable archive copy exists throughout); any other append failure logs and falls back to archive-only. Wiring sits behind blob store + `POSTA_ENCRYPTION_KEY` presence (production `ZstdBlobCodec` refuses unencrypted storage, SF-78) in `cmd/posta/server.go` and `internal/routes/routes.go`; no new HTTP routes; no schema change. Success publishes `inbound.mail_delivered` with the delivered mailbox names. Marketing-subscriber separation (Phase 2 flow requirement) asserted directly: `TestPGMailboxDeliveryLeavesTransactionalEmailAndSubscriberStateUntouched` (delta counts on emails/subscribers/subscriber_lists unchanged). Named tests, all passing: `TestPGMailboxDeliveryRoundTrip`, `TestPGMailboxDeliveryAutoProvisionOff`, `TestPGMailboxDeliveryOverQuotaQuarantinesTyped`, `TestPGMailboxDeliveryLeavesTransactionalEmailAndSubscriberStateUntouched` (real Postgres), `TestDeliverActionWithoutSeamKeepsArchiveOnly`, `TestMailboxDeliveryNilGuards`, `TestDeliverActionUnknownErrorFallsBackToArchive`, `TestDeliverActionOverQuotaQuarantinesWithoutStore` (units). Documented residuals: auto-provisioned quota 0 (workspace ceiling still applies); multi-recipient over-quota holds the record as a whole (release may duplicate into already-served mailboxes); suspended/closed mailboxes → archive-only fallback; per-workspace data keys remain W2's residual — see `docs/project/STATUS_HISTORY.md` W5 entry.
 
-- [ ] Choose and prototype the mailbox storage backend (backend chosen per ADR-003 — Postgres mailstore + blob.Store; IMAP-side prototype pending Phase 4)
-- [ ] Mailbox, folder, quota and message metadata
-- [x] MIME storage, attachment storage, retention (storage W1; retention sweep + blob-ref reclamation W4 2026-11-07 — per-mailbox/per-folder age+count policies via the unified cron family `mailstore.RetentionSweeper`; size-based policy residual)
-- [ ] Append, fetch, copy, move, flags, expunge, search
-- [ ] Concurrent-access and synchronization behavior
-- [ ] Backup, restore, mailbox migration tooling
+- [x] Choose and prototype the mailbox storage backend (backend chosen per ADR-003 — Postgres mailstore + blob.Store; delivered OB-3 W1, commit `be9883f`, 2026-11-08 — the IMAP-side consumer landed with Phase 4, commit `183303a`)
+- [x] Mailbox, folder, quota and message metadata — W1 models/service (mailbox/folder CRUD, atomic UID claim, mod_seq flag CAS) + W4 full ADR-003 §5 quota policy (byte + message-count + workspace ceiling under a mailbox-row `FOR UPDATE` lock, typed `*QuotaError`)
+- [x] MIME storage, attachment storage, retention (storage W1; retention sweep + blob-ref reclamation W4 2026-11-07 — per-mailbox/per-folder age+count policies via the unified cron family `mailstore.RetentionSweeper`; content-addressed encrypted blob layer W2 with zstd + AES-256-GCM + SHA-256 dedup + grace-perioded GC; size-based policy residual)
+- [x] Append, fetch, copy, move, flags, expunge, search — W1 service + W3 Postgres FTS search (`mailstore.PostgresSearcher` over the `search_tsv` generated column, per-user isolation + folder scoping, admin-gated reindex)
+- [x] Concurrent-access and synchronization behavior — UID monotonicity under concurrent appends, flag CAS, concurrent-append-quota tests, session guard, and the W2 reserve-then-write per-hash advisory lock (real-Postgres suites via `TEST_DATABASE_DSN`)
+- [ ] Backup, restore, mailbox migration tooling — **NOT delivered** (RF-B120 residual; folded into RF-B125 AC 2 — see the close-out accounting)
 
 **Exit criteria:** mailbox data survives restarts, supports concurrent clients, backs up/restores without corruption. Do **not** reuse the transactional `Email` model; do not auto-migrate transactional records into mailbox storage.
 
@@ -322,9 +340,9 @@ flowchart TD
 
 - [x] IMAP integration against the selected mailbox backend
 - [x] Authentication/authorization tied to ReForwarder identities
-- [ ] Folder and message synchronization
+- [x] Folder and message synchronization — landed with OB-4 (commit `183303a`): the untagged-update engine draining the W1 `ChangeNotifier` into EXISTS/EXPUNGE/FETCH FLAGS over the UIDVALIDITY/UIDNEXT/mod_seq folder view (`internal/services/imap/session.go` `applyNotifications`) plus IDLE; the OB-4 coordinator close-out (recorded in `docs/audits/FEATURE_PARITY_AUDIT.md`, Programme Tracker row VERIFIED) supersedes the earlier W5-brief note
 - [x] POP3 as a separate access mode with correct deletion semantics
-- [ ] Standard-client + protocol compatibility testing
+- [x] Standard-client + protocol compatibility testing — the R-22-shape scripted-client harness (`internal/services/imap/harness_test.go` + `server_test.go` + `parser_test.go`: in-process real TCP, real mailstore over real Postgres via `TEST_DATABASE_DSN`, real bcrypt app-password fixtures; 22 harness tests + 15 units; it drove eight real server fixes recorded in the STATUS_HISTORY W2 note) per the OB-4 close-out. Named residual: interop with real third-party vendor clients was not run — recorded in the close-out accounting
 - [x] Connection limits, TLS enforcement, rate limits, audit logs
 
 **Exit criteria:** standard mail clients securely use hosted mailboxes with consistent state.
@@ -332,22 +350,22 @@ flowchart TD
 ## Phase 5 — Webmail and mailbox administration
 
 - [x] Mailbox provisioning and lifecycle management (2026-11-08, OB-5 wave W2 — the admin control-plane slice: `/admin/mailboxes` provision/quota/suspend/reactivate/cascade-delete + usage, audited `admin.mailbox.*`; user-facing webmail surfaces are the other ADR-005 waves)
-- [ ] Inbox, folders, compose, reply, forwarding, attachments
-- [ ] Search, read/unread state, mailbox settings
-- [ ] Password changes, sessions, device management
-- [ ] Mailbox quotas and usage reporting (2026-11-08, OB-5 wave W2: admin-side quota management + usage reporting landed with `/admin/mailboxes` + `GET /admin/mailboxes/{id}/usage`; the self-service quota/usage display is the W1 frontend's scope)
+- [x] Inbox, folders, compose, reply, forwarding, attachments — landed OB-5 (commit `3ef6291`, 2026-11-10): the fourteen session-user `/api/v1/mail/*` endpoints (`internal/routes/mail_routes.go`) + the Vue mail area (`web/src/views/mail/` — Mailbox, MessageView with the sandboxed remote-content-blocked renderer, Compose with staged scanned attachments + drafts + reply-frame handoff) + `POST /mail/send`/`/mail/attachments`/draft lifecycle (`internal/services/mailcompose/`)
+- [x] Search, read/unread state, mailbox settings — FTS `q` + unread/flagged filters (truthful combination through the `SearchIMAP` tree), `if_mod_seq` CAS flags, `MailSettings.vue` with the per-mailbox quota/usage display
+- [x] Password changes, sessions, device management — session lifecycle + self-service device list/revoke (RF-F003), passkeys (RF-F014), and the mail-client credential surface: app passwords (SF-35/SF-67, `internal/routes/user_routes.go:451-496`, Profile card) — IMAP/POP3/submission accept app-password digests only
+- [x] Mailbox quotas and usage reporting (2026-11-08, OB-5 wave W2: admin-side quota management + usage reporting landed with `/admin/mailboxes` + `GET /admin/mailboxes/{id}/usage`; the self-service quota/usage display landed with the W1/W4 webmail frontend — `MailSettings.vue`)
 - [x] Admin tools for mailbox suspension and recovery (2026-11-08, OB-5 wave W2: `PATCH /admin/mailboxes/{id}` suspend/reactivate + confirm-gated cascade delete in `web/src/views/admin/Mailboxes.vue`, backed by `internal/services/mailstore/admin.go`)
 
 **Exit criteria:** users manage hosted email without a third-party webmail deployment.
 
 ## Phase 6 — Full platform convergence
 
-- [ ] Integrate mailboxes, campaigns, transactional sending, inbound routing into one control plane
-- [ ] DNS automation + certificate lifecycle management (progress 2026-11-10, OB-6 wave W2: the certificate-lifecycle half landed — `internal/services/certmanager`, autocert behind `POSTA_ACME_ENABLED` default false, per-domain SNI map on IMAP 993/POP3 995/submission 587 STARTTLS/webmail HTTPS, blob-store cert cache + SF-110 hot reload, HTTP-01 through the existing HTTP server, TLS-ALPN-01 on the webmail HTTPS listener; DNS-01 is the recorded residual via the `CertSolver` seam awaiting the W1 dnsmanager adapter — see SF-34, now PARTIAL, and the OB-6 wave evidence; the DNS-automation half is the other OB-6 waves' scope)
-- [ ] IP pools, warm-up controls, reputation monitoring
-- [ ] Event, analytics, webhook coverage completion
-- [ ] Deployment, upgrade, backup, disaster-recovery tooling
-- [ ] Revisit JMAP + advanced integrations on validated demand
+- [x] Integrate mailboxes, campaigns, transactional sending, inbound routing into one control plane — the single Go binary (server + embedded worker) runs the dashboard/API, all four mail listeners, and the cron fleet behind default-off config gates (`compose.yml` commented listener blocks, OB-6 W6); `docs/docs/operations/deployment.md` documents the topology (commit `ee38ca8`)
+- [x] DNS automation + certificate lifecycle management — both halves landed (commit `ee38ca8`): W1 DNS automation (SF-61 COMPLETE — `DNSProvider` interface + Cloudflare/Route53/DigitalOcean adapters with read-before-write validation, publication planner, encrypted credentials, hourly drift cron with transition alerts, `POSTA_DNS_AUTOMATION_ENABLED`-gated API) + W2 ACME/SNI (SF-33/34 COMPLETE — `internal/services/certmanager`, autocert behind `POSTA_ACME_ENABLED` default false, per-domain SNI map on IMAP 993/POP3 995/submission 587 STARTTLS/webmail HTTPS, blob-store cert cache + SF-110 hot reload, HTTP-01 through the existing HTTP server, TLS-ALPN-01 on the webmail HTTPS listener). Residual: DNS-01 via the reserved `CertSolver` seam (ADR-007 decision 3's documented Lego path); 8-of-11 provider adapters remain additive work
+- [x] IP pools, warm-up controls, reputation monitoring — landed OB-6 W3 (SF-07 completion): workspace-or-shared pools, geometric warm-up ramps folded into the per-domain hourly budget (defer 450 naming the cap), per-(ip, domain, day) reputation rollups with grades/trends surfaced in the domain health report + the Domains.vue panel + admin endpoint. Remainders on RF-B123: blacklist alerts + abuse-response runbook (AC 3), metrics families (AC 4)
+- [ ] Event, analytics, webhook coverage completion — **PARTIAL**: landed OB-6 W5 — OTLP push exporter (SF-93), metric-alert engine (SF-96), error-monitoring hook (GAP-51, RF-F097), Grafana sample dashboard (GAP-52); RF-F106/107/108 minted Done. Open: the outbound `email.delivered`/`email.complained` webhook emission, delivered-state analytics and dead delivered UI paths (**RF-F099**, GAP-02 residual) and the legacy `/webhooks/bounce` parity (**RF-F053**) — see the close-out accounting
+- [x] Deployment, upgrade, backup, disaster-recovery tooling — landed OB-6 W6 + earlier: `docs/docs/operations/deployment.md` (topology, additive-migration upgrade policy, listener matrix, scaling), `docs/docs/operations/redis-ha.md` + `compose.sentinel.yml` with the failover drill executed end-to-end (GAP-49 closed), cron leader lease (GAP-03 closed), pg_dump backups + restore runbook (R-11/GAP-50), `compose.yml` default-off listener blocks. Remainder on RF-B125: blob/message + mailbox-store backup coverage and restore drills (AC 2), tested rollback (AC 1)
+- [x] Revisit JMAP + advanced integrations on validated demand — the OB-6 revisit produced the evaluations, not build commitments: **not now** for JMAP (RF-B126/SF-84 — demand absence recorded; RF-B126 Done as the demand-signal collector), groupware (SF-111) and JMAP-FileNode file storage (SF-112 — mail-attachment storage half landed in OB-3; the FileNode/extraction slice not-now with the extraction-for-search trigger recorded) per `docs/architecture/EVALUATIONS.md`; tenancy/SCIM/granular roles (SF-66/71/72) deferred with prerequisites per `docs/architecture/TENANCY-DECISION.md`; MT-PRIORITY (SF-21) an approved exclusion per ADR-001 decision 8
 
 **Exit criteria:** one supported self-hosted platform; coherent administration; documented deployment; end-to-end operational testing.
 **Folds in from Track B:** GAP-08 (DNS health), GAP-49 (Redis HA), GAP-50 (backups/DR).
@@ -556,12 +574,12 @@ sending → sent (all messages processed)
 ### Admin tail
 
 - [ ] **GAP-46** — Admin impersonation · M (1.35)
-- [ ] **GAP-47** — Antivirus hook · M (1.25) — → OB Phase 2 (malware scanning)
+- [x] **GAP-47** — Antivirus hook · M (1.25) — **closed 2026-11-07 (OB-2 wave W5, commit `b756f63`)**: ClamAV clamd INSTREAM client (`internal/services/spamfilter/clamav.go`, `POSTA_CLAMAV_HOST/PORT/TIMEOUT/FAIL_MODE`, 25 MiB cap, fail mode open/closed) scanning in the ingest worker, positives → quarantine with `inbound.malware_detected`; compose attachments scanned at upload (OB-5 W3) — see BACKLOG GAP-47 (Done) and the RF-B119 spam/malware criterion
 - [ ] **GAP-17** — Global registration control · S (1.50)
 
 ### Docs & observability tail
 
-- [ ] **GAP-52** — Grafana sample dashboard · S (1.20)
+- [x] **GAP-52** — Grafana sample dashboard · S (1.20) — **closed 2026-11-11 (OB-6 wave W5, commit `ee38ca8`)**: `docs/observability/grafana-posta-overview.json` (17 panels over the real `posta_*` families) + `docs/observability/README.md`; guard tests `TestGrafanaDashboardJSONIsValid`/`TestGrafanaDashboardCoversCoreFamilies` resolve every PromQL token against the live default gatherer
 - [ ] **GAP-53** — Runtime log viewer & resource history · M (0.90)
 
 ## Already delivered (record — do not re-implement)

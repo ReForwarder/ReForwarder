@@ -69,6 +69,11 @@ const { pageable, goToPage } = usePagination(async (page) => {
 const expandedDomainId = ref<number | null>(null)
 const rulesLoadingId = ref<number | null>(null)
 const routesByDomain = ref<Record<number, InboundRoute[]>>({})
+// Load failures surface inline in the expanded row (with a retry) instead of a
+// global toast: the failure belongs to the row's lazy load, and a transient
+// toast used to obscure the sticky topbar before it expired.
+const rulesErrorId = ref<number | null>(null)
+const rulesErrorMessage = ref('')
 
 function rulesFor(domainId: number): InboundRoute[] {
   return routesByDomain.value[domainId] ?? []
@@ -85,12 +90,13 @@ async function toggleRules(domain: Domain) {
 
 async function loadRules(domainId: number) {
   rulesLoadingId.value = domainId
+  rulesErrorId.value = null
   try {
     const res = await inboundRoutesApi.list({ domain_id: domainId })
     routesByDomain.value = { ...routesByDomain.value, [domainId]: res.data.data }
   } catch (e: any) {
-    notify.error(apiMessage(e, 'Failed to load routing rules'))
-    expandedDomainId.value = null
+    rulesErrorId.value = domainId
+    rulesErrorMessage.value = apiMessage(e, 'Failed to load routing rules')
   } finally {
     rulesLoadingId.value = null
   }
@@ -398,6 +404,11 @@ onMounted(loadTargets)
                   <td colspan="4" style="padding: 20px 16px; background: var(--bg-tertiary)">
                     <div v-if="rulesLoadingId === domain.id" class="loading-page" style="min-height: 80px">
                       <div class="spinner"></div>
+                    </div>
+                    <div v-else-if="rulesErrorId === domain.id" class="empty-state">
+                      <h3>Failed to load routing rules</h3>
+                      <p>{{ rulesErrorMessage }}</p>
+                      <button class="btn btn-secondary btn-sm" @click="loadRules(domain.id)">Retry</button>
                     </div>
                     <template v-else>
                       <h4 class="dns-panel-title">Routing rules for {{ domain.domain }}</h4>

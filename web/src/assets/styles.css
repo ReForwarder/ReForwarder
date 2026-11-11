@@ -690,9 +690,11 @@ tbody tr:hover td { background: var(--bg-hover); }
 @keyframes modalSlideUp { from { opacity: 0; transform: translateY(10px); } to { transform: translateY(0); opacity: 1; } }
 
 /* ─── Notification Toast ─── */
+/* Fixed below the 56px sticky topbar (DashboardLayout .topbar) so transient
+   toasts never cover the header's user menu / notification bell. */
 .toast-container {
   position: fixed;
-  top: 20px;
+  top: 72px;
   right: 20px;
   z-index: 2000;
   display: flex;
