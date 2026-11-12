@@ -376,6 +376,29 @@ func (s *SMTPSender) Send(server *models.SMTPServer, from string, to []string, s
 	return sendViaClient(client, conn, auth, envelopeFrom, to, msg)
 }
 
+// SendRaw delivers a pre-built RFC 5322 message through a relay server
+// (SF-10). The message crosses as-is — used for system_dsn rows whose
+// TextBody is the complete multipart/report notification; envelopeFrom is
+// used verbatim ("" = null reverse path, the RFC 3464 §4.3 DSN posture).
+func (s *SMTPSender) SendRaw(server *models.SMTPServer, envelopeFrom string, to []string, msg []byte) error {
+	addr := fmt.Sprintf("%s:%d", server.Host, server.Port)
+
+	var auth smtp.Auth
+	if server.Username != "" {
+		auth = newAuth(server.Host, server.Username, server.Password)
+	}
+
+	tlsConfig := &tls.Config{ServerName: server.Host}
+	conn, client, err := dialSMTP(addr, server.Host, server.Encryption, tlsConfig)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	defer func() { _ = client.Close() }()
+
+	return sendViaClient(client, conn, auth, envelopeFrom, to, msg)
+}
+
 // envelopeAddress extracts the bare email from an RFC 5322 address like
 // "Display Name <user@example.com>", returning just "user@example.com".
 // If parsing fails, it returns the input unchanged.

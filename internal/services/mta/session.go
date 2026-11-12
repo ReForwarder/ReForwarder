@@ -20,12 +20,14 @@
 package mta
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
 	"net/smtp"
+	"net/textproto"
 	"time"
 
 	"github.com/goposta/posta/internal/services/email"
@@ -52,6 +54,9 @@ type SessionCaps struct {
 	EightBitMIME bool
 	SMTPUTF8     bool
 	Auth         bool
+	// CHUNKING (RFC 3030) — recorded by the session runner; when offered, the
+	// end-of-message phase uses BDAT instead of DATA (SF-02).
+	CHUNKING bool
 }
 
 // SessionOptions configures one outbound ESMTP session.
@@ -86,6 +91,11 @@ type SessionOptions struct {
 	// STS hook — smarthost/relay sessions are configured by operators, not
 	// discovered, so MTA-STS does not apply to them (RFC 8461 §2 scope).
 	STS STSEnforcement
+	// ThrottleBytesPerSec caps this connection's outbound write rate
+	// (SF-108, POSTA_DELIVERY_THROTTLE_KBPS; 0 = unlimited). The token
+	// bucket lives on the connection, so commands AND the message payload
+	// cross the wire at the paced rate.
+	ThrottleBytesPerSec int64
 }
 
 // SessionResult is the outcome of one session: Delivered true exactly when
@@ -165,6 +175,11 @@ func runSession(ctx context.Context, opts SessionOptions, from string, rcpts []s
 	if err != nil {
 		return nil, email.WrapSendError("DIAL", "", err)
 	}
+	// SF-108: pace every byte this connection sends (commands and payload)
+	// through a token bucket when a transfer throttle is configured.
+	if opts.ThrottleBytesPerSec > 0 {
+		conn = newThrottledConn(conn, opts.ThrottleBytesPerSec)
+	}
 	defer func() { _ = conn.Close() }()
 	remoteIP := ""
 	if addr := conn.RemoteAddr(); addr != nil {
@@ -194,6 +209,7 @@ func runSession(ctx context.Context, opts SessionOptions, from string, rcpts []s
 	res.Caps.EightBitMIME, _ = client.Extension("8BITMIME")
 	res.Caps.SMTPUTF8, _ = client.Extension("SMTPUTF8")
 	res.Caps.Auth, _ = client.Extension("AUTH")
+	res.Caps.CHUNKING, _ = client.Extension("CHUNKING")
 
 	// STARTTLS is mandatory when the remote offers it (ADR-001 §4). The TLS
 	// handshake verifies the certificate chain against tlsConfig — plain
@@ -259,9 +275,24 @@ func runSession(ctx context.Context, opts SessionOptions, from string, rcpts []s
 		}
 	}
 
-	// Fresh budget for the DATA phase — the longest single operation, same
-	// arrangement as the relay sender.
+	// Fresh budget for the end-of-message phase — the longest single
+	// operation, same arrangement as the relay sender.
 	budget()
+
+	// SF-02 (RFC 3030): when the remote advertised CHUNKING, end the message
+	// with BDAT instead of DATA — the payload crosses the wire verbatim (no
+	// dot-stuffing), so byte-exact binary transparency holds end to end.
+	if res.Caps.CHUNKING {
+		berr := sendBdat(conn, msg)
+		if berr != nil {
+			return res, berr
+		}
+		res.Delivered = true
+		res.Code = 250
+		res.Msg = "2xx accepted at end of BDAT"
+		_ = client.Quit()
+		return res, nil
+	}
 
 	w, err := client.Data()
 	if err != nil {
@@ -283,6 +314,28 @@ func runSession(ctx context.Context, opts SessionOptions, from string, rcpts []s
 
 	_ = client.Quit()
 	return res, nil
+}
+
+// sendBdat ends the message transfer with one BDAT <n> LAST chunk (RFC 3030).
+// The command and the reply go through the raw socket: net/smtp's Client has
+// no BDAT, and the payload must NOT be dot-stuffed. The exchange is safe
+// against the shared textproto pipeline because every earlier command
+// (Hello/Mail/Rcpt) flushed its reply synchronously — the socket is quiescent
+// between RCPT and this call, so the reply read here sees exactly the BDAT
+// response and leaves the client's pipeline consistent for Quit.
+func sendBdat(conn net.Conn, msg []byte) error {
+	if _, err := fmt.Fprintf(conn, "BDAT %d LAST\r\n", len(msg)); err != nil {
+		return email.WrapSendError("BDAT", "", err)
+	}
+	if _, err := conn.Write(msg); err != nil {
+		return email.WrapSendError("BDAT", "", err)
+	}
+	tr := textproto.NewReader(bufio.NewReader(conn))
+	_, _, err := tr.ReadResponse(250)
+	if err != nil {
+		return email.WrapSendError("BDAT", "", err)
+	}
+	return nil
 }
 
 // DefaultHeloDomain is the EHLO identifier used when none is configured.
@@ -307,4 +360,81 @@ func isASCIIString(s string) bool {
 		}
 	}
 	return true
+}
+
+// throttledConn caps outbound writes at rate bytes/second through a token
+// bucket with a one-second burst (SF-108). Reads pass through untouched; the
+// connection's read deadlines keep bounding the session, so a throttled
+// payload can extend the write phase but never the whole session unboundedly.
+type throttledConn struct {
+	net.Conn
+	rate      float64
+	tokens    float64
+	maxTokens float64
+	last      time.Time
+}
+
+func newThrottledConn(conn net.Conn, bytesPerSec int64) *throttledConn {
+	rate := float64(bytesPerSec)
+	if rate < 64 {
+		rate = 64 // floor: one SMTP command per second even at absurd settings
+	}
+	return &throttledConn{
+		Conn:      conn,
+		rate:      rate,
+		tokens:    rate,
+		maxTokens: rate,
+		last:      time.Now(),
+	}
+}
+
+func (c *throttledConn) Write(p []byte) (int, error) {
+	written := 0
+	for written < len(p) {
+		c.refill()
+		avail := len(p) - written
+		if float64(avail) > c.tokens {
+			avail = int(c.tokens)
+		}
+		if avail <= 0 {
+			// Sleep until one byte's worth of token accrues; the slice caps
+			// the wait so budget changes (deadlines) surface promptly.
+			time.Sleep(c.waitTime(float64(len(p) - written)))
+			continue
+		}
+		n, err := c.Conn.Write(p[written : written+avail])
+		written += n
+		c.tokens -= float64(n)
+		if err != nil {
+			return written, err
+		}
+	}
+	return written, nil
+}
+
+// refill accrues tokens since the last refill, capped at the burst size.
+func (c *throttledConn) refill() {
+	now := time.Now()
+	elapsed := now.Sub(c.last).Seconds()
+	c.last = now
+	c.tokens += elapsed * c.rate
+	if c.tokens > c.maxTokens {
+		c.tokens = c.maxTokens
+	}
+}
+
+// waitTime is how long until deficit bytes have accrued at rate.
+func (c *throttledConn) waitTime(deficit float64) time.Duration {
+	needed := deficit - c.tokens
+	if needed <= 0 {
+		return time.Millisecond
+	}
+	d := time.Duration(needed / c.rate * float64(time.Second))
+	if d > 200*time.Millisecond {
+		d = 200 * time.Millisecond
+	}
+	if d < time.Millisecond {
+		d = time.Millisecond
+	}
+	return d
 }

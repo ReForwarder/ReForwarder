@@ -42,6 +42,11 @@ const (
 	MTAAttemptRefusedUnverifiedSender = "refused_unverified_sender"
 	// MTAAttemptDNSFailure — MX resolution failed; no connection was opened.
 	MTAAttemptDNSFailure = "dns_failure"
+	// MTAAttemptThrottleWait — the per-sending-domain message-rate pacer
+	// (CA-04) held the MAIL FROM for a sustained interval (>= 5s); the SMTP
+	// session follows after the wait. Short waits stay metric-only
+	// (posta_mta_throttle_wait_seconds).
+	MTAAttemptThrottleWait = "throttle_wait"
 )
 
 // MTADeliveryAttempt is the durable transport-event record for direct-to-MX

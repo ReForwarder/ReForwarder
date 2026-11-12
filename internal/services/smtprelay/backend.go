@@ -47,6 +47,13 @@ type Backend struct {
 	limiter        *inbound.IPRateLimiter
 	sec            *security.Engine
 	securityPort   int
+	// memGuard is the SF-108 memory-pressure watchdog (nil = no budget).
+	memGuard MemoryGuard
+}
+
+// MemoryGuard is the SF-108 pressure seam (mirrors the inbound backend).
+type MemoryGuard interface {
+	UnderPressure() bool
 }
 
 func NewBackend(credRepo *repositories.SMTPCredentialRepository, userRepo *repositories.UserRepository, emailSvc *email.Service, maxMessageSize int64) *Backend {
@@ -65,7 +72,16 @@ func (b *Backend) SetRateLimiter(l *inbound.IPRateLimiter) { b.limiter = l }
 // engine disables security enforcement for new sessions.
 func (b *Backend) SetSecurity(eng *security.Engine) { b.sec = eng }
 
+// SetMemoryGuard attaches the SF-108 memory-pressure watchdog (nil = none):
+// new relay sessions are refused with a temporary 451 while the process is
+// over its memory budget; in-flight sessions are never aborted.
+func (b *Backend) SetMemoryGuard(g MemoryGuard) { b.memGuard = g }
+
 func (b *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
+	// SF-108: backpressure at the front door under a memory-budget breach.
+	if b.memGuard != nil && b.memGuard.UnderPressure() {
+		return nil, &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 3, 1}, Message: "server under memory pressure, try again later"}
+	}
 	remote := c.Conn().RemoteAddr().String()
 	if b.limiter != nil {
 		ip := remote

@@ -67,6 +67,9 @@ type Domain struct {
 	OutboundBindIP       string `json:"outbound_bind_ip" gorm:"size:64"`
 	MaxMsgsPerConnection int    `json:"max_msgs_per_connection" gorm:"default:0"`
 	HourlyBudget         int    `json:"hourly_budget" gorm:"default:0"`
+	// MaxMessageSize caps this domain's outbound message octets (SF-17).
+	// Zero keeps the listener-wide default.
+	MaxMessageSize int64 `json:"max_message_size" gorm:"default:0"`
 	// PoolID assigns the domain to an IP pool (OB-6 W3, ADR-007 decision 7):
 	// direct deliveries rotate across the pool's enabled member IPs instead
 	// of OutboundBindIP alone. nil = the domain uses OutboundBindIP alone.

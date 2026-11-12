@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/emersion/go-smtp"
+	"github.com/goposta/posta/internal/mailtrace"
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/security"
 	"github.com/goposta/posta/internal/storage/repositories"
@@ -68,6 +69,14 @@ type Backend struct {
 	// allowlist (SF-31, OB-6 W4, ADR-007 §5); nil until SetTLSRPT, and RCPT
 	// then behaves exactly as before.
 	tlsrpt *TlsRptAllowlist
+	// hostname is the receiving hostname stamped into the SF-13 Received:
+	// trace header; set by NewSMTPServer from SMTPConfig.Hostname.
+	hostname string
+	// memGuard is the SF-108 process memory watchdog; while it reports
+	// pressure, NEW sessions are refused with a temporary 451 (backpressure
+	// at the front door — in-flight sessions are never aborted). nil = no
+	// budget configured.
+	memGuard MemoryGuard
 }
 
 func NewBackend(svc *Service, domainRepo *repositories.DomainRepository, maxMessageSize int64) *Backend {
@@ -93,7 +102,21 @@ func (b *Backend) SetRateLimiter(l *IPRateLimiter) { b.limiter = l }
 // engine disables security enforcement for new sessions.
 func (b *Backend) SetSecurity(eng *security.Engine) { b.sec = eng }
 
+// MemoryGuard is the SF-108 pressure seam the SMTP listeners consult.
+// *memorywatch.Watchdog satisfies it; nil guards report healthy.
+type MemoryGuard interface {
+	UnderPressure() bool
+}
+
+// SetMemoryGuard attaches the SF-108 memory-pressure watchdog (nil = none).
+func (b *Backend) SetMemoryGuard(g MemoryGuard) { b.memGuard = g }
+
 func (b *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
+	// SF-108: under a memory-budget breach, refuse new sessions with a
+	// temporary 451 — the client retries later; nothing in flight is harmed.
+	if b.memGuard != nil && b.memGuard.UnderPressure() {
+		return nil, &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 3, 1}, Message: "server under memory pressure, try again later"}
+	}
 	remote := c.Conn().RemoteAddr().String()
 	if b.limiter != nil {
 		ip := remote
@@ -110,10 +133,15 @@ func (b *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	if err := guard.GuardNewSession(); err != nil {
 		return nil, err
 	}
+	// SF-13: capture the EHLO argument here — go-smtp re-runs NewSession
+	// after a STARTTLS upgrade, so both implicit-TLS and upgraded sessions
+	// see the values of their own connection.
 	return &session{
 		backend: b,
 		remote:  remote,
 		guard:   guard,
+		helo:    c.Hostname(),
+		conn:    c,
 	}, nil
 }
 
@@ -123,6 +151,11 @@ type session struct {
 	to      []string
 	remote  string
 	guard   *security.SessionGuard
+	// helo is the client's EHLO argument (trace-header `from` clause, SF-13).
+	helo string
+	// conn is the session's SMTP connection; read at DATA time so the TLS
+	// state reflects any STARTTLS upgrade that happened mid-session.
+	conn *smtp.Conn
 }
 
 func (s *session) Reset() {
@@ -228,30 +261,25 @@ func (s *session) Rcpt(to string, _ *smtp.RcptOptions) error {
 // is durably stored and the MTA gets 250.
 func (s *session) Data(r io.Reader) error {
 	s.guard.MarkCommand()
-	limit := s.backend.maxMessageSize
-	if limit <= 0 {
-		limit = 26214400
-	}
-	// +1 to detect overflow.
-	lr := &io.LimitedReader{R: r, N: limit + 1}
-	raw, err := io.ReadAll(lr)
+	raw, err := s.readBounded(r)
 	if err != nil {
-		return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 3, 0}, Message: "read error"}
-	}
-	if int64(len(raw)) > limit {
-		return &smtp.SMTPError{Code: 552, EnhancedCode: smtp.EnhancedCode{5, 3, 4}, Message: "message size exceeds limit"}
+		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	clientIP := s.remote
-	if host, _, err := net.SplitHostPort(s.remote); err == nil {
-		clientIP = host
-	}
+	clientIP := clientHost(s.remote)
 
 	recipients := append([]string(nil), s.to...)
 	_, ierr := s.backend.svc.IngestRaw(ctx, raw, s.from, recipients, models.InboundSourceSMTP, clientIP)
+	return ingestErrorToStatus(ierr, s.remote)
+}
+
+// ingestErrorToStatus maps an IngestRaw error to the final SMTP/LMTP reply:
+// nil (accepted → 250) or the typed failure. Shared by the DATA handler and
+// the LMTP per-recipient status (SF-01) so both listeners reject identically.
+func ingestErrorToStatus(ierr error, remote string) error {
 	switch {
 	case ierr == nil:
 		return nil
@@ -267,9 +295,30 @@ func (s *session) Data(r io.Reader) error {
 	case errors.Is(ierr, ErrSenderSuppressed):
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "sender suppressed"}
 	default:
-		logger.Error("inbound ingest failed", "remote", s.remote, "error", ierr)
+		logger.Error("inbound ingest failed", "remote", remote, "error", ierr)
 		return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 3, 0}, Message: "temporary failure"}
 	}
+}
+
+// withReceivedHeader builds the SF-13 trace header from the live session
+// state (HELO, peer IP, negotiated TLS) and the receiving hostname. Isolated
+// as a method so tests can pin its inputs directly.
+func (s *session) withReceivedHeader(recipients []string) string {
+	var tlsVersion uint16
+	if s.conn != nil {
+		if tc, ok := s.conn.Conn().(*tls.Conn); ok {
+			tlsVersion = tc.ConnectionState().Version
+		}
+	}
+	return mailtrace.IngestReceived(s.helo, clientHost(s.remote), s.backend.hostname, tlsVersion, recipients, time.Now())
+}
+
+// clientHost reduces a host:port remote to its host part.
+func clientHost(remote string) string {
+	if host, _, err := net.SplitHostPort(remote); err == nil {
+		return host
+	}
+	return remote
 }
 
 // NewSMTPServer builds a configured *smtp.Server. When cfg.TLSMode == "starttls",
@@ -285,7 +334,8 @@ func NewSMTPServer(backend *Backend, cfg SMTPConfig) (*smtp.Server, error) {
 	srv.AllowInsecureAuth = true
 	srv.EnableSMTPUTF8 = true
 	if backend != nil {
-		backend.securityPort = cfg.Port // port attached to security signals
+		backend.securityPort = cfg.Port  // port attached to security signals
+		backend.hostname = cfg.Hostname // trace-header `by` clause (SF-13)
 	}
 
 	switch strings.ToLower(strings.TrimSpace(cfg.TLSMode)) {

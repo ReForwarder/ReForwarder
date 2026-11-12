@@ -30,6 +30,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/goposta/posta/internal/mailtrace"
+	"github.com/goposta/posta/internal/metrics"
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/email"
 )
@@ -114,6 +116,20 @@ type Executor struct {
 	// verification is always on (tests inject a RootCAs pool for in-process
 	// servers).
 	tlsConfigFor func(host string) *tls.Config
+	// rateKeeper paces per-message sends per sending domain (CA-04); nil
+	// disables pacing. msgRatePerMin is the process-wide default
+	// (POSTA_MTA_MSG_RATE_PER_MIN); a Policy with its own MsgRatePerMin wins.
+	rateKeeper    *MessageRateKeeper
+	msgRatePerMin int
+	// throttleBPS is the per-connection transfer throttle (SF-108,
+	// POSTA_DELIVERY_THROTTLE_KBPS; 0 = unlimited).
+	throttleBPS int64
+	// clockFn is the pacer's clock (tests inject a virtual clock; the SMTP
+	// session runner keeps the package nowFunc so deadlines stay real).
+	clockFn func() time.Time
+	// sleepFn blocks until the pacing wait elapses or ctx is done; tests
+	// replace it to observe waits without real time.
+	sleepFn func(ctx context.Context, d time.Duration) error
 }
 
 // NewExecutor builds an executor. attempts may be nil (attempts not recorded —
@@ -127,8 +143,86 @@ func NewExecutor(resolver *Resolver, budget *BudgetKeeper, attempts AttemptRecor
 		numberer:     nil,
 		heloDomain:   DefaultHeloDomain,
 		tlsConfigFor: func(host string) *tls.Config { return &tls.Config{ServerName: host} },
+		rateKeeper:   NewMessageRateKeeper(),
+		clockFn:      nowFunc,
+		sleepFn:      sleepCtx,
 	}
 }
+
+// SetMessageRatePerMin sets the process-wide per-message send rate
+// (messages/minute per sending domain; 0 disables pacing — the default).
+func (e *Executor) SetMessageRatePerMin(n int) { e.msgRatePerMin = n }
+
+// SetDeliveryThrottleKBPS sets the per-connection transfer throttle (SF-108;
+// 0 = unlimited — the default).
+func (e *Executor) SetDeliveryThrottleKBPS(kbps int) {
+	if kbps > 0 {
+		e.throttleBPS = int64(kbps) * 1024
+	}
+}
+
+// SetClock replaces the pacer's clock source (tests only). The session
+// runner's package nowFunc is deliberately left alone: SMTP deadlines must
+// stay on the real clock.
+func (e *Executor) SetClock(fn func() time.Time) {
+	if fn != nil {
+		e.clockFn = fn
+	}
+}
+
+// SetSleeper replaces the pacing wait implementation (tests only).
+func (e *Executor) SetSleeper(fn func(ctx context.Context, d time.Duration) error) {
+	if fn != nil {
+		e.sleepFn = fn
+	}
+}
+
+// sleepCtx blocks for d, honoring cancellation, never returning nil error on
+// a full wait.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// throttleWait computes and applies the per-message pacing wait (CA-04):
+// consults the keeper immediately before a MAIL FROM, jitters like the
+// budget-defer machinery, observes the wait on the metrics histogram, and
+// records a durable attempt row for sustained waits so an operator can tell
+// throttling apart from transport failures in the attempt log.
+func (e *Executor) throttleWait(ctx context.Context, env Envelope, attemptBase, attemptsSoFar int, bindIP string, sendingDomain string, p Policy) error {
+	rate := p.MsgRatePerMin
+	if rate <= 0 {
+		rate = e.msgRatePerMin
+	}
+	if rate <= 0 || e.rateKeeper == nil {
+		return nil
+	}
+	wait := deferWithJitter(e.rateKeeper.Wait(sendingDomain, rate, e.clockFn()), p.ThrottleJitter)
+	if wait <= 0 {
+		return nil
+	}
+	metrics.ObserveMTAThrottleWait(wait.Seconds())
+	if wait >= sustainedThrottleWait {
+		e.record(env, attemptRow(env, attemptBase+attemptsSoFar, "", "", bindIP, 0,
+			fmt.Sprintf("4.7.1 per-message rate %d/min paced for sender domain %s; wait %s",
+				rate, sendingDomain, wait.Round(time.Millisecond)),
+			models.MTAAttemptThrottleWait, nowFunc(), nowFunc()))
+	}
+	return e.sleepFn(ctx, wait)
+}
+
+// sustainedThrottleWait is the pacing wait at or above which a durable
+// throttle_wait attempt row is written — short waits stay metric-only.
+const sustainedThrottleWait = 5 * time.Second
 
 // SetHeloDomain overrides the EHLO identifier (process-wide EHLO name).
 func (e *Executor) SetHeloDomain(d string) {
@@ -213,6 +307,20 @@ func (e *Executor) Deliver(ctx context.Context, spec DeliverySpec, env Envelope)
 			e.budget.Record(domain, nowFunc())
 		}
 
+		// SF-17: a per-domain outbound size cap rejects oversized messages
+		// before any dial — a permanent policy refusal the sender learns
+		// about through the SF-10 DSN chain for locally-originated mail.
+		if policy.MaxMessageSize > 0 && int64(len(env.Msg)) > policy.MaxMessageSize {
+			e.record(env, attemptRow(env, attemptBase, "", "", bindIP, 552,
+				fmt.Sprintf("5.3.4 message exceeds the %d-octet policy limit for domain %s", policy.MaxMessageSize, domain),
+				models.MTAAttemptPermanentFailure, nowFunc(), nowFunc()))
+			return result, &email.SendError{
+				Stage: "POLICY", Code: 552,
+				Msg: fmt.Sprintf("5.3.4 message size exceeds the domain policy limit (%d octets)", policy.MaxMessageSize),
+				Err: fmt.Errorf("mta: message exceeds per-domain size cap for %s", domain),
+			}
+		}
+
 		hosts, rerr := e.resolver.Resolve(ctx, domain)
 		if rerr != nil {
 			e.record(env, attemptRow(env, attemptBase, "", "", bindIP, 0, rerr.Error(),
@@ -238,6 +346,13 @@ func (e *Executor) Deliver(ctx context.Context, spec DeliverySpec, env Envelope)
 			if err := ctx.Err(); err != nil {
 				return result, email.WrapSendError("DIAL", "", err)
 			}
+			// CA-04: pace the MAIL FROM against the per-sending-domain
+			// message rate before dialing — the wait lands between the
+			// budget gate and the session, so neither the budget accounting
+			// nor the attempt ordinal shifts.
+			if err := e.throttleWait(ctx, env, attemptBase, result.Attempts, bindIP, spec.SenderDomain, policy); err != nil {
+				return result, email.WrapSendError("THROTTLE", "", err)
+			}
 			attemptNo := attemptBase + result.Attempts
 			startedAt := nowFunc()
 
@@ -247,9 +362,18 @@ func (e *Executor) Deliver(ctx context.Context, spec DeliverySpec, env Envelope)
 				HeloDomain: e.heloDomain,
 				BindIP:     parseBindIP(bindIP),
 				Target:     TargetMX,
-				TLSConfig:  e.tlsConfigFor(h.Host),
+				TLSConfig:          e.tlsConfigFor(h.Host),
+				ThrottleBytesPerSec: e.throttleBPS,
 			}
-			sres, serr := runSession(ctx, opts, env.From, rcpts, env.Msg)
+			// SF-13: this attempt's message goes out with its own Received:
+			// trace header — MX host plus the attempt identity (email id +
+			// attempt ordinal, the composite lookup of the attempt row) as
+			// the queue id. The stored payload is never mutated: each
+			// attempt (and each asynq retry) prepends a fresh hop to a copy.
+			msg := mailtrace.Prepend(env.Msg, mailtrace.OutboundReceived(
+				e.heloDomain, h.Host,
+				fmt.Sprintf("%d.%d", env.EmailID, attemptNo), startedAt))
+			sres, serr := runSession(ctx, opts, env.From, rcpts, msg)
 			finishedAt := nowFunc()
 			result.Attempts++
 

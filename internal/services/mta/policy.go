@@ -56,6 +56,13 @@ type Policy struct {
 	// HourlyBudget caps deliveries to the domain per hour window; 0 means
 	// unlimited. Exhaustion defers the message (421-style) with jitter.
 	HourlyBudget int
+	// MsgRatePerMin paces per-message sends for this domain to n messages per
+	// minute (CA-04); 0 falls back to the process-wide
+	// POSTA_MTA_MSG_RATE_PER_MIN default (which is itself 0 = disabled).
+	MsgRatePerMin int
+	// MaxMessageSize caps this sending domain's outbound message octets
+	// (SF-17, domains.max_message_size); 0 keeps the listener default.
+	MaxMessageSize int64
 	// ThrottleJitter is the ±jitter applied to computed defer delays.
 	ThrottleJitter time.Duration
 }
@@ -76,7 +83,9 @@ func PolicyFor(d *models.Domain) Policy {
 		if d.HourlyBudget > 0 {
 			p.HourlyBudget = d.HourlyBudget
 		}
-	}
+		if d.MaxMessageSize > 0 {
+			p.MaxMessageSize = d.MaxMessageSize
+		}	}
 	return p
 }
 
@@ -145,6 +154,50 @@ func (b *BudgetKeeper) Record(domain string, now time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.counts[domain] = append(b.counts[domain], now)
+}
+
+// MessageRateKeeper paces per-message sends per SENDING domain (CA-04): a
+// minimum-interval rate limiter (token bucket of depth one) consulted by the
+// delivery executor immediately before each MAIL FROM, so a burst of queued
+// mail to a freshly warmed domain goes out at the configured rate instead of
+// all at once. The rate is configured process-wide via
+// POSTA_MTA_MSG_RATE_PER_MIN (0 = disabled); per-domain overrides ride the
+// Policy.MsgRatePerMin field when a domain-row column lands.
+//
+// Same in-process limitation as BudgetKeeper: each worker process keeps its
+// own pacer, so an N-process deployment paces at roughly N× the rate.
+type MessageRateKeeper struct {
+	mu   sync.Mutex
+	next map[string]time.Time // sending domain → earliest instant the next message may start
+}
+
+// NewMessageRateKeeper builds a per-sending-domain message pacer.
+func NewMessageRateKeeper() *MessageRateKeeper {
+	return &MessageRateKeeper{next: map[string]time.Time{}}
+}
+
+// Wait returns how long the next message for sendingDomain must wait to hold
+// the rate (messages per minute; <=0 disables pacing) and reserves the slot.
+// The reservation always advances by one interval from the reserved start, so
+// callers that ignore the returned wait still pace correctly.
+func (k *MessageRateKeeper) Wait(sendingDomain string, ratePerMin int, now time.Time) time.Duration {
+	if ratePerMin <= 0 {
+		return 0
+	}
+	interval := time.Minute / time.Duration(ratePerMin)
+	if interval <= 0 {
+		interval = time.Second
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+
+	var wait time.Duration
+	if nxt, ok := k.next[sendingDomain]; ok && nxt.After(now) {
+		wait = nxt.Sub(now)
+	}
+	start := now.Add(wait)
+	k.next[sendingDomain] = start.Add(interval)
+	return wait
 }
 
 // deferWithJitter adds ±jitter to a defer delay, never returning negative.

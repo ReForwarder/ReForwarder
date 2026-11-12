@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"net/mail"
+	"regexp"
 	"strings"
 	"time"
 
@@ -77,6 +78,13 @@ type EmailSendHandler struct {
 	ipPools  *repositories.IPPoolRepository
 	onSent   func()
 	onFailed func()
+	// dsnMailer builds and enqueues RFC 3464 delivery-status notifications
+	// for permanently failed locally-originated mail (SF-10). Nil, or
+	// dsnEnabled false (POSTA_DSN_ENABLED default), keeps the pre-SF-10
+	// behavior: failures are recorded but no bounce notice goes out.
+	dsnMailer      email.DSNMailer
+	dsnEnabled     bool
+	dsnReportingMTA string
 }
 
 func NewEmailSendHandler(
@@ -178,11 +186,30 @@ func (h *EmailSendHandler) SetIPPoolRepo(r *repositories.IPPoolRepository) {
 // match DSN bounces back to this exact message. Nil keeps today's envelope.
 func (h *EmailSendHandler) SetVerp(v *inbound.Verp) { h.verp = v }
 
+// SetDSNMailer wires the RFC 3464 notification seam (SF-10); nil disables it.
+func (h *EmailSendHandler) SetDSNMailer(m email.DSNMailer) { h.dsnMailer = m }
+
+// SetDSNEnabled gates DSN generation (POSTA_DSN_ENABLED, default false).
+func (h *EmailSendHandler) SetDSNEnabled(enabled bool) { h.dsnEnabled = enabled }
+
+// SetDSNReportingMTA sets the identity stamped into the DSN's Reporting-MTA
+// field (POSTA_MTA_EHLO_NAME).
+func (h *EmailSendHandler) SetDSNReportingMTA(name string) {
+	if name != "" {
+		h.dsnReportingMTA = name
+	}
+}
+
 // envelopeSender is the SMTP MAIL FROM for em: the VERP bounce address when
 // the return-path feature is on and the message/sender allow one, else the
 // plain envelope address (the pre-VERP behavior, also the relay-path seam —
-// relay mode delegates the return path to the upstream provider).
+// relay mode delegates the return path to the upstream provider). SF-10: a
+// system_dsn row always carries a NULL reverse path — an undeliverable DSN
+// must never bounce again.
 func (h *EmailSendHandler) envelopeSender(em *models.Email) string {
+	if em.Provenance == models.EmailProvenanceSystemDSN {
+		return ""
+	}
 	if h.verp != nil {
 		if addr, ok := h.verp.EnvelopeFrom(em.UUID, em.Sender); ok {
 			return addr
@@ -330,6 +357,13 @@ func (h *EmailSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error
 		return nil
 	}
 
+	if em.Provenance == models.EmailProvenanceSystemDSN && em.TextBody != "" {
+		// SF-10: the DSN's TextBody IS the complete multipart/report message;
+		// relay it verbatim with a null reverse path, DKIM-signed for the
+		// MAILER-DAEMON domain when a key exists.
+		return h.sendRawRelay(em, smtpServer, sharedServerID, prep.campMsg)
+	}
+
 	if err := h.sender.Send(smtpServer, em.Sender, prep.recipients, em.Subject, em.HTMLBody, em.TextBody, prep.attachments, prep.headers, em.ListUnsubscribeURL, em.ListUnsubscribeMailto, em.ListUnsubscribePost); err != nil {
 		// Increment the shared server's failure counter regardless of outcome.
 		if sharedServerID != 0 && h.serverRepo != nil {
@@ -341,6 +375,39 @@ func (h *EmailSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error
 	// Success
 	h.handleSendSuccess(em, smtpServer, sharedServerID, prep.campMsg, prep.recipients, nil)
 	return nil
+}
+
+// sendRawRelay delivers a system_dsn row through the relay path (SF-10): the
+// stored TextBody crosses verbatim; suppression/unsubscribe layers were never
+// consulted (system traffic, like system_forward copies).
+func (h *EmailSendHandler) sendRawRelay(em *models.Email, smtpServer *models.SMTPServer, sharedServerID uint, campMsg *models.CampaignMessage) error {
+	raw := []byte(em.TextBody)
+	// DKIM (R-02): sign for the MAILER-DAEMON domain (em.Sender), mirroring
+	// the direct path's signing step. A signing error fails the send (asynq
+	// retries); a missing key keeps the DSN unsigned.
+	signer := email.CurrentDkimSigner()
+	if signer != nil {
+		if domain := senderDomain(em.Sender); domain != "" {
+			signed, serr := signer.SignForDomain(raw, domain)
+			if serr != nil {
+				return h.handleSendFailure(em, smtpServer, sharedServerID, campMsg, fmt.Errorf("DKIM signing failed: %w", serr), nil)
+			}
+			raw = signed
+		}
+	}
+	if err := h.sender.SendRaw(smtpServer, "", prepRecipients(em), raw); err != nil {
+		if sharedServerID != 0 && h.serverRepo != nil {
+			go h.serverRepo.IncrementFailedCount(sharedServerID)
+		}
+		return h.handleSendFailure(em, smtpServer, sharedServerID, campMsg, err, nil)
+	}
+	h.handleSendSuccess(em, smtpServer, sharedServerID, campMsg, prepRecipients(em), map[string]any{"delivery_mode": "dsn"})
+	return nil
+}
+
+// prepRecipients lists the envelope recipients of the row verbatim.
+func prepRecipients(em *models.Email) []string {
+	return append([]string(nil), em.Recipients...)
 }
 
 // outgoingPrep carries the delivery payload prepared by prepareOutgoing,
@@ -470,6 +537,10 @@ func (h *EmailSendHandler) handleSendFailure(em *models.Email, smtpServer *model
 	}
 	if isRejection && cls.Permanent() && h.autoSuppress {
 		h.handlePermanentRejection(em, rejection, cls)
+		// SF-10: the suppressed rejection is terminal — the sender learns
+		// through an RFC 3464 notification (system rows and the double-bounce
+		// stop never notify).
+		h.maybeSendDSN(em, rejection)
 		logger.Info("worker: recipient permanently rejected, suppressed",
 			"id", em.ID, "recipient", rejection.Recipient, "code", rejection.Code, "classification", cls)
 		return nil
@@ -496,6 +567,63 @@ func (h *EmailSendHandler) handleSendFailure(em *models.Email, smtpServer *model
 		"id", em.ID, "attempt", em.RetryCount, "classification", cls, "error", err)
 	// Return error so Asynq retries the task
 	return fmt.Errorf("SMTP send failed: %w", err)
+}
+
+// maybeSendDSN emits the delivery-status notification for a terminal
+// permanent failure. Best-effort: a notification failure is logged, never
+// fails the task (the original failure handling already ran).
+func (h *EmailSendHandler) maybeSendDSN(em *models.Email, rejection *email.SendError) {
+	emitDSNFor(h.dsnMailer, h.dsnEnabled, h.dsnReportingMTA, em, rejection)
+}
+
+// derefWorkspace converts the row's nullable workspace to the request field.
+func derefWorkspace(id *uint) uint {
+	if id == nil {
+		return 0
+	}
+	return *id
+}
+
+// enhancedStatusFrom extracts an enhanced status code token from the reply
+// text, falling back to the bare SMTP code mapped onto the general class
+// (e.g. 550 → 5.5.0). Empty when neither is usable.
+func enhancedStatusFrom(msg string, code int) string {
+	if m := enhancedCodeRe.FindStringSubmatch(msg); m != nil {
+		return m[1]
+	}
+	if code >= 500 && code < 600 {
+		return fmt.Sprintf("5.5.0")
+	}
+	if code >= 400 && code < 500 {
+		return fmt.Sprintf("4.4.0")
+	}
+	return ""
+}
+
+var enhancedCodeRe = regexp.MustCompile(`\b([245]\.\d{1,3}\.\d{1,3})\b`)
+
+// originalMessageID extracts the Message-ID the failed message carried (used
+// to thread References/In-Reply-To on the notification). Headers live on the
+// row as JSON; a missing or unparsable header set yields "".
+func originalMessageID(em *models.Email) string {
+	if em.HeadersJSON == "" {
+		return ""
+	}
+	var headers map[string]string
+	if err := json.Unmarshal([]byte(em.HeadersJSON), &headers); err != nil {
+		return ""
+	}
+	return headers["Message-ID"]
+}
+
+// outboundMessage builds the wire message for one email row. system_dsn
+// rows (SF-10) carry the complete RFC 5322 multipart/report in TextBody -
+// it crosses verbatim; everything else goes through the standard builder.
+func (h *EmailSendHandler) outboundMessage(em *models.Email, prep *outgoingPrep) []byte {
+	if em.Provenance == models.EmailProvenanceSystemDSN && em.TextBody != "" {
+		return []byte(em.TextBody)
+	}
+	return email.BuildMessage(em.Sender, prep.recipients, em.Subject, em.HTMLBody, em.TextBody, prep.attachments, prep.headers, em.ListUnsubscribeURL, em.ListUnsubscribeMailto, em.ListUnsubscribePost)
 }
 
 // handleSendSuccess finalizes a delivered email for either delivery mode:
@@ -575,12 +703,19 @@ func (h *EmailSendHandler) processDirect(ctx context.Context, em *models.Email, 
 		return nil
 	}
 
-	msg := email.BuildMessage(em.Sender, prep.recipients, em.Subject, em.HTMLBody, em.TextBody, prep.attachments, prep.headers, em.ListUnsubscribeURL, em.ListUnsubscribeMailto, em.ListUnsubscribePost)
+	// SF-10: a system_dsn row's TextBody IS the complete RFC 5322
+	// multipart/report message — send it verbatim instead of re-building.
+	msg := h.outboundMessage(em, prep)
 	// OB-2 (ADR-002 decision 4): the VERP bounce address is the envelope
 	// sender when the return-path feature is on — bounces to it are matched
 	// back to this message by the inbound receiver's DSN processor.
+	// system_dsn rows carry a null reverse path (see envelopeSender), and
+	// DKIM signs for the MAILER-DAEMON domain (the header From's domain).
 	envelopeFrom := h.envelopeSender(em)
 	senderDom := senderDomain(envelopeFrom)
+	if em.Provenance == models.EmailProvenanceSystemDSN {
+		senderDom = senderDomain(em.Sender)
+	}
 
 	// DKIM signing (R-02): sign the final message for the sender's domain,
 	// mirroring SMTPSender.Send's signing step. A signing error fails the
@@ -830,6 +965,11 @@ type ExhaustedErrorHandler struct {
 	dispatcher *webhook.Dispatcher
 	recorder   *emailhistory.Recorder
 	onFailed   func()
+	// SF-10: RFC 3464 notification seam — retries exhausted is the terminal
+	// bounce for locally-originated mail.
+	dsnMailer       email.DSNMailer
+	dsnEnabled      bool
+	dsnReportingMTA string
 }
 
 func NewExhaustedErrorHandler(emailRepo *repositories.EmailRepository, dispatcher *webhook.Dispatcher, onFailed func()) *ExhaustedErrorHandler {
@@ -844,6 +984,15 @@ func NewExhaustedErrorHandler(emailRepo *repositories.EmailRepository, dispatche
 // disables recording.
 func (e *ExhaustedErrorHandler) SetRecorder(r *emailhistory.Recorder) {
 	e.recorder = r
+}
+
+// SetDSN wires the SF-10 notification seam (POSTA_DSN_ENABLED gates it).
+func (e *ExhaustedErrorHandler) SetDSN(m email.DSNMailer, enabled bool, reportingMTA string) {
+	e.dsnMailer = m
+	e.dsnEnabled = enabled
+	if reportingMTA != "" {
+		e.dsnReportingMTA = reportingMTA
+	}
 }
 
 func (e *ExhaustedErrorHandler) HandleError(_ context.Context, t *asynq.Task, err error) {
@@ -864,10 +1013,63 @@ func (e *ExhaustedErrorHandler) HandleError(_ context.Context, t *asynq.Task, er
 	_ = e.emailRepo.Update(em)
 	emailhistory.RecordFailed(e.recorder, em, em.ErrorMessage, map[string]any{"retry_count": em.RetryCount})
 	e.dispatcher.Dispatch(em.UserID, em.WorkspaceID, "email.failed", em.UUID, em.Sender)
+	// SF-10: retries exhausted is the terminal bounce — the sender learns
+	// through an RFC 3464 notification (system rows never notify).
+	emitDSNFor(e.dsnMailer, e.dsnEnabled, e.dsnReportingMTA, em, nil)
 	if e.onFailed != nil {
 		e.onFailed()
 	}
 	logger.Error("worker: email permanently failed", "id", em.ID, "error", err)
+}
+
+// emitDSNFor builds and enqueues the RFC 3464 notification for one terminally
+// failed row (SF-10). Shared by the send handler and the exhausted-error
+// handler; rejection may be nil (exhaustion without a live SMTP verdict).
+func emitDSNFor(m email.DSNMailer, enabled bool, reportingMTA string, em *models.Email, rejection *email.SendError) {
+	if m == nil || !enabled {
+		return
+	}
+	if em.Provenance == models.EmailProvenanceSystemForward || em.Provenance == models.EmailProvenanceSystemDSN {
+		// The double-bounce stop: system copies and DSNs never notify.
+		return
+	}
+	status := ""
+	diagnostic := ""
+	remoteMTA := ""
+	if rejection != nil {
+		diagnostic = rejection.Msg
+		remoteMTA = em.SMTPHostname
+		status = enhancedStatusFrom(rejection.Msg, rejection.Code)
+	} else {
+		// Exhaustion without a live verdict: carry the stored error text and
+		// whatever enhanced code the remote quoted into it.
+		diagnostic = em.ErrorMessage
+		status = enhancedStatusFrom(em.ErrorMessage, 0)
+	}
+	rcpts := make([]email.DSNRecipient, 0, len(em.Recipients))
+	for _, r := range em.Recipients {
+		rcpts = append(rcpts, email.DSNRecipient{
+			Recipient:  r,
+			Action:     "failed",
+			Status:     status,
+			Diagnostic: diagnostic,
+			RemoteMTA:  remoteMTA,
+		})
+	}
+	req := &email.DSNRequest{
+		UserID:            em.UserID,
+		WorkspaceID:       derefWorkspace(em.WorkspaceID),
+		ReportingMTA:      reportingMTA,
+		Sender:            email.EnvelopeAddress(em.Sender),
+		OriginalSubject:   em.Subject,
+		OriginalMessageID: originalMessageID(em),
+		Recipients:        rcpts,
+	}
+	if _, err := m.SendDSN(context.Background(), req); err != nil {
+		logger.Error("worker: DSN generation failed", "id", em.ID, "error", err)
+	} else {
+		logger.Info("worker: DSN generated for permanently failed mail", "id", em.ID, "sender", req.Sender)
+	}
 }
 
 // AutomationRunHandler processes automation:run tasks by advancing one journey

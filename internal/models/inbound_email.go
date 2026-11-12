@@ -40,6 +40,9 @@ type InboundSource string
 const (
 	InboundSourceSMTP    InboundSource = "smtp"
 	InboundSourceWebhook InboundSource = "webhook"
+	// InboundSourceLMTP — mail handed over by a local delivery agent over
+	// the RFC 2033 LMTP listener (SF-01); same ingest pipeline as SMTP.
+	InboundSourceLMTP InboundSource = "lmtp"
 )
 
 type InboundEmail struct {

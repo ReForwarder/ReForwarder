@@ -21,9 +21,13 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -83,10 +87,18 @@ type InboundFilterOptions struct {
 	// ExternalHookTimeout bounds the consult
 	// (POSTA_SPAM_EXTERNAL_FILTER_TIMEOUT, default 5s).
 	ExternalHookTimeout time.Duration
+	// BlockedExtensions lists attachment filename extensions quarantined on
+	// sight (SF-42; POSTA_SPAM_ATTACHMENT_BLOCK_EXT, e.g. ".exe,.scr").
+	// Empty disables the extension blocklist.
+	BlockedExtensions []string
+	// BlockedHashes lists SHA-256 attachment digests quarantined on sight
+	// (SF-42; POSTA_SPAM_ATTACHMENT_BLOCK_SHA256). Empty disables the hash
+	// blocklist.
+	BlockedHashes []string
 }
 
-// InboundFilter orchestrates scan → score → consult → disposition for one
-// durable inbound record.
+// InboundFilter orchestrates blocklist → scan → score → consult →
+// disposition for one durable inbound record.
 type InboundFilter struct {
 	repo      *repositories.InboundEmailRepository
 	svc       *inbound.Service
@@ -97,6 +109,10 @@ type InboundFilter struct {
 	opts      InboundFilterOptions
 	onFlagged func()
 	onScanned func()
+	// blockExts / blockHashes are the normalized SF-42 blocklists (lowercase
+	// ".ext" / lowercase hex digest sets; empty maps = disabled).
+	blockExts   map[string]bool
+	blockHashes map[string]bool
 }
 
 // NewInboundFilter assembles the step. filter may be nil together with
@@ -117,14 +133,34 @@ func NewInboundFilter(
 	if opts.ExternalHookTimeout == 0 {
 		opts.ExternalHookTimeout = webhook.FilterReplyTimeout
 	}
+	exts := make(map[string]bool, len(opts.BlockedExtensions))
+	for _, e := range opts.BlockedExtensions {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e == "" {
+			continue
+		}
+		if !strings.HasPrefix(e, ".") {
+			e = "." + e
+		}
+		exts[e] = true
+	}
+	hashes := make(map[string]bool, len(opts.BlockedHashes))
+	for _, h := range opts.BlockedHashes {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if h != "" {
+			hashes[h] = true
+		}
+	}
 	return &InboundFilter{
-		repo:      repo,
-		svc:       svc,
-		blobStore: blobStore,
-		filter:    filter,
-		scanner:   scanner,
-		hook:      hook,
-		opts:      opts,
+		repo:        repo,
+		svc:         svc,
+		blobStore:   blobStore,
+		filter:      filter,
+		scanner:     scanner,
+		hook:        hook,
+		opts:        opts,
+		blockExts:   exts,
+		blockHashes: hashes,
 	}
 }
 
@@ -143,6 +179,13 @@ func (f *InboundFilter) OnScanned(fn func()) { f.onScanned = fn }
 func (f *InboundFilter) Run(ctx context.Context, rec *models.InboundEmail) bool {
 	if f == nil || !f.opts.Enabled || f.filter == nil || rec == nil {
 		return true
+	}
+
+	// 0. Attachment blocklists (SF-42): a blocked extension or SHA-256
+	// digest quarantines on sight — the cheapest check first, through the
+	// same disposition path as malware (explicit, event-backed).
+	if f.blockedAttachment(ctx, rec) {
+		return false
 	}
 
 	// 1. Malware (GAP-47): positives quarantine with the signature recorded.
@@ -233,6 +276,48 @@ func verdictClientIP(row *models.InboundAuthResult) string {
 		return ""
 	}
 	return row.ClientIP
+}
+
+// blockedAttachment applies the SF-42 blocklists to the record's
+// attachments: a blocked filename extension or a blocked SHA-256 content
+// digest quarantines the record with an explicit reason (never a silent
+// drop). Reports whether the record was disposed.
+func (f *InboundFilter) blockedAttachment(ctx context.Context, rec *models.InboundEmail) (disposed bool) {
+	if len(f.blockExts) == 0 && len(f.blockHashes) == 0 {
+		return false
+	}
+	atts := f.loadAttachments(ctx, rec)
+	for _, att := range atts {
+		var reason string
+		ext := strings.ToLower(filepath.Ext(att.Filename))
+		if ext != "" && f.blockExts[ext] {
+			reason = fmt.Sprintf("attachment_blocked:%s", ext)
+		} else if len(f.blockHashes) > 0 && len(att.Content) > 0 {
+			sum := sha256.Sum256(att.Content)
+			if f.blockHashes[hex.EncodeToString(sum[:])] {
+				reason = "attachment_blocked:sha256"
+			}
+		}
+		if reason == "" {
+			continue
+		}
+		disp := inbound.FilterDisposition{
+			Disposition: spamfilter.DispositionQuarantine,
+			Score:       malwareFloorScore,
+			Reasons:     []string{reason},
+		}
+		if err := f.svc.ApplyFilterDisposition(ctx, rec, disp); err != nil {
+			logger.Error("filter: failed to quarantine blocked attachment",
+				"inbound_id", rec.UUID, "filename", att.Filename, "error", err)
+		}
+		logger.Warn("filter: blocked attachment quarantined",
+			"inbound_id", rec.UUID, "filename", att.Filename, "reason", reason)
+		if f.onFlagged != nil {
+			f.onFlagged()
+		}
+		return true
+	}
+	return false
 }
 
 // scanAttachments scans every stored attachment through clamd. It reports

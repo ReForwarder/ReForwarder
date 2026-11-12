@@ -28,6 +28,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"strconv"
 	"time"
 
@@ -39,6 +40,7 @@ import (
 	"github.com/goposta/posta/internal/cron/jobs"
 	"github.com/goposta/posta/internal/logging"
 	"github.com/goposta/posta/internal/metrics"
+	"github.com/goposta/posta/internal/memorywatch"
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/observability"
 	"github.com/goposta/posta/internal/routes"
@@ -93,6 +95,7 @@ type serverResources struct {
 	redis          *redis.Client
 	smtpInbound    *smtp.Server
 	smtpRelay      *smtp.Server
+	lmtp *smtp.Server
 	smtpSubmission *smtp.Server
 	// pop3 is the OB-4 W3 POP3 server (ADR-004 decision 2); nil unless
 	// POSTA_POP3_ENABLED=true and the listener started.
@@ -109,9 +112,19 @@ type serverResources struct {
 	// loop at shutdown.
 	certMgr    *certmanager.Manager
 	certCancel context.CancelFunc
+	// memWatch is the SF-108 process memory watchdog (nil unless
+	// POSTA_MEMORY_BUDGET_MB is set); the SMTP listeners consult it for
+	// session-refusal backpressure and shutdown releases its sampler.
+	memWatch *memorywatch.Watchdog
 	// otlpStop stops the SF-93 OTLP push exporter (OB-6 W5); nil unless
 	// POSTA_OTLP_ENDPOINT is set.
 	otlpStop func()
+	// embeddedWorker is the in-process asynq worker started by
+	// startEmbeddedWorker (SF-109); nil unless POSTA_EMBEDDED_WORKER is on.
+	// shutdownServer drains it BEFORE closing the producer/Redis so in-flight
+	// task claims finish (or are released back to Redis for another replica)
+	// while the queue connection is still usable.
+	embeddedWorker *asynq.Server
 }
 
 func runServer(cli *okapicli.CLI) {
@@ -156,6 +169,11 @@ func runServer(cli *okapicli.CLI) {
 				observability.CaptureGlobalFatal("failed to run migrations: " + err.Error())
 				logger.Fatal("failed to run migrations", "error", err)
 			}
+
+			// SF-108/SF-43: the process memory watchdog arms the SMTP
+			// listeners' session-refusal backpressure while the heap exceeds
+			// POSTA_MEMORY_BUDGET_MB (0 = disabled, no sampler).
+			res.memWatch = memorywatch.Start(context.Background(), cfg.MemoryBudgetMB, 0)
 
 			if err := upgrade.Run(context.Background(), res.db, config.Version, upgrade.Options{
 				AllowDowngrade:  cfg.AllowDowngrade,
@@ -298,7 +316,14 @@ func runServer(cli *okapicli.CLI) {
 			if !cfg.DevMode {
 				res.producer = worker.NewProducer(cfg.Redis.AsynqRedisOpt(), cfg.WorkerMaxRetries)
 				if cfg.EmbeddedWorker {
-					startEmbeddedWorker(res.db, cfg, res.blobStore, notifier, inboundBus)
+					// SF-109: keep the worker handle so shutdownServer can drain
+					// in-flight task claims before the producer/Redis close.
+					ew, ewErr := startEmbeddedWorker(res.db, cfg, res.blobStore, notifier, inboundBus)
+					if ewErr != nil {
+						logger.Error("failed to start embedded worker", "error", ewErr)
+					} else {
+						res.embeddedWorker = ew
+					}
 				}
 			}
 
@@ -320,10 +345,21 @@ func runServer(cli *okapicli.CLI) {
 			}
 
 			if cfg.InboundEnabled && !cfg.DevMode {
-				if srv, err := startInboundSMTPServer(res.db, cfg, res.blobStore, res.producer, inboundBus, secEng); err != nil {
+				if srv, err := startInboundSMTPServer(res.db, cfg, res.blobStore, res.producer, inboundBus, secEng, res.memWatch); err != nil {
 					logger.Error("failed to start inbound SMTP server", "error", err)
 				} else {
 					res.smtpInbound = srv
+				}
+			}
+
+			// SF-01 (RFC 2033): the LMTP listener for local delivery agents,
+			// sharing the inbound Backend with the SMTP receiver. Off by
+			// default (POSTA_LMTP_ENABLED).
+			if cfg.LMTPEnabled && !cfg.DevMode {
+				if srv, err := startLMTPServer(res.db, cfg, res.blobStore, res.producer, inboundBus, secEng, res.memWatch); err != nil {
+					logger.Error("failed to start LMTP server", "error", err)
+				} else {
+					res.lmtp = srv
 				}
 			}
 
@@ -357,7 +393,7 @@ func runServer(cli *okapicli.CLI) {
 			}
 
 			if cfg.SMTPRelayEnabled && !cfg.DevMode {
-				if srv, err := startSMTPRelayServer(res.db, cfg, emailSvc, secEng); err != nil {
+				if srv, err := startSMTPRelayServer(res.db, cfg, emailSvc, secEng, res.memWatch); err != nil {
 					observability.CaptureGlobalFatal("failed to start SMTP relay server: " + err.Error())
 					logger.Fatal("failed to start SMTP relay server", "error", err)
 				} else {
@@ -369,7 +405,7 @@ func runServer(cli *okapicli.CLI) {
 			// 587 feeding accepted messages into the same pipeline as API
 			// sends. Off by default (POSTA_SUBMISSION_ENABLED).
 			if cfg.SubmissionEnabled && !cfg.DevMode {
-				if srv, err := startSubmissionServer(res.db, cfg, emailSvc, secEng, res.certMgr); err != nil {
+				if srv, err := startSubmissionServer(res.db, cfg, emailSvc, secEng, res.certMgr, res.memWatch); err != nil {
 					logger.Error("failed to start submission server", "error", err)
 				} else {
 					res.smtpSubmission = srv
@@ -623,6 +659,22 @@ func attachVerification(svc *inbound.Service, db *gorm.DB, cfg *config.Config) {
 	svc.EnableVerification(db, cfg.InboundHostname)
 }
 
+// splitList splits a comma-separated env value into trimmed entries
+// (empty entries dropped); an empty string yields nil.
+func splitList(v string) []string {
+	if strings.TrimSpace(v) == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // newInboundFilter builds the spam/malware step (OB-2, ADR-006): the rules
 // baseline scorer over the persisted auth verdicts + allowlisted DNSBL zones
 // (POSTA_SPAM_DNSBL_ZONES) + email_events sender reputation, the clamd
@@ -660,6 +712,9 @@ func newInboundFilter(db *gorm.DB, cfg *config.Config, svc *inbound.Service, blo
 			ExternalHook:        cfg.SpamExternalFilter,
 			ExternalHookEvent:   cfg.SpamExternalFilterEvent,
 			ExternalHookTimeout: cfg.SpamExternalFilterTO,
+			// SF-42 attachment blocklists (quarantine on sight).
+			BlockedExtensions: splitList(cfg.SpamBlockedExt),
+			BlockedHashes:     splitList(cfg.SpamBlockedHashes),
 		},
 	)
 }
@@ -673,7 +728,103 @@ func startInboundSMTPServer(
 	producer *worker.Producer,
 	bus *eventbus.EventBus,
 	secEng *security.Engine,
+	memWatch *memorywatch.Watchdog,
 ) (*smtp.Server, error) {
+	backend, err := newInboundBackend(db, cfg, blobStore, producer, bus, secEng, memWatch)
+	if err != nil {
+		return nil, err
+	}
+	srv, err := inbound.NewSMTPServer(backend, inbound.SMTPConfig{
+		Host:           cfg.InboundSMTPHost,
+		Port:           cfg.InboundSMTPPort,
+		Hostname:       cfg.InboundHostname,
+		MaxMessageSize: cfg.InboundMaxMessageSize,
+		TLSMode:        cfg.InboundTLSMode,
+		TLSCertFile:    cfg.InboundTLSCertFile,
+		TLSKeyFile:     cfg.InboundTLSKeyFile,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	go func() {
+		logger.Info("inbound SMTP server listening", "addr", srv.Addr, "tls_mode", cfg.InboundTLSMode)
+		// Serve on a security-wrapped listener instead of ListenAndServe:
+		// the CountingListener enforces the ban snapshot at TCP accept and
+		// records connect/abort signals. Inbound TLS is STARTTLS (upgraded
+		// in-band by go-smtp), so the raw listener stays unwrapped.
+		l, err := net.Listen("tcp", srv.Addr)
+		if err != nil {
+			logger.Error("inbound SMTP server error", "error", err)
+			return
+		}
+		listener := security.NewCountingListener(l, secEng, cfg.InboundSMTPPort, "smtp")
+		err = srv.Serve(listener)
+		if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, smtp.ErrServerClosed) {
+			logger.Error("inbound SMTP server error", "error", err)
+		}
+	}()
+	return srv, nil
+}
+
+// startLMTPServer configures and launches the RFC 2033 LMTP listener (SF-01)
+// for local delivery agents. It shares the inbound Backend — and therefore
+// route validation, VERP/TLS-RPT allowlists, rate limiting and the security
+// engine — with the SMTP receiver, on its own gated port
+// (POSTA_LMTP_ENABLED, default off). Returns the server for shutdown.
+func startLMTPServer(
+	db *gorm.DB,
+	cfg *config.Config,
+	blobStore blob.Store,
+	producer *worker.Producer,
+	bus *eventbus.EventBus,
+	secEng *security.Engine,
+	memWatch *memorywatch.Watchdog,
+) (*smtp.Server, error) {
+	backend, err := newInboundBackend(db, cfg, blobStore, producer, bus, secEng, memWatch)
+	if err != nil {
+		return nil, err
+	}
+	srv, err := inbound.NewLMTPServer(backend, inbound.SMTPConfig{
+		Host:           cfg.InboundSMTPHost,
+		Port:           cfg.LMTPPort,
+		Hostname:       cfg.InboundHostname,
+		MaxMessageSize: cfg.InboundMaxMessageSize,
+		TLSMode:        cfg.InboundTLSMode,
+		TLSCertFile:    cfg.InboundTLSCertFile,
+		TLSKeyFile:     cfg.InboundTLSKeyFile,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	go func() {
+		logger.Info("LMTP server listening", "addr", srv.Addr)
+		l, err := net.Listen("tcp", srv.Addr)
+		if err != nil {
+			logger.Error("LMTP server error", "error", err)
+			return
+		}
+		listener := security.NewCountingListener(l, secEng, cfg.LMTPPort, "lmtp")
+		err = srv.Serve(listener)
+		if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, smtp.ErrServerClosed) {
+			logger.Error("LMTP server error", "error", err)
+		}
+	}()
+	return srv, nil
+}
+
+// newInboundBackend constructs the shared inbound ingest service and the
+// Backend both the SMTP receiver and the SF-01 LMTP listener serve through.
+func newInboundBackend(
+	db *gorm.DB,
+	cfg *config.Config,
+	blobStore blob.Store,
+	producer *worker.Producer,
+	bus *eventbus.EventBus,
+	secEng *security.Engine,
+	memWatch *memorywatch.Watchdog,
+) (*inbound.Backend, error) {
 	inboundRepo := repositories.NewInboundEmailRepository(db)
 	domainRepo := repositories.NewDomainRepository(db)
 	suppressionRepo := repositories.NewSuppressionRepository(db)
@@ -761,37 +912,9 @@ func startInboundSMTPServer(
 		backend.SetRateLimiter(inbound.NewIPRateLimiter(cfg.InboundSMTPRateLimit, window))
 	}
 	backend.SetSecurity(secEng)
-	srv, err := inbound.NewSMTPServer(backend, inbound.SMTPConfig{
-		Host:           cfg.InboundSMTPHost,
-		Port:           cfg.InboundSMTPPort,
-		Hostname:       cfg.InboundHostname,
-		MaxMessageSize: cfg.InboundMaxMessageSize,
-		TLSMode:        cfg.InboundTLSMode,
-		TLSCertFile:    cfg.InboundTLSCertFile,
-		TLSKeyFile:     cfg.InboundTLSKeyFile,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	go func() {
-		logger.Info("inbound SMTP server listening", "addr", srv.Addr, "tls_mode", cfg.InboundTLSMode)
-		// Serve on a security-wrapped listener instead of ListenAndServe:
-		// the CountingListener enforces the ban snapshot at TCP accept and
-		// records connect/abort signals. Inbound TLS is STARTTLS (upgraded
-		// in-band by go-smtp), so the raw listener stays unwrapped.
-		l, err := net.Listen("tcp", srv.Addr)
-		if err != nil {
-			logger.Error("inbound SMTP server error", "error", err)
-			return
-		}
-		listener := security.NewCountingListener(l, secEng, cfg.InboundSMTPPort, "smtp")
-		err = srv.Serve(listener)
-		if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, smtp.ErrServerClosed) {
-			logger.Error("inbound SMTP server error", "error", err)
-		}
-	}()
-	return srv, nil
+	// SF-108: session-refusal backpressure while the heap is over budget.
+	backend.SetMemoryGuard(memWatch)
+	return backend, nil
 }
 
 // startSMTPRelayServer configures and launches the built-in SMTP Relay
@@ -799,6 +922,7 @@ func startInboundSMTPServer(
 // gracefully shut down on exit.
 func startSMTPRelayServer(
 	db *gorm.DB, cfg *config.Config, emailSvc *email.Service, secEng *security.Engine,
+	memWatch *memorywatch.Watchdog,
 ) (*smtp.Server, error) {
 	credRepo := repositories.NewSMTPCredentialRepository(db)
 	userRepo := repositories.NewUserRepository(db)
@@ -808,6 +932,8 @@ func startSMTPRelayServer(
 		backend.SetRateLimiter(inbound.NewIPRateLimiter(cfg.SMTPRelayRateLimit, window))
 	}
 	backend.SetSecurity(secEng)
+	// SF-108: session-refusal backpressure while the heap is over budget.
+	backend.SetMemoryGuard(memWatch)
 	srv, err := smtprelay.NewSMTPServer(backend, smtprelay.SMTPConfig{
 		Host:           cfg.SMTPRelayHost,
 		Port:           cfg.SMTPRelayPort,
@@ -884,6 +1010,11 @@ func newTLSRPTSender(emailSvc *email.Service, cfg *config.Config) tlsrpt.Sender 
 func newMTAExecutor(db *gorm.DB, cfg *config.Config) *mta.Executor {
 	executor := mta.NewExecutor(mta.NewResolver(), mta.NewBudgetKeeper(time.Hour), repositories.NewMTADeliveryAttemptRepository(db))
 	executor.SetHeloDomain(cfg.MTAEhloName)
+	// CA-04: per-message send-rate pacing per sending domain; 0 (default)
+	// keeps the unpaced behavior.
+	executor.SetMessageRatePerMin(cfg.MTAMsgRatePerMin)
+	// SF-108: per-connection transfer throttle (0 = unlimited).
+	executor.SetDeliveryThrottleKBPS(cfg.DeliveryThrottleKBPS)
 	// SF-29 (OB-6 W4, ADR-007 §5): outbound MTA-STS enforcement for direct
 	// delivery — the runner consults each recipient domain's published
 	// policy through the process-wide hook (deliver.go's opts literal is
@@ -933,6 +1064,7 @@ func newACMEHostSource(db *gorm.DB, cfg *config.Config) func(ctx context.Context
 func startSubmissionServer(
 	db *gorm.DB, cfg *config.Config, emailSvc *email.Service, secEng *security.Engine,
 	certMgr *certmanager.Manager,
+	memWatch *memorywatch.Watchdog,
 ) (*smtp.Server, error) {
 	verifier := mta.NewRelayCredentialVerifier(
 		repositories.NewSMTPCredentialRepository(db),
@@ -949,6 +1081,10 @@ func startSubmissionServer(
 		backend.SetRateLimiter(inbound.NewIPRateLimiter(cfg.SubmissionRateLimit, window))
 	}
 	backend.SetSecurity(secEng)
+	// SF-108: session-refusal backpressure while the heap is over budget.
+	backend.SetMemoryGuard(memWatch)
+	// SF-17: the per-domain outbound size cap rides the same domain repo.
+	backend.SetDomainPolicy(repositories.NewDomainRepository(db))
 	srv, err := mta.NewSubmissionServer(backend, mta.SubmissionConfig{
 		Host:           cfg.SubmissionHost,
 		Port:           cfg.SubmissionPort,
@@ -1270,11 +1406,14 @@ func startIMAPServer(
 // startEmbeddedWorker starts an in-process asynq worker for email delivery.
 // The bus argument is used by the inbound parse handler to publish
 // email.inbound.received events; it may be nil when inbound is disabled.
+// SF-109: it returns the running *asynq.Server so shutdownServer can drain
+// it — previously the handle was discarded and the worker kept claiming
+// tasks until process exit, losing any claim mid-flight.
 func startEmbeddedWorker(db *gorm.DB,
 	cfg *config.Config,
 	blobStore blob.Store,
 	notifier *notification.Service,
-	bus *eventbus.EventBus) {
+	bus *eventbus.EventBus) (*asynq.Server, error) {
 	dispatcher := newWebhookDispatcher(db, cfg)
 
 	handler := worker.NewEmailSendHandler(
@@ -1330,6 +1469,14 @@ func startEmbeddedWorker(db *gorm.DB,
 		},
 	)
 	exhaustedHandler.SetRecorder(logsRecorder)
+	// SF-10: RFC 3464 notifications for terminally failed locally-originated
+	// mail — gated by POSTA_DSN_ENABLED; the mailer rides the automation
+	// service's outbound pipeline (same enqueuer seam).
+	dsnMailer := newAutomationEmailService(db, cfg, worker.NewProducer(cfg.Redis.AsynqRedisOpt(), cfg.WorkerMaxRetries), blobStore)
+	handler.SetDSNMailer(dsnMailer)
+	handler.SetDSNEnabled(cfg.DSNEnabled)
+	handler.SetDSNReportingMTA(cfg.MTAEhloName)
+	exhaustedHandler.SetDSN(dsnMailer, cfg.DSNEnabled, cfg.MTAEhloName)
 
 	errorHandlers := []asynq.ErrorHandler{exhaustedHandler}
 	if cfg.InboundEnabled {
@@ -1349,6 +1496,10 @@ func startEmbeddedWorker(db *gorm.DB,
 				worker.QueueLow:           1,
 			},
 			ErrorHandler: worker.ChainErrorHandlers(errorHandlers...),
+			// SF-109: bound the drain window on shutdown; a task still running
+			// past it is released back to Redis (leased out again), matching the
+			// 30s budget shutdownServer gives the SMTP receivers.
+			ShutdownTimeout: 30 * time.Second,
 		},
 	)
 
@@ -1457,6 +1608,9 @@ func startEmbeddedWorker(db *gorm.DB,
 	}()
 
 	logger.Info("async email delivery enabled (embedded worker)")
+	// SF-109: the handle is returned while Run drains in the background;
+	// shutdownServer owns the Shutdown() call (see shutdownServer).
+	return srv, nil
 }
 
 // initCronManager creates and registers scheduled jobs.
@@ -1589,6 +1743,20 @@ func initCronManager(
 	// upserts); the R-07 report refreshes the current day on read.
 	manager.Register(jobs.NewIPReputationRollupJob(db))
 
+	// ---- SF-104 remainder: the daily per-workspace send-outcome report.
+	// Gated by the send_reports_enabled platform setting (default off);
+	// event-only when no notifier is configured.
+	if notifier != nil {
+		sendReportJob := jobs.NewSendReportJob(db, func() bool {
+			return settingsProvider.GetBool("send_reports_enabled", false)
+		})
+		sendReportJob.SetPublisher(repositories.NewEventRepository(db).Create)
+		sendReportJob.SetNotifier(func(workspaceID uint, templateName string, data map[string]any) error {
+			return notifier.SendToWorkspaceAdmins(workspaceID, "Daily send report", templateName, data)
+		})
+		manager.Register(sendReportJob)
+	}
+
 	// ---- SF-96 (OB-6 W5): platform metric-alert engine. Rules live in the
 	// `metric_alert_rules` platform setting (admin-gated settings API); this
 	// cron evaluates them every minute and executes the fire/resolve actions
@@ -1683,6 +1851,11 @@ func shutdownServer(res *serverResources) {
 		}
 		cancel()
 	}
+	if res.lmtp != nil {
+		// The LMTP listener owns no session state beyond live conns; closing
+		// releases its security listener slots.
+		res.lmtp.Close()
+	}
 	if res.pop3 != nil {
 		// POP3 sessions own no long-lived worker state; closing the listeners
 		// and live conns releases their per-user/per-IP slots.
@@ -1700,6 +1873,29 @@ func shutdownServer(res *serverResources) {
 	}
 	if res.cronManager != nil {
 		res.cronManager.Stop()
+	}
+	// SF-108: release the memory watchdog's sampler.
+	if res.memWatch != nil {
+		res.memWatch.Stop()
+	}
+	// SF-109: drain the embedded asynq worker BEFORE closing the producer and
+	// Redis. Shutdown() waits (up to asynq.Config.ShutdownTimeout, 30s) for
+	// in-flight handlers to finish; tasks still running past the window are
+	// pushed back to Redis, which is why this must precede the producer/Redis
+	// close. Bounded with the same 30s budget the SMTP receivers get, so a
+	// stuck handler cannot wedge the whole shutdown.
+	if res.embeddedWorker != nil {
+		done := make(chan struct{})
+		go func() {
+			res.embeddedWorker.Shutdown()
+			close(done)
+		}()
+		select {
+		case <-done:
+			logger.Info("embedded worker drained")
+		case <-time.After(30 * time.Second):
+			logger.Error("embedded worker drain timed out after 30s; continuing shutdown")
+		}
 	}
 	if res.producer != nil {
 		if err := res.producer.Close(); err != nil {

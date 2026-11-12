@@ -28,6 +28,7 @@ import (
 	"github.com/goposta/posta/internal/cron/jobs"
 	"github.com/goposta/posta/internal/logging"
 	"github.com/goposta/posta/internal/metrics"
+	"github.com/goposta/posta/internal/memorywatch"
 	"github.com/goposta/posta/internal/observability"
 	"github.com/goposta/posta/internal/services/automation"
 	"github.com/goposta/posta/internal/services/crypto"
@@ -75,6 +76,12 @@ func runWorker() error {
 	cfg.InitStorage()
 
 	db := cfg.Database.DB
+
+	// SF-108/SF-43: the worker process runs the same memory watchdog — the
+	// sampler logs and counts pressure episodes (the worker serves no SMTP
+	// listeners, so there is nothing to refuse here).
+	memWatch := memorywatch.Start(context.Background(), cfg.MemoryBudgetMB, 0)
+	defer memWatch.Stop()
 
 	// OB-6 W5 (GAP-51): attach the platform-events recorder now that the
 	// database is available, so panics/fatals also land on the admin
@@ -169,6 +176,15 @@ func runWorker() error {
 			metrics.DecrementEmailQueued()
 		},
 	)
+
+	// SF-10: RFC 3464 notifications for terminally failed locally-originated
+	// mail — gated by POSTA_DSN_ENABLED; the mailer rides the outbound
+	// pipeline with the same producer the worker consumes from.
+	dsnMailer := newAutomationEmailService(db, cfg, worker.NewProducer(cfg.Redis.AsynqRedisOpt(), cfg.WorkerMaxRetries), blobStore)
+	handler.SetDSNMailer(dsnMailer)
+	handler.SetDSNEnabled(cfg.DSNEnabled)
+	handler.SetDSNReportingMTA(cfg.MTAEhloName)
+	exhaustedHandler.SetDSN(dsnMailer, cfg.DSNEnabled, cfg.MTAEhloName)
 
 	errorHandlers := []asynq.ErrorHandler{exhaustedHandler}
 	if cfg.InboundEnabled {

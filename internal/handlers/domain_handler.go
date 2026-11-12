@@ -119,10 +119,47 @@ type SetMTASTSModeRequest struct {
 	} `json:"body"`
 }
 
+// SetMaxMessageSizeRequest sets the domain's outbound size cap (SF-17);
+// 0 clears the cap (the listener-wide default applies).
+type SetMaxMessageSizeRequest struct {
+	ID   int `param:"id"`
+	Body struct {
+		MaxMessageSize int64 `json:"max_message_size"`
+	} `json:"body"`
+}
+
 // SetMTASTSMode sets the domain's published MTA-STS policy mode. Fail-closed
 // per ADR-008 §2: only ownership-verified domains may publish a policy — the
 // policy document and the _smtp._tls TXT guidance are only meaningful for a
 // domain whose mail this deployment actually receives.
+func (h *DomainHandler) SetMaxMessageSize(c *okapi.Context, req *SetMaxMessageSizeRequest) error {
+	if err := requireEdit(c); err != nil {
+		return c.AbortForbidden("insufficient workspace permissions", err)
+	}
+	max := req.Body.MaxMessageSize
+	if max < 0 {
+		return c.AbortBadRequest("max_message_size must be >= 0 (0 clears the cap)")
+	}
+	d, err := h.repo.FindByID(uint(req.ID))
+	if err != nil || !ownsResource(c, d.UserID, d.WorkspaceID) {
+		return c.AbortNotFound("domain not found")
+	}
+	if d.MaxMessageSize == max {
+		return ok(c, okapi.M{"domain": d, "max_message_size": max, "changed": false})
+	}
+	d.MaxMessageSize = max
+	if err := h.repo.Update(d); err != nil {
+		return c.AbortInternalServerError("failed to update domain")
+	}
+	if h.audit != nil {
+		h.audit.LogCtx(c, "domain.max_message_size_changed",
+			"Domain outbound size cap changed", map[string]any{
+				"domain_id": d.ID, "domain": d.Domain, "max_message_size": max,
+			})
+	}
+	return ok(c, okapi.M{"domain": d, "max_message_size": max, "changed": true})
+}
+
 func (h *DomainHandler) SetMTASTSMode(c *okapi.Context, req *SetMTASTSModeRequest) error {
 	if err := requireEdit(c); err != nil {
 		return c.AbortForbidden("insufficient workspace permissions", err)

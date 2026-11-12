@@ -254,6 +254,7 @@ PATCH  /api/v1/admin/mailboxes/{id}
 PATCH  /api/v1/admin/plans/{id}/default
 PATCH  /api/v1/mail/folders/{id}
 PATCH  /api/v1/workspaces/current/domains/{id}/delivery-mode
+PATCH  /api/v1/workspaces/current/domains/{id}/max-message-size
 PATCH  /api/v1/workspaces/current/domains/{id}/mta-sts
 POST   /api/v1/admin/announcements
 POST   /api/v1/admin/domains/{id}/verify

@@ -55,6 +55,7 @@ const (
 	// TemplateMetricAlert (SF-96, OB-6) is the body of the optional email
 	// action fired by the metric-alert engine (internal/services/meticalert).
 	TemplateMetricAlert = "metric_alert"
+	TemplateSendReport     = "send_report"
 )
 
 var templatePreference = map[string]func(*models.UserSetting) bool{
@@ -126,6 +127,7 @@ func (s *Service) loadTemplates() {
 		TemplateNewMessage,
 		TemplateMessageDigest,
 		TemplateMetricAlert,
+		TemplateSendReport,
 	}
 	for _, name := range names {
 		tmpl := template.Must(template.ParseFS(templateFS,

@@ -836,6 +836,21 @@ func (r *Router) workspaceResourceRoutes() []okapi.RouteDefinition {
 		},
 		{
 			Method:      http.MethodPatch,
+			Path:        pathDomainByID + "/max-message-size",
+			Handler:     okapi.H(r.h.domain.SetMaxMessageSize),
+			Group:       opsGroup,
+			Summary:     "Set domain outbound size cap",
+			Description: "Cap this domain's outbound message octets (SF-17). 0 clears the cap; the listener-wide default applies while unset. Enforced at the MSA (declared SIZE) and on direct deliveries before DATA.",
+			Request:     &handlers.SetMaxMessageSizeRequest{},
+			Response:    &dto.Response[any]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Domain ID"),
+				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodPatch,
 			Path:        pathDomainByID + "/delivery-mode",
 			Handler:     okapi.H(r.h.domain.SetDeliveryMode),
 			Group:       opsGroup,

@@ -143,6 +143,13 @@ type Config struct {
 	WorkerHealthEnabled bool
 	WorkerHealthPort    int
 
+	// DSNEnabled (POSTA_DSN_ENABLED, default false) gates SF-10: RFC 3464
+	// delivery-status notifications generated for permanently failed
+	// locally-originated mail (worker terminal failures + auto-suppressed
+	// rejections). System rows never notify; the NULL reverse path and
+	// Auto-Submitted: auto-replied stop bounce loops.
+	DSNEnabled bool
+
 	// AutoSuppressOnReject adds a recipient to the suppression list when an
 	// outbound send is permanently rejected (5xx at RCPT TO, e.g. 550 user
 	// unknown), and stops retrying that message.
@@ -235,6 +242,12 @@ type Config struct {
 	InboundSMTPRateLimit  int // per-IP max sessions per window; 0 disables
 	InboundSMTPRateWindow int // rate-limit window in seconds
 
+	// LMTP listener (SF-01, RFC 2033): local delivery agents hand mail for
+	// our recipients over LHLO with per-recipient DATA status, through the
+	// same ingest pipeline as the SMTP receiver. Off by default.
+	LMTPEnabled bool
+	LMTPPort    int
+
 	// Hosted-mailbox delivery (OB-3, ADR-003, flow F13): a matched route
 	// action=deliver files the message into the recipient mailbox's INBOX
 	// via the mailstore. Auto-provision creates the recipient mailbox on
@@ -256,6 +269,11 @@ type Config struct {
 	ClamAVPort              int           // POSTA_CLAMAV_PORT, default 3310
 	ClamAVTimeout           time.Duration // POSTA_CLAMAV_TIMEOUT seconds, default 30
 	ClamAVFailMode          string        // POSTA_CLAMAV_FAIL_MODE: open (default) | closed
+	// SF-42 attachment blocklists: extensions (".exe,.scr") and SHA-256
+	// content digests quarantined on sight in the inbound filter. Empty
+	// (the default) disables both lists.
+	SpamBlockedExt   string // POSTA_SPAM_ATTACHMENT_BLOCK_EXT
+	SpamBlockedHashes string // POSTA_SPAM_ATTACHMENT_BLOCK_SHA256
 
 	// Web form message settings
 	MessagesEnabled           bool
@@ -291,6 +309,25 @@ type Config struct {
 	// record matches the outbound bind IP (domain health surfaces the
 	// guidance). Delivery mode itself is per-domain configuration.
 	MTAEhloName string
+
+	// Transfer throttle (SF-108): DeliveryThrottleKBPS
+	// (POSTA_DELIVERY_THROTTLE_KBPS, default 0 = unlimited) paces every byte
+	// a direct-delivery connection sends through a token bucket.
+	DeliveryThrottleKBPS int
+
+	// Memory budget (SF-108/SF-43): MemoryBudgetMB
+	// (POSTA_MEMORY_BUDGET_MB, default 0 = off) arms the process memory
+	// watchdog; while over budget, SMTP listeners refuse new sessions with
+	// 451 and posta_mta_memory_pressure_total counts the episodes.
+	MemoryBudgetMB int
+
+	// Per-message send-rate pacing (CA-04): MTAMsgRatePerMin
+	// (POSTA_MTA_MSG_RATE_PER_MIN, default 0 = disabled) paces outbound
+	// MAIL FROM commands to n messages per minute per sending domain
+	// through the executor's MessageRateKeeper; 0 keeps today's unpaced
+	// behavior. Sustained waits (>= 5s) are recorded as throttle_wait
+	// attempt rows and observed on posta_mta_throttle_wait_seconds.
+	MTAMsgRatePerMin int
 
 	// MTA-STS policy hosting (SF-29, OB-6 W4, ADR-007 §5, RFC 8461).
 	// MTASTSEnabled (POSTA_MTA_STS_ENABLED, default false) gates the
@@ -636,6 +673,11 @@ func New() *Config {
 		WorkerHealthEnabled:  goutils.EnvBool("POSTA_WORKER_HEALTH_ENABLED", true),
 		WorkerHealthPort:     goutils.EnvInt("POSTA_WORKER_HEALTH_PORT", port),
 		AutoSuppressOnReject: goutils.EnvBool("POSTA_AUTO_SUPPRESS_ON_REJECT", true),
+		// SF-10: RFC 3464 delivery-status notifications for permanently failed
+		// locally-originated mail. Off by default (backscatter risk is the
+		// operator's call); the NULL reverse path + Auto-Submitted headers stop
+		// bounce loops regardless.
+		DSNEnabled: goutils.EnvBool("POSTA_DSN_ENABLED", false),
 
 		WebhookMaxRetries:     goutils.EnvInt("POSTA_WEBHOOK_MAX_RETRIES", 3),
 		WebhookTimeoutSecs:    goutils.EnvInt("POSTA_WEBHOOK_TIMEOUT_SECS", 10),
@@ -709,6 +751,8 @@ func New() *Config {
 		InboundTLSKeyFile:     goutils.Env("POSTA_INBOUND_TLS_KEY_FILE", ""),
 		InboundSMTPRateLimit:  goutils.EnvInt("POSTA_INBOUND_SMTP_RATE_LIMIT", 60),
 		InboundSMTPRateWindow: goutils.EnvInt("POSTA_INBOUND_SMTP_RATE_WINDOW", 60),
+		LMTPEnabled: goutils.EnvBool("POSTA_LMTP_ENABLED", false),
+		LMTPPort:    goutils.EnvInt("POSTA_LMTP_PORT", 24),
 
 		// Hosted-mailbox auto-provisioning (OB-3, ADR-003, flow F13).
 		MailstoreAutoProvision: goutils.EnvBool("POSTA_MAILSTORE_AUTO_PROVISION", true),
@@ -723,6 +767,8 @@ func New() *Config {
 		ClamAVPort:              goutils.EnvInt("POSTA_CLAMAV_PORT", 3310),
 		ClamAVTimeout:           time.Duration(goutils.EnvInt("POSTA_CLAMAV_TIMEOUT", 30)) * time.Second,
 		ClamAVFailMode:          goutils.Env("POSTA_CLAMAV_FAIL_MODE", "open"),
+		SpamBlockedExt:    goutils.Env("POSTA_SPAM_ATTACHMENT_BLOCK_EXT", ""),
+		SpamBlockedHashes: goutils.Env("POSTA_SPAM_ATTACHMENT_BLOCK_SHA256", ""),
 
 		MessagesEnabled:           goutils.EnvBool("POSTA_MESSAGES_ENABLED", false),
 		MessagesMaxBodyBytes:      int64(goutils.EnvInt("POSTA_MESSAGES_MAX_BODY_BYTES", 65536)),
@@ -749,6 +795,9 @@ func New() *Config {
 
 		// Outbound MTA (OB-1): EHLO name for direct-to-MX sessions.
 		MTAEhloName: goutils.Env("POSTA_MTA_EHLO_NAME", ""),
+		MTAMsgRatePerMin: goutils.EnvInt("POSTA_MTA_MSG_RATE_PER_MIN", 0),
+		DeliveryThrottleKBPS: goutils.EnvInt("POSTA_DELIVERY_THROTTLE_KBPS", 0),
+		MemoryBudgetMB:       goutils.EnvInt("POSTA_MEMORY_BUDGET_MB", 0),
 
 		// MTA-STS policy hosting (SF-29, OB-6 W4): gated well-known path;
 		// see the field comments for the gate semantics.

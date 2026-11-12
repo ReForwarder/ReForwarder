@@ -143,6 +143,11 @@ type SubmissionBackend struct {
 	limiter        *inbound.IPRateLimiter
 	sec            *security.Engine
 	securityPort   int
+	// memGuard is the SF-108 memory-pressure watchdog (nil = no budget).
+	memGuard MemoryGuard
+	// domainPolicy resolves the SF-17 per-domain outbound size cap
+	// (nil = no per-domain cap; the listener-wide cap still applies).
+	domainPolicy DomainPolicy
 }
 
 // NewSubmissionBackend assembles the MSA backend. All three collaborators are
@@ -248,7 +253,32 @@ type submissionSession struct {
 	to         []string
 }
 
+// MemoryGuard is the SF-108 pressure seam; *memorywatch.Watchdog satisfies
+// it. nil guards report healthy.
+type MemoryGuard interface {
+	UnderPressure() bool
+}
+
+// SetMemoryGuard attaches the SF-108 memory-pressure watchdog (nil = none):
+// new MSA sessions are refused with a temporary 451 while the process is
+// over its memory budget; in-flight sessions are never aborted.
+func (b *SubmissionBackend) SetMemoryGuard(g MemoryGuard) { b.memGuard = g }
+
+// DomainPolicy is the SF-17 seam resolving a sender domain's outbound size
+// cap. *repositories.DomainRepository satisfies it; nil disables the
+// per-domain cap (the listener-wide MaxMessageBytes still applies).
+type DomainPolicy interface {
+	MaxMessageSizeFor(userID uint, workspaceID *uint, domain string) int64
+}
+
+// SetDomainPolicy attaches the per-domain size-cap resolver (SF-17).
+func (b *SubmissionBackend) SetDomainPolicy(p DomainPolicy) { b.domainPolicy = p }
+
 func (b *SubmissionBackend) NewSession(c *gosmtp.Conn) (gosmtp.Session, error) {
+	// SF-108: backpressure at the front door under a memory-budget breach.
+	if b.memGuard != nil && b.memGuard.UnderPressure() {
+		return nil, &gosmtp.SMTPError{Code: 451, EnhancedCode: gosmtp.EnhancedCode{4, 3, 1}, Message: "server under memory pressure, try again later"}
+	}
 	remote := c.Conn().RemoteAddr().String()
 	ip := remote
 	if host, _, err := net.SplitHostPort(remote); err == nil {
@@ -300,7 +330,7 @@ func (s *submissionSession) Logout() error {
 	return nil
 }
 
-func (s *submissionSession) Mail(from string, _ *gosmtp.MailOptions) error {
+func (s *submissionSession) Mail(from string, opts *gosmtp.MailOptions) error {
 	s.guard.MarkCommand()
 	// Non-negotiable: authenticated tenant required — no open relay.
 	if s.credential == nil {
@@ -322,6 +352,17 @@ func (s *submissionSession) Mail(from string, _ *gosmtp.MailOptions) error {
 		return &gosmtp.SMTPError{
 			Code: 550, EnhancedCode: gosmtp.EnhancedCode{5, 7, 1},
 			Message: "sender domain not verified for this tenant",
+		}
+	}
+
+	// SF-17: the sender domain's outbound size cap — declared SIZE at MAIL
+	// is checked before any body is read, saving the transfer entirely.
+	if s.backend.domainPolicy != nil && opts != nil && opts.Size > 0 {
+		if max := s.backend.domainPolicy.MaxMessageSizeFor(s.credential.UserID, &workspaceID, domain); max > 0 && opts.Size > max {
+			return &gosmtp.SMTPError{
+				Code: 552, EnhancedCode: gosmtp.EnhancedCode{5, 3, 4},
+				Message: fmt.Sprintf("message size exceeds the %d-octet limit for domain %s", max, domain),
+			}
 		}
 	}
 	return nil

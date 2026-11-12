@@ -269,6 +269,27 @@ var (
 			Help: "Total number of webhook events dropped by the per-endpoint pending cap",
 		},
 	)
+
+	// SF-108/SF-43: memory-pressure episodes counted on transition (one per
+	// breach-and-recover cycle), so an operator can correlate session refusals
+	// with the heap timeline.
+	mtaMemoryPressureTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "posta_mta_memory_pressure_total",
+			Help: "Memory-pressure episodes where new SMTP sessions were refused (SF-108)",
+		},
+	)
+
+	// CA-04: seconds each outbound delivery spent waiting for its
+	// per-sending-domain message-rate token before MAIL FROM. Pacing disabled
+	// (POSTA_MTA_MSG_RATE_PER_MIN unset) never observes here.
+	mtaThrottleWait = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "posta_mta_throttle_wait_seconds",
+			Help:    "Seconds an outbound delivery waited for the per-message send-rate token (CA-04)",
+			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300},
+		},
+	)
 )
 
 func init() {
@@ -302,6 +323,8 @@ func init() {
 	prometheus.MustRegister(automationNodeFailuresTotal)
 	prometheus.MustRegister(automationScheduleFiresTotal)
 	prometheus.MustRegister(webhookEventsDroppedTotal)
+	prometheus.MustRegister(mtaThrottleWait)
+	prometheus.MustRegister(mtaMemoryPressureTotal)
 }
 
 // IncrementEmailSent increments the emails sent counter.
@@ -344,6 +367,17 @@ func ObserveWebhookDeliveryDuration(seconds float64) {
 // (SF-90 per-endpoint pending cap).
 func IncrementWebhookEventsDropped() {
 	webhookEventsDroppedTotal.Inc()
+}
+
+// ObserveMTAThrottleWait records the seconds an outbound delivery waited for
+// its per-message send-rate token (CA-04).
+func ObserveMTAThrottleWait(seconds float64) {
+	mtaThrottleWait.Observe(seconds)
+}
+
+// IncrementMTAMemoryPressure counts one memory-pressure episode (SF-108).
+func IncrementMTAMemoryPressure() {
+	mtaMemoryPressureTotal.Inc()
 }
 
 // IncrementBounce increments the bounce counter for the given type (hard, soft, complaint).

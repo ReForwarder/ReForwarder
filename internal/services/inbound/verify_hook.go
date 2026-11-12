@@ -29,6 +29,7 @@ import (
 
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/inbound/verify"
+	"github.com/goposta/posta/internal/services/spamfilter"
 	"github.com/jkaninda/logger"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -93,6 +94,8 @@ func (s *Service) EnableVerification(db *gorm.DB, authservID string) {
 		enabled:      verificationEnabled(),
 		arcEnabled:   arcEnabled(),
 		iprevEnabled: iprevEnabled(),
+		iprevMode:    iprevMode(),
+		svc:          s,
 	}
 }
 
@@ -123,6 +126,39 @@ func arcEnabled() bool { return envExplicitlyOn(envInboundARC) }
 // iprevEnabled reads POSTA_INBOUND_IPREV_ENABLED (default false).
 func iprevEnabled() bool { return envExplicitlyOn(envInboundIPRev) }
 
+// iprev operator modes (SF-32): the verdict is always evaluated and persisted
+// when the engine is on; the mode decides what happens to a definitive fail.
+const (
+	envInboundIPRevMode = "POSTA_INBOUND_IPREV_MODE"
+
+	// IPRevModeAnnotate (default) — verdict stays advisory: the persisted
+	// row and the Authentication-Results header are the whole effect.
+	IPRevModeAnnotate = "annotate"
+	// IPRevModeTag — a definitive fail is additionally stamped onto the
+	// record's spam reasons (visible in the API/UI), status unchanged.
+	IPRevModeTag = "tag"
+	// IPRevModeReject — a definitive fail moves the durably stored record to
+	// rejected through the ADR-006 filter disposition path (an explicit,
+	// event-backed reject — never a silent drop). The message was already
+	// accepted at DATA, so this is a post-accept disposition, not an SMTP
+	// 550 (no backscatter).
+	IPRevModeReject = "reject"
+)
+
+// iprevMode reads POSTA_INBOUND_IPREV_MODE (annotate | tag | reject); the
+// default and any unknown value fall back to annotate — enforcement is
+// strictly opt-in.
+func iprevMode() string {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(envInboundIPRevMode))) {
+	case IPRevModeTag:
+		return IPRevModeTag
+	case IPRevModeReject:
+		return IPRevModeReject
+	default:
+		return IPRevModeAnnotate
+	}
+}
+
 // verifyProcessor owns one service's verification pipeline: DNS seams for
 // tests, the gorm handle for persistence, the authserv-id for A-R, and the
 // config gates for the optional ARC/iprev engines.
@@ -133,6 +169,10 @@ type verifyProcessor struct {
 
 	arcEnabled   bool
 	iprevEnabled bool
+	// iprevMode is the SF-32 operator mode; svc routes reject dispositions
+	// through the service's filter path (nil svc → tag/annotate only).
+	iprevMode string
+	svc       *Service
 
 	// Test seams (nil → the Go default resolver).
 	lookupTXT  func(ctx context.Context, name string) ([]string, error)
@@ -178,6 +218,61 @@ func (v *verifyProcessor) run(rec *models.InboundEmail, raw []byte, envelopeFrom
 	})
 	header := verify.AuthenticationResults(v.authservID, results)
 	v.persist(rec, results, header)
+	// SF-32: the operator mode decides what a definitive fail does — the
+	// annotate default stops here (verdict already persisted).
+	v.applyIPRevMode(rec, results.IPRev)
+}
+
+// applyIPRevMode applies the SF-32 operator mode to a definitive
+// forward-confirmation failure. Non-fail verdicts (none/temperror/permerror)
+// and the annotate mode never change the record — enforcement binds only to
+// a proven fail, never to a DNS absence or lookup error.
+func (v *verifyProcessor) applyIPRevMode(rec *models.InboundEmail, verdict *verify.IPRevVerdict) {
+	if v.iprevMode == IPRevModeAnnotate || verdict == nil || verdict.Result != verify.IPRevFail {
+		return
+	}
+	reason := fmt.Sprintf("iprev: %s", verdict.Reason)
+	switch v.iprevMode {
+	case IPRevModeTag:
+		// Stamp the reason onto the record for the API/UI; status unchanged.
+		rec.SpamReasons = joinReasons(append(splitReasons(rec.SpamReasons), reason))
+		if err := v.db.Model(&models.InboundEmail{}).Where("id = ?", rec.ID).
+			Update("spam_reasons", rec.SpamReasons).Error; err != nil {
+			logger.Warn("inbound verification: iprev tag stamp failed",
+				"inbound_id", rec.UUID, "error", err)
+		}
+	case IPRevModeReject:
+		if v.svc == nil {
+			return
+		}
+		// Through the ADR-006 disposition path: status flipped + taxonomy
+		// event — explicit and visible, never a silent drop.
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := v.svc.ApplyFilterDisposition(ctx, rec, FilterDisposition{
+			Disposition: spamfilter.DispositionReject,
+			Reasons:     []string{reason},
+		}); err != nil {
+			logger.Error("inbound verification: iprev reject disposition failed",
+				"inbound_id", rec.UUID, "error", err)
+		}
+	}
+}
+
+// splitReasons splits the comma-joined spam-reason vocabulary back into its
+// list (the inverse of joinReasons).
+func splitReasons(joined string) []string {
+	if strings.TrimSpace(joined) == "" {
+		return nil
+	}
+	parts := strings.Split(joined, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // resolver builds the DNS resolver for the engines, honoring test seams.

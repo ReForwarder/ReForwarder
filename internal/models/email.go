@@ -50,6 +50,14 @@ const EmailProvenanceSystemForward = "system_forward"
 // consulted — but the sender domain must be verified (ADR-001 non-negotiable).
 const EmailProvenanceMailCompose = "mail-compose"
 
+// EmailProvenanceSystemDSN stamps a transactional Email row holding an
+// RFC 3464 delivery-status notification this system generated for a
+// locally-originated message that permanently failed (SF-10). The row carries
+// the complete multipart/report message in TextBody — the worker sends it
+// verbatim with a null reverse path, which is also the double-bounce stop
+// (an undeliverable DSN cannot bounce again).
+const EmailProvenanceSystemDSN = "system_dsn"
+
 type Email struct {
 	ID              uint           `json:"id" gorm:"primaryKey"`
 	UUID            string         `json:"uuid" gorm:"type:uuid;default:gen_random_uuid();uniqueIndex;not null"`

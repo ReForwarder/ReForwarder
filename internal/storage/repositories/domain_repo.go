@@ -179,6 +179,28 @@ func (r *DomainRepository) IsOwnershipVerified(userID uint, domainName string) b
 	return count > 0
 }
 
+// MaxMessageSizeFor resolves the SF-17 per-domain outbound size cap for the
+// authenticated tenant: the workspace's verified domain row wins, else the
+// user's. Zero (unset) means the listener-wide default applies.
+func (r *DomainRepository) MaxMessageSizeFor(userID uint, workspaceID *uint, domainName string) int64 {
+	if workspaceID != nil && *workspaceID > 0 {
+		var ws int64
+		r.db.Model(&models.Domain{}).
+			Where("workspace_id = ? AND domain = ? AND ownership_verified = ?", *workspaceID, domainName, true).
+			Select("max_message_size").
+			Scan(&ws)
+		if ws > 0 {
+			return ws
+		}
+	}
+	var out int64
+	r.db.Model(&models.Domain{}).
+		Where("user_id = ? AND domain = ? AND ownership_verified = ?", userID, domainName, true).
+		Select("max_message_size").
+		Scan(&out)
+	return out
+}
+
 // IsOwnershipVerifiedInWorkspace checks whether the given domain is registered
 // and ownership-verified within the workspace (any member's verified domain).
 func (r *DomainRepository) IsOwnershipVerifiedInWorkspace(workspaceID uint, domainName string) bool {
