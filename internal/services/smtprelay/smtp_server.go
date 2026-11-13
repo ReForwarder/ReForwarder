@@ -39,6 +39,14 @@ type SMTPConfig struct {
 	TLSKeyFile     string
 }
 
+// NewSMTPServer configures the relay listener's go-smtp server.
+//
+// SF-09: DELIVERBY (RFC 2852) is advertised and accepted — the dependency
+// parses BY as an RCPT TO parameter and the session carries the by-time into
+// the send pipeline as the message's queue-expiry deadline. FUTURERELEASE
+// (RFC 4865) is NOT supported: no parameter or backend hook for it exists in
+// the receiver dependency (unknown MAIL FROM arguments draw its hardcoded
+// 500 5.5.4), with no clean extension point in v0.25.0.
 func NewSMTPServer(backend *Backend, cfg SMTPConfig) (*smtp.Server, error) {
 	srv := smtp.NewServer(backend)
 	srv.Addr = fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
@@ -48,6 +56,7 @@ func NewSMTPServer(backend *Backend, cfg SMTPConfig) (*smtp.Server, error) {
 	srv.MaxMessageBytes = cfg.MaxMessageSize
 	srv.MaxRecipients = 50
 	srv.EnableSMTPUTF8 = true
+	srv.EnableDELIVERBY = true
 	if backend != nil {
 		backend.securityPort = cfg.Port // port attached to security signals
 	}

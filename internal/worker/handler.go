@@ -273,6 +273,26 @@ func (h *EmailSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error
 		}
 	}
 
+	// SF-09: DELIVERBY/deadline honoring at the delivery boundary — a message
+	// past its expires_at is never delivered, however its task reached this
+	// claim (a fired retry, a manual re-enqueue landing before the retention
+	// sweep's daily pass). The manager CAS-finalizes the row (processing
+	// redeliveries included) with the DSN-style expiry event; without a
+	// manager the plain terminal path applies (no schedule rows can exist
+	// unwired). Campaign mail is exempt for the same lifecycle-ownership
+	// reason as the schedule consult below — the sweep is its backstop.
+	if em.ExpiresAt != nil && !em.ExpiresAt.After(time.Now()) && !campLinked {
+		if h.queue != nil {
+			if err := h.queue.ExpireByDeadline(em, time.Now()); err == nil {
+				return nil
+			}
+			// A claim error falls through to the plain finalize below — the
+			// message must not be delivered past its deadline on a CAS hiccup.
+		}
+		h.markFailed(em, queue.ExpiryReason)
+		return nil
+	}
+
 	// SF-08: consult the per-recipient queue schedule at claim time — the
 	// ProcessIn/ProcessAt consult. A schedule holding the next attempt in the
 	// future releases the task WITHOUT claiming or sending: the task

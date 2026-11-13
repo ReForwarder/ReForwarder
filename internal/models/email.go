@@ -101,6 +101,15 @@ type Email struct {
 	// no TTL was requested for the message — the pre-SF-08 behavior.
 	ExpiresAt *time.Time `json:"expires_at,omitempty" gorm:"index"`
 
+	// DeliverBySeconds is the RFC 2852 DELIVERBY provenance (SF-09, additive
+	// column): the by-time in seconds when the deadline above came from the
+	// SMTP DELIVERBY parameter carried at the MSA/relay receivers, 0 when the
+	// deadline came from the API/settings TTL. The expiry event carries it as
+	// DSN-style metadata. The by-mode (N/R) is not stored: the queue enforces
+	// the deadline identically for both modes (failure at the deadline), and
+	// mode-differentiated success notifications are not implemented.
+	DeliverBySeconds int `json:"deliver_by_seconds,omitempty" gorm:"default:0;not null"`
+
 	// Write-once lifecycle timestamps: denormalized from the message-history
 	// event timeline and set only the first time the state is reached, so the
 	// logs list can filter and sort without joining email_events.

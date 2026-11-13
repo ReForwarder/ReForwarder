@@ -187,6 +187,18 @@ func (f *schedFixture) rows(t *testing.T, emailID uint) []models.EmailQueueSched
 	return got
 }
 
+// reload fetches one email row with a fresh dest variable (a reused dest
+// carrying a previous primary key makes gorm's First misbehave — the
+// SF-08 suite hit the same).
+func (f *schedFixture) reload(t *testing.T, id uint) *models.Email {
+	t.Helper()
+	var row models.Email
+	if err := f.db.Where("id = ?", id).First(&row).Error; err != nil {
+		t.Fatalf("reload email %d: %v", id, err)
+	}
+	return &row
+}
+
 func (f *schedFixture) rowOf(t *testing.T, emailID uint, recipient string) *models.EmailQueueSchedule {
 	t.Helper()
 	for i := range f.rows(t, emailID) {
@@ -700,6 +712,148 @@ func TestSweepExpired(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("timeline = %+v, want a failed event with schedule_event=message_expired", events)
+	}
+}
+
+// TestSweepExpiredEmitsDSNStyleDeliverByEvent pins the SF-09 deliver-by
+// handling: an expired message whose deadline came from the RFC 2852
+// DELIVERBY parameter is expired with a DSN-style event — the RFC 3463
+// X.4.7 enhanced status and diagnostic for a delivery time that ran out
+// (permanent class, matching the terminal status flip), the action, and the
+// by-time provenance — on both the timeline event and the webhook payload.
+func TestSweepExpiredEmitsDSNStyleDeliverByEvent(t *testing.T) {
+	f := newSchedFixture(t)
+	now := time.Now()
+	past := now.Add(-time.Hour)
+
+	em := f.seedEmail(t, 206, []string{"a@example.com"})
+	f.db.Model(&models.Email{}).Where("id = ?", 206).Updates(map[string]interface{}{
+		"expires_at":         past,
+		"deliver_by_seconds": 90,
+	})
+
+	stats, err := f.mgr.SweepExpired(context.Background(), now, 100)
+	if err != nil {
+		t.Fatalf("SweepExpired: %v", err)
+	}
+	if stats.Expired != 1 {
+		t.Fatalf("stats.Expired = %d, want 1", stats.Expired)
+	}
+
+	var events []models.EmailEvent
+	if err := f.db.Where("email_uuid = ?", em.UUID).Find(&events).Error; err != nil {
+		t.Fatalf("load events: %v", err)
+	}
+	if len(events) != 1 || events[0].Type != models.EmailEventFailed {
+		t.Fatalf("timeline events = %+v, want one failed event", events)
+	}
+	meta := eventMetadata(t, events[0])
+	for k, want := range map[string]any{
+		"schedule_event":     "message_expired",
+		"action":             "failed",
+		"enhanced_status":    "5.4.7",
+		"diagnostic":         "delivery time expired",
+		"deliver_by_seconds": float64(90),
+		"deadline_source":    "deliverby",
+	} {
+		if meta[k] != want {
+			t.Fatalf("timeline metadata[%s] = %v, want %v", k, meta[k], want)
+		}
+	}
+
+	got := f.dispatcher.captured()
+	if len(got) != 1 || got[0].event != "email.failed" {
+		t.Fatalf("webhook events = %+v, want one email.failed", got)
+	}
+	for k, want := range map[string]any{
+		"enhanced_status":    "5.4.7",
+		"deliver_by_seconds": float64(90),
+		"deadline_source":    "deliverby",
+	} {
+		if got[0].body[k] != want {
+			t.Fatalf("webhook payload[%s] = %v, want %v", k, got[0].body[k], want)
+		}
+	}
+}
+
+// TestExpireByDeadlineAtClaim pins the SF-09 claim-time finalization: a
+// message past its deadline whose task reaches the claim is CAS-failed (the
+// processing state included, so a redelivered task cannot deliver past the
+// deadline either), and a message without a deadline is a no-op.
+func TestExpireByDeadlineAtClaim(t *testing.T) {
+	f := newSchedFixture(t)
+	now := time.Now()
+	past := now.Add(-time.Hour)
+
+	// Queued, expired: the CAS wins and the message finalizes.
+	f.seedEmail(t, 207, []string{"a@example.com"})
+	f.db.Model(&models.Email{}).Where("id = ?", 207).Update("expires_at", past)
+	var em models.Email
+	if err := f.db.Where("id = ?", 207).First(&em).Error; err != nil {
+		t.Fatalf("reload email: %v", err)
+	}
+	if err := f.mgr.ExpireByDeadline(&em, now); err != nil {
+		t.Fatalf("ExpireByDeadline: %v", err)
+	}
+	if got := f.reload(t, 207); got.Status != models.EmailStatusFailed || got.ErrorMessage == "" {
+		t.Fatalf("expired email = %s/%q, want failed with a reason", got.Status, got.ErrorMessage)
+	}
+
+	// Processing, expired: the claim-time CAS covers mid-send redeliveries.
+	f.seedEmail(t, 208, []string{"b@example.com"})
+	f.db.Model(&models.Email{}).Where("id = ?", 208).Updates(map[string]interface{}{
+		"expires_at": past,
+		"status":     models.EmailStatusProcessing,
+	})
+	var em2 models.Email
+	if err := f.db.Where("id = ?", 208).First(&em2).Error; err != nil {
+		t.Fatalf("reload email: %v", err)
+	}
+	if err := f.mgr.ExpireByDeadline(&em2, now); err != nil {
+		t.Fatalf("ExpireByDeadline (processing): %v", err)
+	}
+	if got := f.reload(t, 208); got.Status != models.EmailStatusFailed {
+		t.Fatalf("processing expired email status = %s, want failed", got.Status)
+	}
+
+	// Delivered, expired: the claim-time CAS must not overwrite delivery.
+	f.seedEmail(t, 209, []string{"c@example.com"})
+	f.db.Model(&models.Email{}).Where("id = ?", 209).Updates(map[string]interface{}{
+		"expires_at": past,
+		"status":     models.EmailStatusSent,
+	})
+	var em3 models.Email
+	if err := f.db.Where("id = ?", 209).First(&em3).Error; err != nil {
+		t.Fatalf("reload email: %v", err)
+	}
+	if err := f.mgr.ExpireByDeadline(&em3, now); err != nil {
+		t.Fatalf("ExpireByDeadline (delivered): %v", err)
+	}
+	if got := f.reload(t, 209); got.Status != models.EmailStatusSent {
+		t.Fatalf("delivered email status = %s, want sent (never overwritten)", got.Status)
+	}
+
+	// Not yet expired: a no-op.
+	f.seedEmail(t, 210, []string{"d@example.com"})
+	f.db.Model(&models.Email{}).Where("id = ?", 210).Update("expires_at", now.Add(time.Hour))
+	var em4 models.Email
+	if err := f.db.Where("id = ?", 210).First(&em4).Error; err != nil {
+		t.Fatalf("reload email: %v", err)
+	}
+	if err := f.mgr.ExpireByDeadline(&em4, now); err != nil {
+		t.Fatalf("ExpireByDeadline (future): %v", err)
+	}
+	if got := f.reload(t, 210); got.Status != models.EmailStatusQueued {
+		t.Fatalf("future-deadline email status = %s, want queued (untouched)", got.Status)
+	}
+
+	// No deadline at all: a no-op.
+	em5 := f.seedEmail(t, 211, []string{"e@example.com"})
+	if err := f.mgr.ExpireByDeadline(em5, now); err != nil {
+		t.Fatalf("ExpireByDeadline (no deadline): %v", err)
+	}
+	if got := f.reload(t, 211); got.Status != models.EmailStatusQueued {
+		t.Fatalf("no-deadline email status = %s, want queued (untouched)", got.Status)
 	}
 }
 

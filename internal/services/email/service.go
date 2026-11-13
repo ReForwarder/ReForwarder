@@ -374,6 +374,12 @@ type SendRequest struct {
 	RetryIntervalsMinutes []int      `json:"retry_intervals_minutes,omitempty" doc:"Optional queue retry interval list in minutes (e.g. [5,30,120,1440]): the delays between delivery attempts this message's recipients get, oldest first. Overrides the platform queue_retry_intervals setting for this message. At most 24 entries, each 1..43200 minutes."`
 	NotifyAddresses       []string   `json:"notify_addresses,omitempty" doc:"Optional per-recipient delivery-notification addresses. When a recipient's queue schedule reaches a terminal state (retry intervals exhausted, message expired), these addresses ride the email.failed event taxonomy (message-history event + webhook payload with the schedule trace)."`
 	ExpiresAt             *time.Time `json:"expires_at,omitempty" doc:"Optional queue expiry deadline (RFC 3339, future). The queue expiry sweep marks the message failed with an email.failed event once the deadline passes without delivery. Overrides the platform queue_message_expiry_minutes setting for this message."`
+	// DeliverBySeconds is the RFC 2852 DELIVERBY by-time in seconds, set ONLY
+	// by the SMTP submission/relay receivers (SF-09) when the client carried
+	// the BY parameter: Send() stamps it onto the message as the expiry
+	// provenance while ExpiresAt carries the computed deadline. Never bound
+	// from API callers — the API deadline surface is expires_at.
+	DeliverBySeconds int `json:"-"`
 	// TemplateName is populated by internal template-send paths
 	TemplateName string `json:"-"`
 	// TemplateData carries the render data of a template send. It is set by
@@ -384,6 +390,30 @@ type SendRequest struct {
 }
 
 // resolvedUnsub is the normalized, validated unsubscribe config used internally.
+// MaxDeliverBySeconds bounds a DELIVERBY by-time at 30 days — the same
+// horizon cap the schedule layer uses for retry intervals. A longer by-time
+// is indistinguishable from no deadline in practice and is refused rather
+// than honored dishonestly.
+const MaxDeliverBySeconds = 30 * 86400
+
+// DeliverByDeadline validates a DELIVERBY by-time (RFC 2852) and computes the
+// message deadline: acceptance time + by-time. The receiver dependency parses
+// BY as an RCPT TO parameter (go-smtp v0.25.0 conn.go — a deviation from RFC
+// 2852 §4, which defines BY on MAIL FROM; honoring works identically). A
+// non-positive by-time is refused — the server cannot honor an immediate
+// deadline (BY=0 would expire the message at acceptance) — as is a by-time
+// above the cap. Errors map to the RFC 2852 §4.2 posture: a 501 refusal.
+func DeliverByDeadline(by time.Duration, acceptedAt time.Time) (time.Time, int, error) {
+	secs := int(by / time.Second)
+	if by <= 0 || secs < 1 {
+		return time.Time{}, 0, fmt.Errorf("BY parameter below server minimum (the by-time must be at least 1 second)")
+	}
+	if secs > MaxDeliverBySeconds {
+		return time.Time{}, 0, fmt.Errorf("BY parameter above the %d-second server maximum", MaxDeliverBySeconds)
+	}
+	return acceptedAt.Add(by), secs, nil
+}
+
 // QueuePlanner is the SF-08 schedule-planning seam (services/queue.Manager).
 // When set, Send() prepares the per-recipient retry/notify schedule rows and
 // the message TTL before enqueueing. Nil (the default) keeps the pre-SF-08
@@ -914,6 +944,9 @@ func (s *Service) Send(ctx context.Context, userID, apiKeyID uint, workspaceID *
 		UnsubscribeListID:     unsubListID,
 		Status:                models.EmailStatusPending,
 		Provider:              ClassifyRecipients(req.To),
+		// SF-09: the RFC 2852 DELIVERBY provenance rides the row so the expiry
+		// events can distinguish a protocol-negotiated deadline from a TTL.
+		DeliverBySeconds: req.DeliverBySeconds,
 	}
 
 	if err := s.emailRepo.Create(em); err != nil {

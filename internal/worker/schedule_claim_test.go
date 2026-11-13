@@ -40,17 +40,112 @@ import (
 
 func seedScheduleRow(t *testing.T, s *claimState, id int64, emailID int64, status models.EmailQueueScheduleStatus, nextRetry *time.Time, attemptIndex int64) {
 	t.Helper()
+	// Status goes through claimVal so the fake's predicate comparisons see a
+	// plain string, matching the driver's argument values.
 	vals := map[string]driver.Value{
 		"id": id, "email_id": emailID,
 		"recipient": "rcpt@example.com", "user_id": int64(1),
 		"retry_intervals": "[5,30,120]", "notify_addresses": "{notify@example.com}",
-		"attempt_index": attemptIndex, "status": status,
+		"attempt_index": attemptIndex, "status": claimVal(status),
 		"last_error": "", "created_at": time.Now(), "updated_at": time.Now(),
 	}
 	if nextRetry != nil {
 		vals["next_retry_at"] = *nextRetry
 	}
 	s.tables["email_queue_schedules"] = append(s.tables["email_queue_schedules"], &claimRow{cols: vals})
+}
+
+// seedClaimEmailWithExpiry seeds an email row carrying a queue-expiry
+// deadline (SF-09 claim-time deadline tests).
+func seedClaimEmailWithExpiry(t *testing.T, s *claimState, id int64, status models.EmailStatus, expiresAt *time.Time) {
+	t.Helper()
+	// Route through s.insert so every value passes claimVal (a raw
+	// models.EmailStatus in the row would never equal the driver's plain
+	// string argument in the fake's predicate comparison).
+	s.insert("emails", map[string]any{
+		"id": id, "status": status, "retry_count": int64(0),
+		"sender": "sender@example.com", "subject": "deadline test",
+		"created_at": time.Now(), "updated_at": time.Now(),
+	})
+	if expiresAt != nil {
+		for _, row := range s.tables["emails"] {
+			if row.cols["id"] == id {
+				row.cols["expires_at"] = *expiresAt
+			}
+		}
+	}
+}
+
+// TestQueueDeadlineExpiredFinalizesAtClaim pins the SF-09 claim-time deadline
+// check: a task for a message past its expires_at is finalized through the
+// terminal path WITHOUT claiming or sending — however the task reached the
+// claim (fired retry, manual re-enqueue ahead of the retention sweep).
+func TestQueueDeadlineExpiredFinalizesAtClaim(t *testing.T) {
+	state := newClaimState()
+	past := time.Now().Add(-time.Hour)
+	seedClaimEmailWithExpiry(t, state, 74, models.EmailStatusQueued, &past)
+
+	gdb := claimGorm(t, state)
+	mgr := queue.NewManager(gdb, queue.Deps{})
+	handler := NewEmailSendHandler(
+		repositories.NewEmailRepository(gdb),
+		repositories.NewSMTPRepository(gdb),
+		nil, nil, nil,
+		nil,
+	)
+	handler.SetQueueManager(mgr)
+
+	payload, err := NewEmailSendTask(74)
+	if err != nil {
+		t.Fatalf("build payload: %v", err)
+	}
+	if err := handler.ProcessTask(context.Background(), payload); err != nil {
+		t.Fatalf("ProcessTask must succeed on an expired deadline: %v", err)
+	}
+
+	if got := state.statusOf("emails", 74); got != string(models.EmailStatusFailed) {
+		t.Fatalf("status = %v, want failed", got)
+	}
+	if got := state.stringOf("emails", 74, "error_message"); got != queue.ExpiryReason {
+		t.Fatalf("error_message = %q, want the expiry reason", got)
+	}
+	if n := state.countSelects("smtp_servers"); n != 0 {
+		t.Fatalf("smtp_servers selects = %d, want 0 (send path never entered)", n)
+	}
+}
+
+// A message whose deadline has NOT passed keeps the ordinary claim path.
+func TestQueueDeadlineNotExpiredProceeds(t *testing.T) {
+	state := newClaimState()
+	future := time.Now().Add(time.Hour)
+	seedClaimEmailWithExpiry(t, state, 75, models.EmailStatusQueued, &future)
+
+	gdb := claimGorm(t, state)
+	mgr := queue.NewManager(gdb, queue.Deps{})
+	handler := NewEmailSendHandler(
+		repositories.NewEmailRepository(gdb),
+		repositories.NewSMTPRepository(gdb),
+		nil, nil, nil,
+		nil,
+	)
+	handler.SetQueueManager(mgr)
+
+	payload, err := NewEmailSendTask(75)
+	if err != nil {
+		t.Fatalf("build payload: %v", err)
+	}
+	if err := handler.ProcessTask(context.Background(), payload); err != nil {
+		t.Fatalf("ProcessTask: %v", err)
+	}
+
+	// The ordinary path ran: the server lookup happened and the no-server
+	// terminal failure is recorded — not the expiry reason.
+	if n := state.countSelects("smtp_servers"); n != 1 {
+		t.Fatalf("smtp_servers selects = %d, want 1 (send path entered)", n)
+	}
+	if got := state.stringOf("emails", 75, "error_message"); got == queue.ExpiryReason {
+		t.Fatal("future-deadline message was expired at claim, want the ordinary path")
+	}
 }
 
 // TestQueueScheduleHoldReleasesTaskAtClaim pins the ProcessIn/ProcessAt
@@ -180,7 +275,12 @@ func TestQueueScheduleCampaignExemptProceeds(t *testing.T) {
 func TestScheduleRetryDelayFunc(t *testing.T) {
 	state := newClaimState()
 	seedClaimEmail(t, state, 81, models.EmailStatusQueued, 0)
-	future := time.Now().Add(45 * time.Minute)
+	// The hold is seeded at 24 hours so the assertion tolerates wall-clock
+	// movement between the seed and the consult (a Docker Desktop clock jump
+	// flaked the tighter ~45m window once under a loaded full-suite re-run):
+	// the semantic property under test is that the schedule — not the ≤73s
+	// default backoff — produced the delay.
+	future := time.Now().Add(24 * time.Hour)
 	seedScheduleRow(t, state, 811, 81, models.ScheduleStatusActive, &future, 1)
 
 	gdb := claimGorm(t, state)
@@ -192,25 +292,27 @@ func TestScheduleRetryDelayFunc(t *testing.T) {
 		t.Fatalf("build payload: %v", err)
 	}
 	d := delayFunc(1, context.DeadlineExceeded, task)
-	if d <= 40*time.Minute || d > 45*time.Minute {
-		t.Fatalf("delay = %s, want the remaining hold time (~45m)", d)
+	if d <= time.Hour || d > 24*time.Hour {
+		t.Fatalf("delay = %s, want the schedule hold (~24h, unambiguously not the default backoff)", d)
 	}
 
 	// A task whose email has no schedule rows keeps the default policy. The
-	// default backoff carries a random component (15s + rand^4*... for n=1:
-	// 15s..73s), so the assertion is a range, not an equality.
+	// default backoff carries a random component: for n=1 the delay is
+	// pow(1,4)+15+rand(0..29)*2 = 16s..74s (asynq server.go's
+	// DefaultRetryDelayFunc), so the assertion is that exact range, not an
+	// equality.
 	bare, err := NewEmailSendTask(82)
 	if err != nil {
 		t.Fatalf("build payload: %v", err)
 	}
 	d = delayFunc(1, context.DeadlineExceeded, bare)
-	if d < 15*time.Second || d > 73*time.Second {
-		t.Fatalf("delay = %s, want the default backoff range [15s, 73s] for n=1", d)
+	if d < 16*time.Second || d > 74*time.Second {
+		t.Fatalf("delay = %s, want the default backoff range [16s, 74s] for n=1", d)
 	}
 
 	// A nil manager degrades to the default policy entirely.
 	nilDelay := ScheduleRetryDelayFunc(nil)
-	if d := nilDelay(1, context.DeadlineExceeded, task); d < 15*time.Second || d > 73*time.Second {
-		t.Fatalf("nil-manager delay = %s, want the default backoff range [15s, 73s] for n=1", d)
+	if d := nilDelay(1, context.DeadlineExceeded, task); d < 16*time.Second || d > 74*time.Second {
+		t.Fatalf("nil-manager delay = %s, want the default backoff range [16s, 74s] for n=1", d)
 	}
 }

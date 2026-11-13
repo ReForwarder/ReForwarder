@@ -181,14 +181,31 @@ func (r *EmailQueueScheduleRepository) ExpiredEmailIDs(now time.Time, limit int)
 	return ids, err
 }
 
+// UndeliveredExpiryStatuses are the states the sweep's expiry claim covers:
+// every not-yet-delivered, non-processing row.
+var UndeliveredExpiryStatuses = []models.EmailStatus{
+	models.EmailStatusPending, models.EmailStatusQueued, models.EmailStatusScheduled,
+}
+
+// ClaimTimeExpiryStatuses additionally include processing: the SF-09
+// claim-time deadline check runs before the R-26 claim, and a redelivered
+// task on a row mid-send must never deliver past the deadline either.
+var ClaimTimeExpiryStatuses = append(UndeliveredExpiryStatuses, models.EmailStatusProcessing)
+
 // ExpireEmailCAS finalizes one expired message in a single UPDATE: only a row
 // still in an undelivered, non-processing state and still past its deadline
 // matches. Returns true when this caller won the finalization.
 func (r *EmailQueueScheduleRepository) ExpireEmailCAS(id uint, now time.Time, reason string) (bool, error) {
+	return r.ExpireEmailCASInStatuses(id, now, reason, UndeliveredExpiryStatuses)
+}
+
+// ExpireEmailCASInStatuses is the status-parametrized expiry claim — the
+// SF-09 claim-time check passes ClaimTimeExpiryStatuses so a redelivered
+// task on a processing row is also refused delivery past its deadline.
+func (r *EmailQueueScheduleRepository) ExpireEmailCASInStatuses(id uint, now time.Time, reason string, statuses []models.EmailStatus) (bool, error) {
 	res := r.db.Model(&models.Email{}).
 		Where("id = ? AND expires_at IS NOT NULL AND expires_at < ? AND status IN ?",
-			id, now,
-			[]models.EmailStatus{models.EmailStatusPending, models.EmailStatusQueued, models.EmailStatusScheduled},
+			id, now, statuses,
 		).
 		Updates(map[string]interface{}{
 			"status":        models.EmailStatusFailed,

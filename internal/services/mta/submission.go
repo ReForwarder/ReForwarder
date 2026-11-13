@@ -197,6 +197,18 @@ type SubmissionConfig struct {
 }
 
 // NewSubmissionServer configures the go-smtp server for the MSA listener.
+//
+// SF-09: the server advertises and accepts DELIVERBY (RFC 2852) — the
+// dependency parses the BY parameter as an RCPT TO option (go-smtp v0.25.0
+// conn.go, a deviation from RFC 2852 §4, which defines BY on MAIL FROM) and
+// the session carries the by-time into the send pipeline as the message's
+// queue-expiry deadline, so a message past its deliver-by is expired with a
+// DSN-style event by the SF-08 expiry machinery. MinimumDeliverByTime stays
+// unset (no server-side minimum); the session refuses non-positive by-times
+// itself. FUTURERELEASE (RFC 4865) is NOT supported: the dependency has no
+// parameter or backend hook for it — unknown MAIL FROM arguments draw its
+// hardcoded 500 5.5.4 "Unknown MAIL FROM argument" (conn.go's MAIL FROM
+// switch default case), with no clean extension point in v0.25.0.
 func NewSubmissionServer(backend *SubmissionBackend, cfg SubmissionConfig) (*gosmtp.Server, error) {
 	srv := gosmtp.NewServer(backend)
 	srv.Addr = fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
@@ -206,6 +218,7 @@ func NewSubmissionServer(backend *SubmissionBackend, cfg SubmissionConfig) (*gos
 	srv.MaxMessageBytes = cfg.MaxMessageSize
 	srv.MaxRecipients = 50
 	srv.EnableSMTPUTF8 = true
+	srv.EnableDELIVERBY = true
 	if backend != nil {
 		backend.securityPort = cfg.Port
 	}
@@ -251,6 +264,11 @@ type submissionSession struct {
 	ownerEmail string
 	from       string
 	to         []string
+	// deliverBy is the strictest (shortest) DELIVERBY by-time carried by this
+	// transaction's RCPT TO parameters (SF-09): the deadline is enforced
+	// per-message, so multiple recipients with different by-times resolve to
+	// the shortest one. Zero = no BY parameter was carried.
+	deliverBy time.Duration
 }
 
 // MemoryGuard is the SF-108 pressure seam; *memorywatch.Watchdog satisfies
@@ -323,6 +341,7 @@ func (s *submissionSession) Reset() {
 	s.guard.MarkCommand()
 	s.from = ""
 	s.to = nil
+	s.deliverBy = 0
 }
 
 func (s *submissionSession) Logout() error {
@@ -368,7 +387,7 @@ func (s *submissionSession) Mail(from string, opts *gosmtp.MailOptions) error {
 	return nil
 }
 
-func (s *submissionSession) Rcpt(to string, _ *gosmtp.RcptOptions) error {
+func (s *submissionSession) Rcpt(to string, opts *gosmtp.RcptOptions) error {
 	s.guard.MarkCommand()
 	if s.credential == nil {
 		return gosmtp.ErrAuthRequired
@@ -376,6 +395,18 @@ func (s *submissionSession) Rcpt(to string, _ *gosmtp.RcptOptions) error {
 	addr, err := mail.ParseAddress(to)
 	if err != nil || addr.Address == "" {
 		return &gosmtp.SMTPError{Code: 553, EnhancedCode: gosmtp.EnhancedCode{5, 1, 3}, Message: "invalid recipient address"}
+	}
+	// SF-09: the DELIVERBY by-time rides RCPT TO in the receiver dependency.
+	// A by-time the server cannot honor (non-positive — BY=0 would expire the
+	// message at acceptance — or above the 30-day cap) is refused per the
+	// RFC 2852 §4.2 posture: a 501, before DATA is accepted.
+	if opts != nil && opts.DeliverBy != nil {
+		if _, _, derr := email.DeliverByDeadline(opts.DeliverBy.Time, time.Now()); derr != nil {
+			return &gosmtp.SMTPError{Code: 501, EnhancedCode: gosmtp.EnhancedCode{5, 5, 4}, Message: derr.Error()}
+		}
+		if s.deliverBy == 0 || opts.DeliverBy.Time < s.deliverBy {
+			s.deliverBy = opts.DeliverBy.Time
+		}
 	}
 	s.to = append(s.to, addr.Address)
 	return nil
@@ -425,6 +456,20 @@ func (s *submissionSession) Data(r io.Reader) error {
 		HTML:        parsed.HTMLBody,
 		Text:        parsed.TextBody,
 		Attachments: attachments,
+	}
+	// SF-09: the DELIVERBY deadline is computed at message acceptance —
+	// acceptance time + the strictest by-time — and rides the SF-08 expiry
+	// machinery: the deadline lands on the row's expires_at, the claim-time
+	// check refuses delivery past it, and the retention sweep expires it
+	// with the DSN-style event.
+	if s.deliverBy > 0 {
+		acceptedAt := time.Now()
+		deadline, secs, derr := email.DeliverByDeadline(s.deliverBy, acceptedAt)
+		if derr != nil {
+			return &gosmtp.SMTPError{Code: 501, EnhancedCode: gosmtp.EnhancedCode{5, 5, 4}, Message: derr.Error()}
+		}
+		req.ExpiresAt = &deadline
+		req.DeliverBySeconds = secs
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

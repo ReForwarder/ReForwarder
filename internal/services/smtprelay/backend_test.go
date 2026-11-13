@@ -22,8 +22,10 @@ package smtprelay
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/emersion/go-smtp"
+	"github.com/goposta/posta/internal/models"
 )
 
 func TestMapSendError(t *testing.T) {
@@ -56,5 +58,84 @@ func TestMapSendError(t *testing.T) {
 				t.Fatalf("expected code %d, got %d", tt.wantCode, smtpErr.Code)
 			}
 		})
+	}
+}
+
+// ---------- SF-09: DELIVERBY capture on the relay session ----------
+
+// newRelaySession builds a relay session with an authenticated credential and
+// no guard (MarkCommand is nil-safe): the unit under test is the BY state
+// machine, not the security guard.
+func newRelaySession() *session {
+	return &session{credential: &models.SMTPCredential{UserID: 7, WorkspaceID: 3}}
+}
+
+// The by-time rides RCPT TO: accepted values are captured, multiple
+// recipients with different by-times resolve to the strictest (shortest).
+func TestRelaySessionDeliverByCapturedStrictest(t *testing.T) {
+	s := newRelaySession()
+	if err := s.Rcpt("a@example.net", &smtp.RcptOptions{
+		DeliverBy: &smtp.DeliverByOptions{Time: 120 * time.Second, Mode: smtp.DeliverByReturn},
+	}); err != nil {
+		t.Fatalf("RCPT with BY=120: %v", err)
+	}
+	if err := s.Rcpt("b@example.net", &smtp.RcptOptions{
+		DeliverBy: &smtp.DeliverByOptions{Time: 60 * time.Second, Mode: smtp.DeliverByNotify},
+	}); err != nil {
+		t.Fatalf("RCPT with BY=60: %v", err)
+	}
+	if s.deliverBy != 60*time.Second {
+		t.Fatalf("deliverBy = %s, want 60s (the strictest by-time)", s.deliverBy)
+	}
+	if len(s.to) != 2 {
+		t.Fatalf("recipients = %v, want both captured", s.to)
+	}
+
+	// A plain recipient after a BY one leaves the captured by-time alone.
+	if err := s.Rcpt("c@example.net", nil); err != nil {
+		t.Fatalf("plain RCPT: %v", err)
+	}
+	if s.deliverBy != 60*time.Second {
+		t.Fatalf("deliverBy after plain RCPT = %s, want unchanged 60s", s.deliverBy)
+	}
+}
+
+// A by-time the server cannot honor — non-positive or above the 30-day cap —
+// is refused with a 501 before DATA (RFC 2852 §4.2 posture) and never
+// captured.
+func TestRelaySessionDeliverByRefusesNonHonorableByTime(t *testing.T) {
+	s := newRelaySession()
+
+	err := s.Rcpt("dest@example.net", &smtp.RcptOptions{
+		DeliverBy: &smtp.DeliverByOptions{Time: 0, Mode: smtp.DeliverByNotify},
+	})
+	smtpErr, ok := err.(*smtp.SMTPError)
+	if !ok || smtpErr.Code != 501 {
+		t.Fatalf("BY=0 error = %v, want 501 SMTPError", err)
+	}
+	if s.deliverBy != 0 {
+		t.Fatalf("deliverBy after refused BY=0 = %s, want 0 (never captured)", s.deliverBy)
+	}
+
+	err = s.Rcpt("dest@example.net", &smtp.RcptOptions{
+		DeliverBy: &smtp.DeliverByOptions{Time: 31 * 24 * time.Hour, Mode: smtp.DeliverByNotify},
+	})
+	smtpErr, ok = err.(*smtp.SMTPError)
+	if !ok || smtpErr.Code != 501 {
+		t.Fatalf("oversize BY error = %v, want 501 SMTPError", err)
+	}
+	if s.deliverBy != 0 {
+		t.Fatalf("deliverBy after refused oversize BY = %s, want 0", s.deliverBy)
+	}
+
+	// A transaction reset clears the captured state.
+	if err := s.Rcpt("ok@example.net", &smtp.RcptOptions{
+		DeliverBy: &smtp.DeliverByOptions{Time: 90 * time.Second, Mode: smtp.DeliverByReturn},
+	}); err != nil {
+		t.Fatalf("RCPT with BY=90: %v", err)
+	}
+	s.Reset()
+	if s.deliverBy != 0 {
+		t.Fatalf("deliverBy after Reset = %s, want 0", s.deliverBy)
 	}
 }

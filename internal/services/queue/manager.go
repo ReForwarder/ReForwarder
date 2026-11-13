@@ -618,10 +618,9 @@ func (m *Manager) SweepExpired(_ context.Context, now time.Time, batch int) (Que
 		return stats, fmt.Errorf("queue expiry sweep: failed to load expired emails: %w", err)
 	}
 
-	reason := "message expired in the queue (TTL elapsed before delivery)"
 	for i := range emails {
 		em := &emails[i]
-		won, err := m.repo.ExpireEmailCAS(em.ID, now, reason)
+		won, err := m.repo.ExpireEmailCAS(em.ID, now, ExpiryReason)
 		if err != nil {
 			logger.Error("queue expiry sweep: claim failed", "email_id", em.ID, "error", err)
 			continue
@@ -630,49 +629,105 @@ func (m *Manager) SweepExpired(_ context.Context, now time.Time, batch int) (Que
 			stats.Skipped++
 			continue
 		}
-		em.Status = models.EmailStatusFailed
-		em.ErrorMessage = reason
-
-		// Schedule rows: expire + per-recipient notify.
-		rows, rerr := m.repo.FindByEmailID(em.ID)
-		if rerr == nil {
-			for j := range rows {
-				if rows[j].ScheduleTerminal() {
-					continue
-				}
-				ok, terr := m.repo.TerminateCAS(rows[j].ID, models.ScheduleStatusExpired, reason, now)
-				if terr != nil {
-					logger.Error("queue expiry sweep: failed to expire schedule row", "email_id", em.ID, "error", terr)
-					continue
-				}
-				if ok {
-					rows[j].Status = models.ScheduleStatusExpired
-					if m.emitScheduleTerminal(em, &rows[j], reason, now) {
-						stats.Notified++
-					}
-				}
-			}
-		}
-
-		// Message-level expiry event through the existing taxonomy.
-		emailhistory.RecordFailed(m.deps.Recorder, em, reason, map[string]any{
-			"schedule_event": "message_expired",
-			"expires_at":     em.ExpiresAt,
-		})
-		if m.deps.Dispatcher != nil {
-			m.dispatchSchedulePayload(em, nil, reason, "message_expired")
-		}
-
-		// Campaign bookkeeping: linked, still-pending campaign messages fail
-		// with the message (the campaign UI shows the terminal cause).
-		if err := m.repo.MarkCampaignMessageFailed(em.ID, reason); err != nil {
-			logger.Warn("queue expiry sweep: failed to update campaign message", "email_id", em.ID, "error", err)
-		}
-
+		stats.Notified += m.finalizeExpired(em, now, ExpiryReason)
 		stats.Expired++
 		logger.Info("queue expiry sweep: marked expired email failed", "email_id", em.ID)
 	}
 	return stats, nil
+}
+
+// ExpiryReason is the terminal error text for both expiry paths (the
+// retention sweep and the SF-09 claim-time deadline check); the deadline's
+// provenance rides the event metadata, not the reason text.
+const ExpiryReason = "message expired in the queue (TTL elapsed before delivery)"
+
+// expiryEventMetadata builds the DSN-style metadata for a message-level
+// expiry event (SF-09): the RFC 3463 enhanced status and diagnostic for a
+// delivery time that ran out — the permanent class, matching the terminal
+// status flip — plus the deadline provenance when it came from the RFC 2852
+// DELIVERBY parameter.
+func expiryEventMetadata(em *models.Email, scheduleEvent string) map[string]any {
+	metadata := map[string]any{
+		"schedule_event":  scheduleEvent,
+		"expires_at":      em.ExpiresAt,
+		"action":          "failed",
+		"enhanced_status": "5.4.7",
+		"diagnostic":      "delivery time expired",
+	}
+	if em.DeliverBySeconds > 0 {
+		metadata["deliver_by_seconds"] = em.DeliverBySeconds
+		metadata["deadline_source"] = "deliverby"
+	}
+	return metadata
+}
+
+// finalizeExpired completes one expiry whose CAS claim was won: schedule rows
+// expire with their notify emission, the DSN-style message event records
+// through the existing taxonomy, and linked campaign messages fail with the
+// message. Returns the number of webhook emissions fired.
+func (m *Manager) finalizeExpired(em *models.Email, now time.Time, reason string) int {
+	em.Status = models.EmailStatusFailed
+	em.ErrorMessage = reason
+
+	// Schedule rows: expire + per-recipient notify.
+	notified := 0
+	rows, rerr := m.repo.FindByEmailID(em.ID)
+	if rerr == nil {
+		for j := range rows {
+			if rows[j].ScheduleTerminal() {
+				continue
+			}
+			ok, terr := m.repo.TerminateCAS(rows[j].ID, models.ScheduleStatusExpired, reason, now)
+			if terr != nil {
+				logger.Error("queue expiry: failed to expire schedule row", "email_id", em.ID, "error", terr)
+				continue
+			}
+			if ok {
+				rows[j].Status = models.ScheduleStatusExpired
+				if m.emitScheduleTerminal(em, &rows[j], reason, now) {
+					notified++
+				}
+			}
+		}
+	}
+
+	// Message-level expiry event through the existing taxonomy.
+	emailhistory.RecordFailed(m.deps.Recorder, em, reason, expiryEventMetadata(em, "message_expired"))
+	if m.deps.Dispatcher != nil {
+		m.dispatchSchedulePayload(em, nil, reason, "message_expired")
+	}
+
+	// Campaign bookkeeping: linked, still-pending campaign messages fail
+	// with the message (the campaign UI shows the terminal cause).
+	if err := m.repo.MarkCampaignMessageFailed(em.ID, reason); err != nil {
+		logger.Warn("queue expiry: failed to update campaign message", "email_id", em.ID, "error", err)
+	}
+	return notified
+}
+
+// ExpireByDeadline is the SF-09 claim-time deadline check: called from the
+// send handler before the R-26 claim, it refuses delivery of any message
+// whose expires_at deadline has passed — however the task reached the claim
+// (a fired retry, a manual re-enqueue ahead of the retention sweep's daily
+// pass). The CAS includes processing rows: a redelivered task on a row
+// mid-send must never deliver past the deadline either. A nil manager or a
+// row without a deadline is a no-op (nil error).
+func (m *Manager) ExpireByDeadline(em *models.Email, now time.Time) error {
+	if m == nil || em == nil || em.ID == 0 || em.ExpiresAt == nil || em.ExpiresAt.After(now) {
+		return nil
+	}
+	won, err := m.repo.ExpireEmailCASInStatuses(em.ID, now, ExpiryReason, repositories.ClaimTimeExpiryStatuses)
+	if err != nil {
+		return fmt.Errorf("queue deadline check: claim failed for email %d: %w", em.ID, err)
+	}
+	if !won {
+		// Already finalized elsewhere (delivered raced and lost its claim, or
+		// another claimant's deadline check won) — nothing to do.
+		return nil
+	}
+	m.finalizeExpired(em, now, ExpiryReason)
+	logger.Info("queue deadline check: expired message at claim time", "email_id", em.ID)
+	return nil
 }
 
 // emitScheduleTerminal records the per-recipient terminal event: the timeline
@@ -712,6 +767,18 @@ func (m *Manager) dispatchSchedulePayload(em *models.Email, row *models.EmailQue
 		"sender":         em.Sender,
 		"reason":         reason,
 		"schedule_event": scheduleEvent,
+	}
+	// The DSN-style expiry fields (RFC 3463 X.4.7, permanent class — the
+	// terminal status flip) ride only the message-expired event; a row-level
+	// exhaustion/cancellation is a different diagnostic.
+	if scheduleEvent == "message_expired" {
+		payload["action"] = "failed"
+		payload["enhanced_status"] = "5.4.7"
+		payload["diagnostic"] = "delivery time expired"
+		if em.DeliverBySeconds > 0 {
+			payload["deliver_by_seconds"] = em.DeliverBySeconds
+			payload["deadline_source"] = "deliverby"
+		}
 	}
 	if row != nil {
 		payload["recipient"] = row.Recipient

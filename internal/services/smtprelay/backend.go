@@ -113,7 +113,10 @@ type session struct {
 	ownerEmail string
 	from       string
 	to         []string
-	guard      *security.SessionGuard
+	// deliverBy is the strictest (shortest) DELIVERBY by-time carried by this
+	// transaction's RCPT TO parameters (SF-09); zero = none carried.
+	deliverBy time.Duration
+	guard     *security.SessionGuard
 }
 
 func (s *session) AuthMechanisms() []string { return []string{sasl.Plain} }
@@ -158,6 +161,7 @@ func (s *session) Reset() {
 	s.guard.MarkCommand()
 	s.from = ""
 	s.to = nil
+	s.deliverBy = 0
 }
 
 func (s *session) Logout() error {
@@ -180,7 +184,7 @@ func (s *session) Mail(from string, _ *smtp.MailOptions) error {
 	return nil
 }
 
-func (s *session) Rcpt(to string, _ *smtp.RcptOptions) error {
+func (s *session) Rcpt(to string, opts *smtp.RcptOptions) error {
 	s.guard.MarkCommand()
 	if s.credential == nil {
 		return smtp.ErrAuthRequired
@@ -188,6 +192,17 @@ func (s *session) Rcpt(to string, _ *smtp.RcptOptions) error {
 	addr := to
 	if parsed, err := mail.ParseAddress(to); err == nil {
 		addr = parsed.Address
+	}
+	// SF-09: the DELIVERBY by-time rides RCPT TO in the receiver dependency.
+	// Non-honorable by-times (non-positive or above the 30-day cap) are
+	// refused with a 501 before DATA, per the RFC 2852 §4.2 posture.
+	if opts != nil && opts.DeliverBy != nil {
+		if _, _, derr := email.DeliverByDeadline(opts.DeliverBy.Time, time.Now()); derr != nil {
+			return &smtp.SMTPError{Code: 501, EnhancedCode: smtp.EnhancedCode{5, 5, 4}, Message: derr.Error()}
+		}
+		if s.deliverBy == 0 || opts.DeliverBy.Time < s.deliverBy {
+			s.deliverBy = opts.DeliverBy.Time
+		}
 	}
 	s.to = append(s.to, addr)
 	return nil
@@ -238,6 +253,18 @@ func (s *session) Data(r io.Reader) error {
 		HTML:        parsed.HTMLBody,
 		Text:        parsed.TextBody,
 		Attachments: attachments,
+	}
+	// SF-09: the DELIVERBY deadline is computed at message acceptance —
+	// acceptance time + the strictest by-time — and rides the SF-08 expiry
+	// machinery (row expires_at + claim-time check + the retention sweep's
+	// DSN-style expiry event).
+	if s.deliverBy > 0 {
+		deadline, secs, derr := email.DeliverByDeadline(s.deliverBy, time.Now())
+		if derr != nil {
+			return &smtp.SMTPError{Code: 501, EnhancedCode: smtp.EnhancedCode{5, 5, 4}, Message: derr.Error()}
+		}
+		req.ExpiresAt = &deadline
+		req.DeliverBySeconds = secs
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

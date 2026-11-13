@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -450,6 +451,9 @@ func (s *claimState) applyUpdate(table, lower string, args []driver.NamedValue) 
 	preds, err := s.predsFor(where, args)
 	if err != nil {
 		return nil, err
+	}
+	if os.Getenv("CLAIM_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "claimState: table=%s args=%v\n", table, args)
 	}
 	matched := 0
 	for _, row := range s.tables[table] {

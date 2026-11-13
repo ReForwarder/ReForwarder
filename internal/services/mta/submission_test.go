@@ -26,6 +26,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/emersion/go-sasl"
 	gosmtp "github.com/emersion/go-smtp"
@@ -68,22 +69,26 @@ type fakeSink struct {
 }
 
 type recordedSubmit struct {
-	userID     uint
-	ownerEmail string
-	from       string
-	to         []string
-	subject    string
+	userID           uint
+	ownerEmail       string
+	from             string
+	to               []string
+	subject          string
+	expiresAt        *time.Time
+	deliverBySeconds int
 }
 
 func (f *fakeSink) Submit(_ context.Context, userID, _ uint, _ *uint, ownerEmail string, req *email.SendRequest) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.submits = append(f.submits, recordedSubmit{
-		userID:     userID,
-		ownerEmail: ownerEmail,
-		from:       req.From,
-		to:         req.To,
-		subject:    req.Subject,
+		userID:           userID,
+		ownerEmail:       ownerEmail,
+		from:             req.From,
+		to:               req.To,
+		subject:          req.Subject,
+		expiresAt:        req.ExpiresAt,
+		deliverBySeconds: req.DeliverBySeconds,
 	})
 	return nil
 }
@@ -300,5 +305,137 @@ func TestSubmissionBackendRefusesIncompleteWiring(t *testing.T) {
 	}
 	if _, err := NewSubmissionBackend(&fakeVerifier{}, &fakeDomains{}, nil, 0); err == nil {
 		t.Fatal("nil sink must refuse construction")
+	}
+}
+
+// ---------- SF-09: DELIVERBY honoring through the MSA ----------
+
+// The server advertises DELIVERBY, and a client-supplied BY parameter rides
+// the send pipeline as the message's queue-expiry deadline (acceptance time +
+// by-time) with the by-time recorded as provenance — the SF-08 expiry
+// machinery takes it from there.
+func TestSubmissionDeliverByAdvertisedAndHonored(t *testing.T) {
+	addr, _, _, sink := newSubmissionFixture(t)
+	cl := submissionClient(t, addr, true)
+
+	if ok, _ := cl.Extension("DELIVERBY"); !ok {
+		t.Fatal("DELIVERBY not advertised on the MSA")
+	}
+	if err := cl.Mail("hello@verified.example", nil); err != nil {
+		t.Fatalf("MAIL FROM: %v", err)
+	}
+	if err := cl.Rcpt("dest@example.net", &gosmtp.RcptOptions{
+		DeliverBy: &gosmtp.DeliverByOptions{Time: 90 * time.Second, Mode: gosmtp.DeliverByReturn},
+	}); err != nil {
+		t.Fatalf("RCPT TO with BY: %v", err)
+	}
+	w, err := cl.Data()
+	if err != nil {
+		t.Fatalf("DATA: %v", err)
+	}
+	if _, err := io.WriteString(w, "Subject: deliverby\r\n\r\nbody\r\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("end of DATA: %v", err)
+	}
+	_ = cl.Quit()
+
+	if sink.count() != 1 {
+		t.Fatalf("sink submissions = %d, want 1", sink.count())
+	}
+	sub := sink.last()
+	if sub.expiresAt == nil {
+		t.Fatal("pipeline request carries no expires_at, want the DELIVERBY deadline")
+	}
+	remaining := time.Until(*sub.expiresAt)
+	if remaining < 88*time.Second || remaining > 92*time.Second {
+		t.Fatalf("deadline %s away, want ~90s (acceptance + by-time)", remaining)
+	}
+	if sub.deliverBySeconds != 90 {
+		t.Fatalf("deliver_by_seconds = %d, want 90", sub.deliverBySeconds)
+	}
+}
+
+// The deadline is per-message: multiple recipients with different by-times
+// resolve to the strictest (shortest) one.
+func TestSubmissionDeliverByStrictestByTimeWins(t *testing.T) {
+	addr, _, _, sink := newSubmissionFixture(t)
+	cl := submissionClient(t, addr, true)
+
+	if err := cl.Mail("hello@verified.example", nil); err != nil {
+		t.Fatalf("MAIL FROM: %v", err)
+	}
+	if err := cl.Rcpt("a@example.net", &gosmtp.RcptOptions{
+		DeliverBy: &gosmtp.DeliverByOptions{Time: 120 * time.Second, Mode: gosmtp.DeliverByReturn},
+	}); err != nil {
+		t.Fatalf("RCPT TO (120s): %v", err)
+	}
+	if err := cl.Rcpt("b@example.net", &gosmtp.RcptOptions{
+		DeliverBy: &gosmtp.DeliverByOptions{Time: 60 * time.Second, Mode: gosmtp.DeliverByNotify},
+	}); err != nil {
+		t.Fatalf("RCPT TO (60s): %v", err)
+	}
+	w, err := cl.Data()
+	if err != nil {
+		t.Fatalf("DATA: %v", err)
+	}
+	if _, err := io.WriteString(w, "Subject: strictest\r\n\r\nbody\r\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("end of DATA: %v", err)
+	}
+	_ = cl.Quit()
+
+	if sink.count() != 1 {
+		t.Fatalf("sink submissions = %d, want 1", sink.count())
+	}
+	sub := sink.last()
+	if sub.deliverBySeconds != 60 {
+		t.Fatalf("deliver_by_seconds = %d, want 60 (the strictest by-time)", sub.deliverBySeconds)
+	}
+	if sub.expiresAt == nil {
+		t.Fatal("pipeline request carries no expires_at")
+	}
+	if remaining := time.Until(*sub.expiresAt); remaining < 58*time.Second || remaining > 62*time.Second {
+		t.Fatalf("deadline %s away, want ~60s", remaining)
+	}
+}
+
+// A by-time the server cannot honor — non-positive (BY=0 would expire the
+// message at acceptance) or above the 30-day cap — is refused with 501
+// before DATA, per the RFC 2852 §4.2 posture, and nothing reaches the
+// pipeline.
+func TestSubmissionDeliverByRefusesNonHonorableByTime(t *testing.T) {
+	addr, _, _, sink := newSubmissionFixture(t)
+
+	// BY=0;N — the dependency accepts the zero by-time for notify mode, the
+	// session refuses it (the server cannot honor an immediate deadline).
+	cl := submissionClient(t, addr, true)
+	if err := cl.Mail("hello@verified.example", nil); err != nil {
+		t.Fatalf("MAIL FROM: %v", err)
+	}
+	err := cl.Rcpt("dest@example.net", &gosmtp.RcptOptions{
+		DeliverBy: &gosmtp.DeliverByOptions{Time: 0, Mode: gosmtp.DeliverByNotify},
+	})
+	if code := smtpCode(t, err); code != 501 {
+		t.Fatalf("BY=0 code = %d (%v), want 501", code, err)
+	}
+
+	// BY above the 30-day cap.
+	err = cl.Rcpt("dest@example.net", &gosmtp.RcptOptions{
+		DeliverBy: &gosmtp.DeliverByOptions{Time: 31 * 24 * time.Hour, Mode: gosmtp.DeliverByNotify},
+	})
+	if code := smtpCode(t, err); code != 501 {
+		t.Fatalf("oversize BY code = %d (%v), want 501", code, err)
+	}
+
+	// Nothing reached the pipeline, and a by-less transaction still works.
+	if sink.count() != 0 {
+		t.Fatalf("sink submissions = %d, want 0", sink.count())
+	}
+	if err := cl.Rcpt("dest@example.net", nil); err != nil {
+		t.Fatalf("plain RCPT TO after refusals: %v", err)
 	}
 }
