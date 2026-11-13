@@ -95,6 +95,12 @@ type Email struct {
 	ScheduledAt  *time.Time  `json:"scheduled_at"`
 	Provider     string      `json:"provider,omitempty" gorm:"index;size:32"`
 
+	// ExpiresAt is the message's queue expiry deadline (SF-08, additive
+	// column): the expiry sweep marks still-undelivered rows
+	// (pending/queued/scheduled) failed once the deadline passes. Nil means
+	// no TTL was requested for the message — the pre-SF-08 behavior.
+	ExpiresAt *time.Time `json:"expires_at,omitempty" gorm:"index"`
+
 	// Write-once lifecycle timestamps: denormalized from the message-history
 	// event timeline and set only the first time the state is reached, so the
 	// logs list can filter and sort without joining email_events.

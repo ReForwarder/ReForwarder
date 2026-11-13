@@ -34,6 +34,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/emailhistory"
+	"github.com/goposta/posta/internal/services/queue"
 	"github.com/goposta/posta/internal/services/ratelimit"
 	"github.com/goposta/posta/internal/services/settings"
 	"github.com/goposta/posta/internal/services/tracking"
@@ -108,6 +109,7 @@ type Service struct {
 	planLimits       PlanLimitsProvider
 	linkGen          LinkGenerator
 	recorder         *emailhistory.Recorder
+	queuePlanner     QueuePlanner
 	trackingSvc      *tracking.Service
 	trackingEnabled  func() bool
 	devMode          bool
@@ -361,6 +363,17 @@ type SendRequest struct {
 	ListUnsubscribeURL  string     `json:"list_unsubscribe_url,omitempty" deprecated:"true"`
 	ListUnsubscribePost bool       `json:"list_unsubscribe_post,omitempty" deprecated:"true"`
 	SendAt              *time.Time `json:"send_at,omitempty"`
+	// SF-08 queue-layer schedule overrides (all optional; absent fields fall
+	// back to the platform queue settings, and with default settings the
+	// queue keeps its legacy behavior). retry_intervals_minutes is the
+	// per-message retry interval list (minutes between attempts, oldest
+	// first); notify_addresses are the per-recipient delivery-notification
+	// targets informed through the existing event taxonomy when a
+	// recipient's schedule reaches a terminal state; expires_at is the
+	// message TTL deadline the queue expiry sweep honors.
+	RetryIntervalsMinutes []int      `json:"retry_intervals_minutes,omitempty" doc:"Optional queue retry interval list in minutes (e.g. [5,30,120,1440]): the delays between delivery attempts this message's recipients get, oldest first. Overrides the platform queue_retry_intervals setting for this message. At most 24 entries, each 1..43200 minutes."`
+	NotifyAddresses       []string   `json:"notify_addresses,omitempty" doc:"Optional per-recipient delivery-notification addresses. When a recipient's queue schedule reaches a terminal state (retry intervals exhausted, message expired), these addresses ride the email.failed event taxonomy (message-history event + webhook payload with the schedule trace)."`
+	ExpiresAt             *time.Time `json:"expires_at,omitempty" doc:"Optional queue expiry deadline (RFC 3339, future). The queue expiry sweep marks the message failed with an email.failed event once the deadline passes without delivery. Overrides the platform queue_message_expiry_minutes setting for this message."`
 	// TemplateName is populated by internal template-send paths
 	TemplateName string `json:"-"`
 	// TemplateData carries the render data of a template send. It is set by
@@ -371,6 +384,66 @@ type SendRequest struct {
 }
 
 // resolvedUnsub is the normalized, validated unsubscribe config used internally.
+// QueuePlanner is the SF-08 schedule-planning seam (services/queue.Manager).
+// When set, Send() prepares the per-recipient retry/notify schedule rows and
+// the message TTL before enqueueing. Nil (the default) keeps the pre-SF-08
+// behavior: no schedule rows, no TTL stamping.
+type QueuePlanner interface {
+	EnsureForEmail(em *models.Email, req queue.ScheduleRequest) error
+}
+
+// SetQueuePlanner wires the SF-08 schedule-planning seam.
+func (s *Service) SetQueuePlanner(p QueuePlanner) { s.queuePlanner = p }
+
+// validateScheduleRequest checks the optional SF-08 queue schedule fields.
+// All are optional; present values must be well-formed so the queue layer
+// never shapes retries from garbage.
+func validateScheduleRequest(req *SendRequest) error {
+	if err := queue.SanitizeIntervals(req.RetryIntervalsMinutes); err != nil {
+		return err
+	}
+	seen := make(map[string]bool, len(req.NotifyAddresses))
+	for _, a := range req.NotifyAddresses {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			continue
+		}
+		parsed, err := mail.ParseAddress(a)
+		if err != nil {
+			return fmt.Errorf("notify_addresses: %q is not a valid address", a)
+		}
+		if seen[strings.ToLower(parsed.Address)] {
+			continue
+		}
+		seen[strings.ToLower(parsed.Address)] = true
+	}
+	if req.ExpiresAt != nil && !req.ExpiresAt.After(time.Now()) {
+		return fmt.Errorf("expires_at must be in the future")
+	}
+	return nil
+}
+
+// scheduleRequestFor maps the request's queue schedule fields onto the
+// planner's request shape.
+func scheduleRequestFor(req *SendRequest) queue.ScheduleRequest {
+	addrs := make([]string, 0, len(req.NotifyAddresses))
+	for _, a := range req.NotifyAddresses {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			continue
+		}
+		if parsed, err := mail.ParseAddress(a); err == nil {
+			a = parsed.Address
+		}
+		addrs = append(addrs, a)
+	}
+	return queue.ScheduleRequest{
+		RetryIntervalsMinutes: req.RetryIntervalsMinutes,
+		NotifyAddresses:       addrs,
+		ExpiresAt:             req.ExpiresAt,
+	}
+}
+
 type resolvedUnsub struct {
 	listID   *uint  // Posta-managed list (validated + owned)
 	url      string // caller-managed https URL
@@ -667,6 +740,12 @@ func (s *Service) Send(ctx context.Context, userID, apiKeyID uint, workspaceID *
 		return nil, fmt.Errorf("header validation: %w", err)
 	}
 
+	// SF-08: validate the optional queue schedule fields up front so a
+	// malformed interval list or expiry never reaches the queue layer.
+	if err := validateScheduleRequest(req); err != nil {
+		return nil, fmt.Errorf("queue schedule validation: %w", err)
+	}
+
 	req.From = s.applyDefaultSenderName(workspaceID, req.From)
 
 	// Enforce maintenance mode
@@ -882,6 +961,16 @@ func (s *Service) Send(ctx context.Context, userID, apiKeyID uint, workspaceID *
 		}
 		logger.Info("dev mode: email stored but not sent", "id", em.UUID)
 		return &SendResponse{ID: em.UUID, Status: em.Status}, nil
+	}
+
+	// SF-08: prepare the queue schedule state before the message enters the
+	// queue — per-recipient retry/notify schedule rows and the TTL deadline.
+	// Best-effort: a planning failure is logged and never fails the send (the
+	// queue keeps its legacy behavior for that message).
+	if s.queuePlanner != nil {
+		if err := s.queuePlanner.EnsureForEmail(em, scheduleRequestFor(req)); err != nil {
+			logger.Warn("queue schedule planning failed; continuing without schedule state", "id", em.UUID, "error", err)
+		}
 	}
 
 	// Scheduled sending

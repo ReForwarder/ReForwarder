@@ -26,6 +26,7 @@ import (
 
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/queues"
+	"github.com/goposta/posta/internal/services/queue"
 	"github.com/hibiken/asynq"
 	"github.com/jkaninda/logger"
 	"gorm.io/gorm"
@@ -40,6 +41,20 @@ type SendTaskInspector interface {
 // SendEnqueuer re-enqueues an email send task. *worker.Producer satisfies it.
 type SendEnqueuer interface {
 	EnqueueEmailSend(emailID uint, queue string) error
+}
+
+// ScheduledSendEnqueuer additionally re-enqueues at a future time — the
+// ProcessAt carrier for SF-08 schedule-held messages. *worker.Producer
+// satisfies it.
+type ScheduledSendEnqueuer interface {
+	SendEnqueuer
+	EnqueueEmailSendAt(emailID uint, queue string, sendAt time.Time) error
+}
+
+// ScheduleConsult is the SF-08 per-recipient schedule consult
+// (services/queue.Manager).
+type ScheduleConsult interface {
+	DecideRetry(emailID uint, now time.Time) (queue.ScheduleDecision, time.Time)
 }
 
 // QueueReconcileJob re-enqueues emails stuck in status=queued whose asynq task
@@ -67,6 +82,11 @@ type QueueReconcileJob struct {
 	inspector SendTaskInspector
 	stuckFor  time.Duration
 	batchSize int
+	// scheduler is the SF-08 per-recipient schedule consult (nil = unset):
+	// exhausted schedules are skipped, schedule-held messages re-enqueue at
+	// exactly the due time via the ScheduledSendEnqueuer (ProcessAt), and
+	// everything else keeps the immediate re-enqueue.
+	scheduler ScheduleConsult
 }
 
 func NewQueueReconcileJob(db *gorm.DB, producer SendEnqueuer, inspector SendTaskInspector) *QueueReconcileJob {
@@ -78,6 +98,9 @@ func NewQueueReconcileJob(db *gorm.DB, producer SendEnqueuer, inspector SendTask
 		batchSize: 100,
 	}
 }
+
+// SetScheduler wires the SF-08 schedule consult.
+func (j *QueueReconcileJob) SetScheduler(s ScheduleConsult) { j.scheduler = s }
 
 func (j *QueueReconcileJob) Name() string     { return "queue-reconcile" }
 func (j *QueueReconcileJob) Schedule() string { return "*/5 * * * *" }
@@ -135,6 +158,22 @@ func (j *QueueReconcileJob) ReconcileOnce(_ context.Context) (int, error) {
 			continue
 		}
 
+		// SF-08: consult the per-recipient schedule before re-enqueueing. An
+		// exhausted schedule stays lost (nothing may re-enter the queue); a
+		// schedule-held message re-enqueues at exactly the due time (the
+		// claim-time consult in the send handler released such a task — this
+		// is the durable ProcessAt carrier); due/none keep the immediate
+		// re-enqueue. Nil scheduler keeps the legacy behavior for all rows.
+		scheduledAt := time.Time{}
+		if j.scheduler != nil {
+			switch d, due := j.scheduler.DecideRetry(em.ID, time.Now()); d {
+			case queue.DecisionExhausted:
+				continue
+			case queue.DecisionWait:
+				scheduledAt = due
+			}
+		}
+
 		// CAS the claim: only a row still queued and still stale wins. The
 		// updated_at bump re-arms the window so a failed enqueue retries on a
 		// later tick instead of hot-looping.
@@ -147,6 +186,25 @@ func (j *QueueReconcileJob) ReconcileOnce(_ context.Context) (int, error) {
 		}
 		if claim.RowsAffected == 0 {
 			continue // another reconciler (or the worker) got there first
+		}
+		var enqErr error
+		if !scheduledAt.IsZero() {
+			// Schedule-held: ProcessAt the due time. A producer without the
+			// scheduled variant falls back to the immediate enqueue (the
+			// claim-time consult would hold it again — never a premature send).
+			if se, ok := j.producer.(ScheduledSendEnqueuer); ok {
+				enqErr = se.EnqueueEmailSendAt(em.ID, "", scheduledAt)
+			} else {
+				enqErr = j.producer.EnqueueEmailSend(em.ID, "")
+			}
+			if enqErr == nil {
+				requeued++
+				logger.Info("queue-reconcile: re-enqueued lost email at scheduled retry time",
+					"email_id", em.ID, "due", scheduledAt.UTC().Format(time.RFC3339))
+				continue
+			}
+			logger.Error("queue-reconcile: failed to re-enqueue lost email at scheduled retry time", "email_id", em.ID, "error", enqErr)
+			continue
 		}
 		if err := j.producer.EnqueueEmailSend(em.ID, ""); err != nil {
 			logger.Error("queue-reconcile: failed to re-enqueue lost email", "email_id", em.ID, "error", err)

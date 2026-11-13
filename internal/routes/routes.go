@@ -49,6 +49,7 @@ import (
 	"github.com/goposta/posta/internal/services/messages"
 	"github.com/goposta/posta/internal/services/notification"
 	"github.com/goposta/posta/internal/services/passwordreset"
+	"github.com/goposta/posta/internal/services/queue"
 	planpkg "github.com/goposta/posta/internal/services/plan"
 	"github.com/goposta/posta/internal/services/provider_events"
 	"github.com/goposta/posta/internal/services/ratelimit"
@@ -295,6 +296,17 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	// bounce webhook here; the worker builds its own in cmd/posta/server.go.
 	logsRecorder := emailhistory.NewRecorder(db)
 	emailService.SetRecorder(logsRecorder)
+
+	// SF-08: per-recipient retry/notify schedules + message expiry — the send
+	// path prepares the queue schedule state (per-message overrides or the
+	// platform queue settings) before enqueueing. Nil-safe: with no schedule
+	// fields and default settings nothing is created and the queue keeps its
+	// legacy behavior.
+	emailService.SetQueuePlanner(queue.NewManager(db, queue.Deps{
+		Settings:   settingsProvider,
+		Dispatcher: dispatcher,
+		Recorder:   logsRecorder,
+	}))
 
 	// Cache
 	statsCache := cache.New(redisClient)

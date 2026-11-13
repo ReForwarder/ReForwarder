@@ -47,6 +47,20 @@ func RecordFailed(r *Recorder, em *models.Email, errMsg string, metadata map[str
 	})
 }
 
+// RecordFailedDeduped records a delivery failure of em carrying its own
+// provider-event id, so it coexists with the plain failure events on the same
+// timeline instead of being swallowed by them: the
+// (email_uuid, type, provider_event_id) unique index collapses replays per id
+// rather than collapsing every failure of a message into one row.
+func RecordFailedDeduped(r *Recorder, em *models.Email, errMsg, providerEventID string, metadata map[string]any) {
+	r.recordFromEmail(em, EventInput{
+		Type:            models.EmailEventFailed,
+		Error:           errMsg,
+		ProviderEventID: providerEventID,
+		Metadata:        metadata,
+	})
+}
+
 // RecordBounced records a hard bounce of em. providerEventID dedups provider
 // replays of the same bounce report.
 func RecordBounced(r *Recorder, em *models.Email, reason, providerEventID string, metadata map[string]any) {

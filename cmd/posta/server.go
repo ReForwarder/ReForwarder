@@ -59,6 +59,7 @@ import (
 	"github.com/goposta/posta/internal/services/mta"
 	"github.com/goposta/posta/internal/services/notification"
 	"github.com/goposta/posta/internal/services/pop3"
+	"github.com/goposta/posta/internal/services/queue"
 	"github.com/goposta/posta/internal/services/ratelimit"
 	"github.com/goposta/posta/internal/services/realtime"
 	"github.com/goposta/posta/internal/services/retry"
@@ -1403,6 +1404,19 @@ func startIMAPServer(
 	return srv, nil
 }
 
+// newQueueManager builds the SF-08 persistent multi-queue manager's schedule
+// layer over the process's DB: per-recipient retry/notify schedules, the
+// claim-time retry consult, and the TTL expiry sweeper. Its own settings
+// provider + dispatcher + recorder instances keep it independent of the
+// route/worker wiring (same pattern as newWebhookDispatcher).
+func newQueueManager(db *gorm.DB, cfg *config.Config) *queue.Manager {
+	return queue.NewManager(db, queue.Deps{
+		Settings:   settings.NewProvider(repositories.NewSettingRepository(db)),
+		Dispatcher: newWebhookDispatcher(db, cfg),
+		Recorder:   emailhistory.NewRecorder(db),
+	})
+}
+
 // startEmbeddedWorker starts an in-process asynq worker for email delivery.
 // The bus argument is used by the inbound parse handler to publish
 // email.inbound.received events; it may be nil when inbound is disabled.
@@ -1453,6 +1467,10 @@ func startEmbeddedWorker(db *gorm.DB,
 	// instance backs both the send handler and the exhausted-task handler.
 	logsRecorder := emailhistory.NewRecorder(db)
 	handler.SetRecorder(logsRecorder)
+	// SF-08: per-recipient retry/notify schedules + message expiry. The
+	// claim-time consult honors the recipients' interval lists; nil-safe
+	// everywhere, so an unwired manager would keep the pre-SF-08 behavior.
+	handler.SetQueueManager(newQueueManager(db, cfg))
 	handler.OnSent(func() {
 		metrics.IncrementEmailSent()
 		metrics.DecrementEmailQueued()
@@ -1496,6 +1514,10 @@ func startEmbeddedWorker(db *gorm.DB,
 				worker.QueueLow:           1,
 			},
 			ErrorHandler: worker.ChainErrorHandlers(errorHandlers...),
+			// SF-08: a failed send task's next attempt is scheduled (ProcessAt
+			// semantics) at the earliest retry time the per-recipient schedule
+			// ledger produced, instead of the default backoff.
+			RetryDelayFunc: worker.ScheduleRetryDelayFunc(newQueueManager(db, cfg)),
 			// SF-109: bound the drain window on shutdown; a task still running
 			// past it is released back to Redis (leased out again), matching the
 			// 30s budget shutdownServer gives the SMTP receivers.
@@ -1648,6 +1670,11 @@ func initCronManager(
 	if blobStore != nil {
 		retentionJob.SetBlobStore(blobStore)
 	}
+	// SF-08: the queue-expiry family rides the unified retention job (the
+	// mailstore-sweeper pattern) — undelivered messages past their TTL are
+	// marked failed with an event, their per-recipient schedules expire with
+	// the notify emission.
+	retentionJob.SetQueueExpirySweeper(newQueueManager(db, cfg))
 	// OB-3 (ADR-003 §7): hosted-mailbox retention runs in the same unified
 	// job. The sweeper needs only db + blob store (no blob codec), so it
 	// wires ahead of the full mailstore service (the OB-4 ingestion seam).
@@ -1699,11 +1726,16 @@ func initCronManager(
 		))
 		// Lost-task reconcile (R-03): emails stuck in queued whose asynq task
 		// no longer exists are re-enqueued; the retry worker only covers failed.
-		manager.Register(jobs.NewQueueReconcileJob(
+		// SF-08: the reconcile is schedule-aware — schedule-held messages
+		// re-enqueue at exactly the due time (ProcessAt), exhausted schedules
+		// stay lost.
+		reconcileJob := jobs.NewQueueReconcileJob(
 			db,
 			producer,
 			asynq.NewInspector(cfg.Redis.AsynqRedisOpt()),
-		))
+		)
+		reconcileJob.SetScheduler(newQueueManager(db, cfg))
+		manager.Register(reconcileJob)
 	}
 	retentionJob.SetNotificationRepo(repositories.NewNotificationRepository(db))
 	// Scheduled pg_dump backups with retention (R-11). Off by default — the
@@ -1814,6 +1846,10 @@ func startRetryWorker(db *gorm.DB, cfg *config.Config, producer *worker.Producer
 	if producer != nil {
 		retryWorker.SetEnqueuer(producer)
 	}
+	// SF-08: the sweep honors the per-recipient retry schedules — rows not
+	// yet due stay failed until their interval elapses; exhausted schedules
+	// never re-enter.
+	retryWorker.SetScheduler(newQueueManager(db, cfg))
 	retryWorker.OnSent(metrics.IncrementEmailSent)
 	retryWorker.OnFailed(metrics.IncrementEmailFailed)
 	retryWorker.OnRetry(metrics.IncrementEmailRetry)

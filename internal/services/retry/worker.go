@@ -27,6 +27,7 @@ import (
 
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/email"
+	"github.com/goposta/posta/internal/services/queue"
 	"github.com/goposta/posta/internal/services/webhook"
 	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/jkaninda/logger"
@@ -50,9 +51,22 @@ type Worker struct {
 	batchLimit int
 	// jitter returns the random pre-sweep delay that desynchronizes the retry
 	// sweeps of multiple processes started at the same moment (R-27).
-	jitter   func() time.Duration
-	stopOnce sync.Once
-	stop     chan struct{}
+	jitter func() time.Duration
+	// scheduler is the SF-08 per-recipient schedule seam (services/queue.
+	// Manager): before claiming a failed email the sweep consults the
+	// recipients' retry schedules — rows not yet due stay failed until their
+	// interval elapses, and exhausted schedules never re-enter. Nil (the
+	// default) keeps the pre-SF-08 behavior: every bounded-backlog candidate
+	// re-enqueues immediately.
+	scheduler RetryScheduler
+	stopOnce  sync.Once
+	stop      chan struct{}
+}
+
+// RetryScheduler is the SF-08 schedule consult (services/queue.Manager
+// satisfies it). The decision constants mirror queue.DecideRetry's contract.
+type RetryScheduler interface {
+	DecideRetry(emailID uint, now time.Time) (queue.ScheduleDecision, time.Time)
 }
 
 // DefaultBatchLimit is the per-server, per-tick cap on re-enqueued retries.
@@ -92,6 +106,11 @@ func (w *Worker) SetJitter(fn func() time.Duration) {
 		w.jitter = fn
 	}
 }
+
+// SetScheduler wires the SF-08 per-recipient schedule consult. When set, the
+// sweep skips emails whose retry schedules are not yet due or already
+// exhausted; due and schedule-less emails behave exactly as before.
+func (w *Worker) SetScheduler(s RetryScheduler) { w.scheduler = s }
 
 // Jitter returns one sample of the configured pre-sweep jitter delay.
 func (w *Worker) Jitter() time.Duration {
@@ -190,6 +209,23 @@ func (w *Worker) ProcessRetries() {
 }
 
 func (w *Worker) retryEmail(em *models.Email, server *models.SMTPServer) {
+	// SF-08: consult the per-recipient retry schedule before claiming. A
+	// schedule holding the next attempt in the future leaves the row failed
+	// until its interval elapses; an exhausted schedule (interval list run
+	// out, or every recipient terminal) never re-enters the queue. No rows or
+	// a due schedule fall through to the unchanged claim below.
+	if w.scheduler != nil {
+		switch d, due := w.scheduler.DecideRetry(em.ID, time.Now()); d {
+		case queue.DecisionWait:
+			logger.Debug("retry worker: schedule holds the next attempt, skipping",
+				"id", em.ID, "due", due.UTC().Format(time.RFC3339))
+			return
+		case queue.DecisionExhausted:
+			logger.Info("retry worker: per-recipient retry schedules exhausted, skipping", "id", em.ID)
+			return
+		}
+	}
+
 	if w.onRetry != nil {
 		w.onRetry()
 	}

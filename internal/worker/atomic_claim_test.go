@@ -92,6 +92,8 @@ func claimVal(v any) driver.Value {
 		return string(t)
 	case models.CampaignMessageStatus:
 		return string(t)
+	case models.EmailQueueScheduleStatus:
+		return string(t)
 	case time.Time:
 		return t
 	case int64, float64, bool, string, []byte:
@@ -249,10 +251,16 @@ func (c *claimConn) QueryContext(_ context.Context, query string, args []driver.
 			}
 		}
 		return &claimRows{cols: cols, rows: rows}, nil
-	case strings.Contains(lower, `from "emails"`), strings.Contains(lower, `from "campaign_messages"`):
+	case strings.Contains(lower, `from "emails"`), strings.Contains(lower, `from "campaign_messages"`),
+		strings.Contains(lower, `from "campaigns"`), strings.Contains(lower, `from "email_queue_schedules"`):
 		table := "emails"
-		if strings.Contains(lower, `from "campaign_messages"`) {
+		switch {
+		case strings.Contains(lower, `from "campaign_messages"`):
 			table = "campaign_messages"
+		case strings.Contains(lower, `from "campaigns"`):
+			table = "campaigns"
+		case strings.Contains(lower, `from "email_queue_schedules"`):
+			table = "email_queue_schedules"
 		}
 		matched, err := c.s.evalWhere(table, lower, args)
 		if err != nil {
@@ -278,7 +286,7 @@ func (c *claimConn) ExecContext(_ context.Context, query string, args []driver.N
 	c.record(query, args)
 	lower := strings.Join(strings.Fields(strings.ToLower(query)), " ")
 	table := ""
-	for _, cand := range []string{"emails", "campaign_messages"} {
+	for _, cand := range []string{"emails", "campaign_messages", "email_queue_schedules"} {
 		if strings.Contains(lower, `update "`+cand+`"`) {
 			table = cand
 			break

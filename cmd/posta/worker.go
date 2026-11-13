@@ -33,9 +33,11 @@ import (
 	"github.com/goposta/posta/internal/services/automation"
 	"github.com/goposta/posta/internal/services/crypto"
 	"github.com/goposta/posta/internal/services/email"
+	"github.com/goposta/posta/internal/services/emailhistory"
 	"github.com/goposta/posta/internal/services/eventbus"
 	"github.com/goposta/posta/internal/services/inbound"
 	"github.com/goposta/posta/internal/services/notification"
+	"github.com/goposta/posta/internal/services/queue"
 	"github.com/goposta/posta/internal/services/realtime"
 	"github.com/goposta/posta/internal/services/settings"
 	"github.com/goposta/posta/internal/services/tracking"
@@ -169,6 +171,15 @@ func runWorker() error {
 		metrics.IncrementEmailFailed()
 		metrics.DecrementEmailQueued()
 	})
+	// SF-08: per-recipient retry/notify schedules + message expiry. The
+	// claim-time consult honors the recipients' interval lists; nil-safe
+	// everywhere, so an unwired manager would keep the pre-SF-08 behavior.
+	queueManager := queue.NewManager(db, queue.Deps{
+		Settings:   settings.NewProvider(repositories.NewSettingRepository(db)),
+		Dispatcher: dispatcher,
+		Recorder:   emailhistory.NewRecorder(db),
+	})
+	handler.SetQueueManager(queueManager)
 
 	exhaustedHandler := worker.NewExhaustedErrorHandler(
 		repositories.NewEmailRepository(db), dispatcher, func() {
@@ -204,6 +215,10 @@ func runWorker() error {
 				worker.QueueLow:           1,
 			},
 			ErrorHandler: worker.ChainErrorHandlers(errorHandlers...),
+			// SF-08: a failed send task's next attempt is scheduled (ProcessAt
+			// semantics) at the earliest retry time the per-recipient schedule
+			// ledger produced, instead of the default backoff.
+			RetryDelayFunc: worker.ScheduleRetryDelayFunc(queueManager),
 		},
 	)
 

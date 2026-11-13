@@ -60,6 +60,14 @@ func Run(db *gorm.DB) error {
 		&models.Language{},
 		&models.SMTPServer{},
 		&models.Server{},
+		// SF-08 (persistent multi-queue manager): per-recipient retry/notify
+		// schedule rows, additively consulted at claim time to schedule the
+		// retry and carrying the per-recipient notify addresses. Additive
+		// table; emails.expires_at (the TTL deadline the expiry sweep honors)
+		// is added by the Email AutoMigrate above. No upgrade step is needed:
+		// new table + new nullable column with defaults upgrade deployed
+		// instances in place (the OB-6 W3 ip_pools precedent).
+		&models.EmailQueueSchedule{},
 		&models.Webhook{},
 		&models.Domain{},
 		&models.DomainSigningKey{},

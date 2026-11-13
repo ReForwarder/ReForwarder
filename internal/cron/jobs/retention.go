@@ -27,6 +27,7 @@ import (
 
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/mailstore"
+	"github.com/goposta/posta/internal/services/queue"
 	"github.com/goposta/posta/internal/services/settings"
 	"github.com/goposta/posta/internal/storage/blob"
 	"github.com/goposta/posta/internal/storage/repositories"
@@ -41,6 +42,15 @@ import (
 // objects. Implemented by *mailstore.RetentionSweeper.
 type MailstoreRetentionSweeper interface {
 	SweepRetention(ctx context.Context) (mailstore.RetentionStats, error)
+}
+
+// QueueExpirySweeper is the SF-08 queue-expiry family: still-undelivered
+// messages (pending/queued/scheduled) whose TTL deadline passed are marked
+// failed with an event, their per-recipient schedules expire with the notify
+// emission, and linked campaign messages fail with the message. Implemented
+// by *queue.Manager.
+type QueueExpirySweeper interface {
+	SweepExpired(ctx context.Context, now time.Time, batch int) (queue.QueueExpiryStats, error)
 }
 
 // RetentionCleanupJob purges old email logs, audit events, and webhook
@@ -61,6 +71,7 @@ type RetentionCleanupJob struct {
 	incomingWebhookRepo   *repositories.IncomingWebhookEventRepository
 	securityEventRepo     *repositories.SecurityEventRepository
 	mailstoreSweeper      MailstoreRetentionSweeper
+	queueExpirySweeper    QueueExpirySweeper
 	mailBlobUsage         MailBlobUsageReporter
 	blobStore             blob.Store
 	settings              *settings.Provider
@@ -142,6 +153,13 @@ func (j *RetentionCleanupJob) SetSecurityEventRepo(r *repositories.SecurityEvent
 // skipped — the other families are unaffected.
 func (j *RetentionCleanupJob) SetMailstoreSweeper(s MailstoreRetentionSweeper) {
 	j.mailstoreSweeper = s
+}
+
+// SetQueueExpirySweeper enables the SF-08 queue-expiry family: messages whose
+// TTL deadline passed while still undelivered are marked failed with an
+// event. When nil, no expiry sweep runs — the other families are unaffected.
+func (j *RetentionCleanupJob) SetQueueExpirySweeper(s QueueExpirySweeper) {
+	j.queueExpirySweeper = s
 }
 
 // MailBlobUsageReporter is the GAP-45 usage-reporting surface (OB-3 W2):
@@ -544,6 +562,25 @@ func (j *RetentionCleanupJob) Run(_ context.Context, _ *asynq.Client) error {
 					"reclaimed_blob_bytes", stats.ReclaimedBlobBytes)
 			}
 			j.auditMailBlobGC(stats)
+		}
+	}
+
+	// Queue-expiry family (SF-08): still-undelivered messages (pending /
+	// queued / scheduled) whose TTL deadline passed are marked failed with an
+	// event, their per-recipient schedule rows expire with the notify
+	// emission, and linked campaign messages fail with the message. The
+	// sweeper CAS-claims each message, so concurrent sweeps and in-flight
+	// deliveries cannot double-fire. A nil sweeper (queue manager not wired)
+	// skips the family — the other families are unaffected.
+	if j.queueExpirySweeper != nil {
+		stats, err := j.queueExpirySweeper.SweepExpired(context.Background(), time.Now(), queue.DefaultExpiryBatchSize)
+		if err != nil {
+			logger.Error("retention cleanup: queue expiry sweep failed", "error", err)
+		} else if stats.Expired > 0 || stats.Notified > 0 {
+			logger.Info("retention cleanup: queue expiry sweep",
+				"expired", stats.Expired,
+				"notified", stats.Notified,
+				"skipped", stats.Skipped)
 		}
 	}
 

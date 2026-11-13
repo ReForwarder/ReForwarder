@@ -286,7 +286,7 @@ server and its workers.
 
 ## Project Roadmap
 
-Planning details live in `docs/project/`: [FEATURE_INVENTORY.md](docs/project/FEATURE_INVENTORY.md) is the detailed registry (123 entries as of 2026-11-12), [BACKLOG.md](docs/project/BACKLOG.md) the operational backlog, and the [ReForwarder Backlog](https://github.com/ReForwarder/ReForwarder/projects) board the task board. The Option B mail-infrastructure programme (Phases 0–6) **closed 2026-11-12 at HEAD `ee38ca8`** — the owner-mandated what-added / what-is-done / what-will-be-done / what-is-incomplete accounting lives in [todo.md](todo.md) Track A, and the delivered mail capabilities are registered as RF-F109–RF-F123 below.
+Planning details live in `docs/project/`: [FEATURE_INVENTORY.md](docs/project/FEATURE_INVENTORY.md) is the detailed registry (124 entries as of 2026-11-13), [BACKLOG.md](docs/project/BACKLOG.md) the operational backlog, and the [ReForwarder Backlog](https://github.com/ReForwarder/ReForwarder/projects) board the task board. The Option B mail-infrastructure programme (Phases 0–6) **closed 2026-11-12 at HEAD `ee38ca8`** — the owner-mandated what-added / what-is-done / what-will-be-done / what-is-incomplete accounting lives in [todo.md](todo.md) Track A, and the delivered mail capabilities are registered as RF-F109–RF-F123 below.
 
 ### To-dos
 
@@ -430,6 +430,7 @@ _None._
 - [x] [RF-F120] DNS record automation: provider publish + drift re-verification (OB-6 W1 — `ee38ca8`, ADR-007; SF-61)
 - [x] [RF-F121] ACME/SNI certificate lifecycle for the mail listeners (OB-6 W2 — `ee38ca8`, ADR-007; SF-33/34)
 - [x] [RF-F123] Multi-replica cron leader election (OB-6 W6 — `ee38ca8`; GAP-03)
+- [x] [RF-F124] Queue schedule layer: per-recipient retry/notify schedules + message expiry (SF-08 — per-recipient interval lists honored at claim time and by the retry sweep/reconcile, notify addresses through the email.failed event taxonomy, TTL expiry sweep riding the unified retention cron; 2026-11-13)
 
 ---
 

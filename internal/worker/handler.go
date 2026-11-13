@@ -37,6 +37,7 @@ import (
 	"github.com/goposta/posta/internal/services/inbound"
 	"github.com/goposta/posta/internal/services/mta"
 	"github.com/goposta/posta/internal/services/provider_events"
+	"github.com/goposta/posta/internal/services/queue"
 	"github.com/goposta/posta/internal/services/webhook"
 	"github.com/goposta/posta/internal/storage/blob"
 	"github.com/goposta/posta/internal/storage/repositories"
@@ -82,9 +83,14 @@ type EmailSendHandler struct {
 	// for permanently failed locally-originated mail (SF-10). Nil, or
 	// dsnEnabled false (POSTA_DSN_ENABLED default), keeps the pre-SF-10
 	// behavior: failures are recorded but no bounce notice goes out.
-	dsnMailer      email.DSNMailer
-	dsnEnabled     bool
+	dsnMailer       email.DSNMailer
+	dsnEnabled      bool
 	dsnReportingMTA string
+	// queue is the SF-08 persistent multi-queue manager's schedule layer: the
+	// per-recipient retry/notify schedules consulted at claim time and
+	// advanced on failures. Nil (the default) keeps the pre-SF-08 behavior:
+	// no schedule consults, no schedule bookkeeping.
+	queue *queue.Manager
 }
 
 func NewEmailSendHandler(
@@ -200,6 +206,10 @@ func (h *EmailSendHandler) SetDSNReportingMTA(name string) {
 	}
 }
 
+// SetQueueManager wires the SF-08 schedule layer (per-recipient retry/notify
+// schedules + message expiry). Nil (the default) keeps the pre-SF-08 behavior.
+func (h *EmailSendHandler) SetQueueManager(m *queue.Manager) { h.queue = m }
+
 // envelopeSender is the SMTP MAIL FROM for em: the VERP bounce address when
 // the return-path feature is on and the message/sender allow one, else the
 // plain envelope address (the pre-VERP behavior, also the relay-path seam —
@@ -239,8 +249,10 @@ func (h *EmailSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error
 	// If this email was enqueued as part of a campaign, respect the live
 	// campaign status. A paused campaign releases the message back to pending
 	// so a Resume will re-dispatch it; cancelled drops it permanently.
+	campLinked := false
 	if h.messageRepo != nil && h.campaignRepo != nil {
 		if msg, mErr := h.messageRepo.FindByEmailID(em.ID); mErr == nil {
+			campLinked = true
 			if camp, cErr := h.campaignRepo.FindByID(msg.CampaignID); cErr == nil {
 				switch camp.Status {
 				case models.CampaignStatusCancelled:
@@ -258,6 +270,29 @@ func (h *EmailSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error
 					return nil
 				}
 			}
+		}
+	}
+
+	// SF-08: consult the per-recipient queue schedule at claim time — the
+	// ProcessIn/ProcessAt consult. A schedule holding the next attempt in the
+	// future releases the task WITHOUT claiming or sending: the task
+	// completes, the row stays queued, and the schedule-aware queue-reconcile
+	// cron re-enqueues it exactly at the due time (asynq v0.26 cannot delete
+	// or reschedule an active task, and a retry-slot-consuming error return
+	// here would let wait-returns exhaust MaxRetry and kill the message).
+	// Exhausted schedules finalize the message through the existing terminal
+	// path. Campaign mail is exempt: the campaign machinery owns its
+	// lifecycle (queue-reconcile skips it too, so a held task there could
+	// strand). No rows → DecisionNone → untouched behavior.
+	if h.queue != nil && !campLinked {
+		switch d, due := h.queue.DecideRetry(em.ID, time.Now()); d {
+		case queue.DecisionWait:
+			logger.Info("worker: queue schedule holds the next attempt, releasing task",
+				"id", em.ID, "due", due.UTC().Format(time.RFC3339))
+			return nil
+		case queue.DecisionExhausted:
+			h.markFailed(em, "per-recipient retry schedules exhausted")
+			return nil
 		}
 	}
 
@@ -565,6 +600,28 @@ func (h *EmailSendHandler) handleSendFailure(em *models.Email, smtpServer *model
 	emailhistory.RecordFailed(h.recorder, em, em.ErrorMessage, metadata)
 	logger.Debug("worker: email send failed, will retry",
 		"id", em.ID, "attempt", em.RetryCount, "classification", cls, "error", err)
+
+	// SF-08: advance the per-recipient schedule ledger. A RCPT TO-stage
+	// rejection names its recipient — only that row advances; a session-level
+	// failure advances every still-active row. Interval rows persist their
+	// next due time (the claim-time and sweep consults honor it); a row whose
+	// interval list ran out terminates as exhausted and fires its notify
+	// emission. When every row is terminal the message stops here — returning
+	// nil instead of the error ends the task, and the retry sweep honors the
+	// exhausted schedule by skipping the row.
+	if h.queue != nil {
+		rcpt := ""
+		if isRejection && rejection.Recipient != "" && rejection.Stage == "RCPT TO" {
+			rcpt = rejection.Recipient
+		}
+		outcome := h.queue.RecordFailure(em, rcpt, err.Error())
+		if outcome.AnyRows && outcome.AllExhausted {
+			logger.Info("worker: per-recipient retry schedules exhausted, stopping queue retries",
+				"id", em.ID, "attempt", em.RetryCount)
+			return nil
+		}
+	}
+
 	// Return error so Asynq retries the task
 	return fmt.Errorf("SMTP send failed: %w", err)
 }
@@ -636,6 +693,9 @@ func (h *EmailSendHandler) handleSendSuccess(em *models.Email, smtpServer *model
 	em.SentAt = &now
 	em.ErrorMessage = ""
 	_ = h.emailRepo.Update(em)
+	// SF-08: close the per-recipient schedules as delivered (silent — the
+	// sent event above is the delivery notification).
+	h.queue.MarkDelivered(em.ID)
 	metadata := h.eventMetadata(smtpServer, campMsg, sharedServerID, 0)
 	for k, v := range extraMeta {
 		metadata[k] = v
@@ -809,6 +869,9 @@ func (h *EmailSendHandler) markFailed(em *models.Email, reason string) {
 	em.ErrorMessage = reason
 	_ = h.emailRepo.Update(em)
 	emailhistory.RecordFailed(h.recorder, em, reason, nil)
+	// SF-08: the message finalized terminal on a non-retry path — close the
+	// per-recipient schedules as cancelled and fire their notify emissions.
+	h.queue.FinalizeEmail(em, reason)
 	if h.dispatcher != nil {
 		if h.dispatcher != nil {
 			h.dispatcher.Dispatch(em.UserID, em.WorkspaceID, "email.failed", em.UUID, em.Sender)
@@ -916,6 +979,11 @@ func (h *EmailSendHandler) handlePermanentRejection(em *models.Email, se *email.
 	em.ErrorMessage = se.Error()
 	_ = h.emailRepo.Update(em)
 	emailhistory.RecordFailed(h.recorder, em, em.ErrorMessage, metadata)
+	// SF-08: this recipient is permanently out — close its schedule row as
+	// exhausted. Silent on purpose: the message-level events above (failure,
+	// bounce, webhook, optional SF-10 DSN) already notify, and the row-level
+	// notify emission would double-fire them.
+	h.queue.MarkRecipientRejected(em, se.Recipient, reason)
 	// A permanent-class rejection is a hard bounce: record it as such on the
 	// timeline. The stable provider event id dedups replays of the same task.
 	emailhistory.RecordBounced(h.recorder, em, classifiedReason,

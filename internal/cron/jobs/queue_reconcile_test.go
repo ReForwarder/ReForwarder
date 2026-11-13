@@ -48,8 +48,9 @@ import (
 var qrcEmailsColumns = []string{"id", "uuid", "status", "updated_at", "sender", "recipients", "created_at"}
 
 var qrcTableColumns = map[string][]string{
-	"emails":            qrcEmailsColumns,
-	"campaign_messages": {"id", "email_id"},
+	"emails":                 qrcEmailsColumns,
+	"campaign_messages":      {"id", "email_id"},
+	"email_queue_schedules":  {"id", "email_id", "status", "next_retry_at", "attempt_index"},
 }
 
 type qrcState struct {
@@ -122,6 +123,8 @@ func qrcVal(v any) driver.Value {
 	case int:
 		return int64(t)
 	case models.EmailStatus:
+		return string(t)
+	case models.EmailQueueScheduleStatus:
 		return string(t)
 	case time.Time:
 		return t
@@ -198,6 +201,17 @@ func (c *qrcConn) QueryContext(_ context.Context, query string, args []driver.Na
 			return nil, err
 		}
 		return &qrcRows{cols: []string{"count"}, rows: [][]driver.Value{{int64(len(matched))}}}, nil
+	case strings.Contains(lower, `from "email_queue_schedules"`):
+		// The SF-08 schedule consult (only reached when a scheduler is wired).
+		matched, err := c.s.evalWhere("email_queue_schedules", lower, args)
+		if err != nil {
+			return nil, err
+		}
+		rows := make([][]driver.Value, len(matched))
+		for i, r := range matched {
+			rows[i] = append([]driver.Value(nil), r...)
+		}
+		return &qrcRows{cols: qrcTableColumns["email_queue_schedules"], rows: rows}, nil
 	case strings.Contains(lower, `from "emails"`):
 		matched, err := c.s.evalWhere("emails", lower, args)
 		if err != nil {
@@ -410,9 +424,10 @@ func qrcLimit(rows [][]driver.Value, compact string, _ []driver.NamedValue) [][]
 // ---------- stubs ----------
 
 type qrcProducer struct {
-	mu       sync.Mutex
-	enqueued []uint
-	failOn   map[uint]error
+	mu          sync.Mutex
+	enqueued    []uint
+	scheduledAt []time.Time
+	failOn      map[uint]error
 }
 
 func newQrcProducer() *qrcProducer { return &qrcProducer{failOn: map[uint]error{}} }
@@ -424,6 +439,19 @@ func (p *qrcProducer) EnqueueEmailSend(emailID uint, queue string) error {
 		return err
 	}
 	p.enqueued = append(p.enqueued, emailID)
+	return nil
+}
+
+// EnqueueEmailSendAt makes the stub a ScheduledSendEnqueuer (the SF-08
+// ProcessAt carrier); the scheduled time is recorded for assertions.
+func (p *qrcProducer) EnqueueEmailSendAt(emailID uint, queue string, sendAt time.Time) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err, ok := p.failOn[emailID]; ok {
+		return err
+	}
+	p.enqueued = append(p.enqueued, emailID)
+	p.scheduledAt = append(p.scheduledAt, sendAt)
 	return nil
 }
 
