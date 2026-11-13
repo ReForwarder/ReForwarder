@@ -412,6 +412,21 @@ func (h *EmailSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error
 		return nil
 	}
 
+	// SF-02 (RFC 8689 §5.2): a REQUIRETLS-marked message must never cross a
+	// plaintext hop — an operator relay configured without TLS
+	// (encryption "none") cannot take it. The refusal is a permanent
+	// non-RCPT SendError: no auto-suppression (not a recipient property), the
+	// message defers through the existing failure bookkeeping and eventually
+	// terminates with the SF-10 notification, the same shape as a DKIM
+	// signing failure. System rows never carry the requirement.
+	if em.RequireTLS && smtpServer.Encryption == models.EncryptionNone {
+		return h.handleSendFailure(em, smtpServer, sharedServerID, prep.campMsg, &email.SendError{
+			Stage: "REQUIRETLS", Code: 554,
+			Msg: "5.7.0 REQUIRETLS requires TLS but the relay hop is configured without TLS",
+			Err: fmt.Errorf("mta: REQUIRETLS: relay hop %s has TLS disabled", smtpServer.Host),
+		}, nil)
+	}
+
 	if em.Provenance == models.EmailProvenanceSystemDSN && em.TextBody != "" {
 		// SF-10: the DSN's TextBody IS the complete multipart/report message;
 		// relay it verbatim with a null reverse path, DKIM-signed for the
@@ -815,6 +830,7 @@ func (h *EmailSendHandler) processDirect(ctx context.Context, em *models.Email, 
 		From:        envelopeFrom,
 		Recipients:  prep.recipients,
 		Msg:         msg,
+		RequireTLS:  em.RequireTLS,
 	})
 	if err != nil {
 		// A fail-closed policy refusal (unverified sender domain) is a

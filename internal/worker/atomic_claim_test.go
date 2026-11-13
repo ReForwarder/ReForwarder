@@ -228,8 +228,24 @@ func (c *claimConn) QueryContext(_ context.Context, query string, args []driver.
 		// The dispatcher's goroutine may look for matching webhooks; none exist.
 		return &claimRows{cols: []string{"id"}}, nil
 	case strings.Contains(lower, `from "smtp_servers"`):
-		// No SMTP server configured in the fixture.
-		return &claimRows{cols: []string{"id"}}, nil
+		// SF-02 relay-guard tests seed SMTP server rows; anything else in the
+		// suite keeps the pre-existing "no server configured" answer.
+		matched, err := c.s.evalWhere("smtp_servers", lower, args)
+		if err != nil {
+			return nil, err
+		}
+		matched = claimLimit(matched, lower)
+		if len(matched) == 0 {
+			return &claimRows{cols: []string{"id"}}, nil
+		}
+		cols := claimOrderedCols(matched[0])
+		rows := make([][]driver.Value, len(matched))
+		for i, r := range matched {
+			for _, col := range cols {
+				rows[i] = append(rows[i], r.cols[col])
+			}
+		}
+		return &claimRows{cols: cols, rows: rows}, nil
 	case strings.Contains(lower, `from "subscribers"`):
 		// The FindPendingByCampaign preload: fixture rows carry no subscriber.
 		return &claimRows{cols: []string{"id"}}, nil

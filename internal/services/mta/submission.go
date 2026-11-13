@@ -219,6 +219,13 @@ func NewSubmissionServer(backend *SubmissionBackend, cfg SubmissionConfig) (*gos
 	srv.MaxRecipients = 50
 	srv.EnableSMTPUTF8 = true
 	srv.EnableDELIVERBY = true
+	// SF-02 (RFC 8689): the REQUIRETLS MAIL FROM parameter is accepted and
+	// recorded on the message; the dependency advertises the extension only
+	// on TLS connections (conn.go's capability list gates on
+	// TLSConnectionState, RFC 8689 §3) and the session carries the
+	// requirement into the send pipeline so the outbound paths enforce
+	// TLS-only hops.
+	srv.EnableREQUIRETLS = true
 	if backend != nil {
 		backend.securityPort = cfg.Port
 	}
@@ -269,6 +276,9 @@ type submissionSession struct {
 	// per-message, so multiple recipients with different by-times resolve to
 	// the shortest one. Zero = no BY parameter was carried.
 	deliverBy time.Duration
+	// requireTLS records the RFC 8689 REQUIRETLS MAIL FROM parameter (SF-02):
+	// the message must never cross a plaintext hop on delivery.
+	requireTLS bool
 }
 
 // MemoryGuard is the SF-108 pressure seam; *memorywatch.Watchdog satisfies
@@ -342,6 +352,7 @@ func (s *submissionSession) Reset() {
 	s.from = ""
 	s.to = nil
 	s.deliverBy = 0
+	s.requireTLS = false
 }
 
 func (s *submissionSession) Logout() error {
@@ -363,6 +374,12 @@ func (s *submissionSession) Mail(from string, opts *gosmtp.MailOptions) error {
 		return &gosmtp.SMTPError{Code: 553, EnhancedCode: gosmtp.EnhancedCode{5, 1, 8}, Message: "invalid sender address"}
 	}
 	s.from = addr.Address
+
+	// SF-02: the RFC 8689 REQUIRETLS parameter rides MAIL FROM — the message
+	// must never be delivered over a plaintext hop.
+	if opts != nil && opts.RequireTLS {
+		s.requireTLS = true
+	}
 
 	// Sender domain must be tenant-verified (fail closed).
 	domain := senderDomainOf(addr.Address)
@@ -456,6 +473,8 @@ func (s *submissionSession) Data(r io.Reader) error {
 		HTML:        parsed.HTMLBody,
 		Text:        parsed.TextBody,
 		Attachments: attachments,
+		// SF-02: the RFC 8689 REQUIRETLS requirement persists on the message.
+		RequireTLS: s.requireTLS,
 	}
 	// SF-09: the DELIVERBY deadline is computed at message acceptance —
 	// acceptance time + the strictest by-time — and rides the SF-08 expiry

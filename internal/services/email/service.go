@@ -380,6 +380,11 @@ type SendRequest struct {
 	// provenance while ExpiresAt carries the computed deadline. Never bound
 	// from API callers — the API deadline surface is expires_at.
 	DeliverBySeconds int `json:"-"`
+	// RequireTLS is the RFC 8689 REQUIRETLS requirement (SF-02), set ONLY by
+	// the MSA when the submitting client carried the REQUIRETLS MAIL FROM
+	// parameter: Send() stamps it onto the message so the delivery paths
+	// enforce TLS-only hops. Never bound from API callers.
+	RequireTLS bool `json:"-"`
 	// TemplateName is populated by internal template-send paths
 	TemplateName string `json:"-"`
 	// TemplateData carries the render data of a template send. It is set by
@@ -947,6 +952,9 @@ func (s *Service) Send(ctx context.Context, userID, apiKeyID uint, workspaceID *
 		// SF-09: the RFC 2852 DELIVERBY provenance rides the row so the expiry
 		// events can distinguish a protocol-negotiated deadline from a TTL.
 		DeliverBySeconds: req.DeliverBySeconds,
+		// SF-02: the RFC 8689 REQUIRETLS requirement rides the row so every
+		// delivery path can enforce TLS-only hops for this message.
+		RequireTLS: req.RequireTLS,
 	}
 
 	if err := s.emailRepo.Create(em); err != nil {

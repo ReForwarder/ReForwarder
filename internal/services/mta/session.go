@@ -20,14 +20,12 @@
 package mta
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
 	"net/smtp"
-	"net/textproto"
 	"time"
 
 	"github.com/goposta/posta/internal/services/email"
@@ -57,6 +55,11 @@ type SessionCaps struct {
 	// CHUNKING (RFC 3030) — recorded by the session runner; when offered, the
 	// end-of-message phase uses BDAT instead of DATA (SF-02).
 	CHUNKING bool
+	// REQUIRETLS (RFC 8689) — the remote's advertisement, recorded by the
+	// session runner; when offered AND the message carries the REQUIRETLS
+	// requirement, the outbound MAIL FROM carries the parameter so the
+	// requirement propagates past this hop (SF-02).
+	REQUIRETLS bool
 }
 
 // SessionOptions configures one outbound ESMTP session.
@@ -96,6 +99,14 @@ type SessionOptions struct {
 	// bucket lives on the connection, so commands AND the message payload
 	// cross the wire at the paced rate.
 	ThrottleBytesPerSec int64
+	// RequireTLS is the RFC 8689 REQUIRETLS requirement carried by the
+	// message (SF-02, set from the email row at the executor): a
+	// REQUIRETLS-marked message must never cross a plaintext hop — a next
+	// hop that does not offer STARTTLS is refused with a temporary failure
+	// (the MX loop tries the next host or defers), and the REQUIRETLS
+	// parameter propagates on the outbound MAIL FROM when the next hop
+	// advertises the extension.
+	RequireTLS bool
 }
 
 // SessionResult is the outcome of one session: Delivered true exactly when
@@ -210,11 +221,24 @@ func runSession(ctx context.Context, opts SessionOptions, from string, rcpts []s
 	res.Caps.SMTPUTF8, _ = client.Extension("SMTPUTF8")
 	res.Caps.Auth, _ = client.Extension("AUTH")
 	res.Caps.CHUNKING, _ = client.Extension("CHUNKING")
+	res.Caps.REQUIRETLS, _ = client.Extension("REQUIRETLS")
 
 	// STARTTLS is mandatory when the remote offers it (ADR-001 §4). The TLS
 	// handshake verifies the certificate chain against tlsConfig — plain
 	// continues only when the remote offers no STARTTLS at all.
 	offered, _ := client.Extension("STARTTLS")
+	// SF-02 (RFC 8689 §5.2): a REQUIRETLS-marked message must never cross a
+	// plaintext hop. A next hop that does not offer STARTTLS is refused with
+	// a temporary failure — the executor's loop moves to the next MX host
+	// (or defers), never a plaintext fallback (the same shape as the STS
+	// refusal below).
+	if opts.RequireTLS && !offered {
+		return res, &email.SendError{
+			Stage: "REQUIRETLS", Code: 421,
+			Msg: "4.7.0 REQUIRETLS requires TLS but the MX host does not offer STARTTLS",
+			Err: fmt.Errorf("mta: REQUIRETLS: MX host %s does not offer STARTTLS", opts.ServerName),
+		}
+	}
 	if !offered && stsRule.Enforced() {
 		// RFC 8461 §10.3: mode=enforce requires TLS; a policy-relevant MX
 		// that does not advertise STARTTLS yields a temporary failure (the
@@ -231,6 +255,18 @@ func runSession(ctx context.Context, opts SessionOptions, from string, rcpts []s
 			return res, email.WrapSendError("STARTTLS", "", err)
 		}
 		res.Caps.UpgradedTLS = true
+		// RFC 3207 §4: the client MUST discard prior capability knowledge and
+		// re-EHLO after the TLS handshake — net/smtp does the re-EHLO itself,
+		// and the recorded caps are re-read here so the rest of the session
+		// sees the post-TLS capability set. REQUIRETLS, for one, may be
+		// advertised only on TLS (RFC 8689 §3), so the pre-TLS read would
+		// never see it.
+		res.Caps.PIPELINING, _ = client.Extension("PIPELINING")
+		res.Caps.EightBitMIME, _ = client.Extension("8BITMIME")
+		res.Caps.SMTPUTF8, _ = client.Extension("SMTPUTF8")
+		res.Caps.Auth, _ = client.Extension("AUTH")
+		res.Caps.CHUNKING, _ = client.Extension("CHUNKING")
+		res.Caps.REQUIRETLS, _ = client.Extension("REQUIRETLS")
 	}
 
 	// AUTH only against configured smarthosts (MX sessions never reach here —
@@ -259,9 +295,22 @@ func runSession(ctx context.Context, opts SessionOptions, from string, rcpts []s
 	// MAIL FROM. net/smtp adds BODY=8BITMIME/SMTPUTF8 params automatically
 	// when the remote advertises them — 8BITMIME is a superset declaration
 	// for 7-bit bodies, and the UTF-8 envelope case was validated above.
+	// SF-02 (RFC 8689 §5.1): when the message carries the REQUIRETLS
+	// requirement AND the next hop advertises the extension, the outbound
+	// MAIL FROM carries the REQUIRETLS parameter so the requirement
+	// propagates past this hop — over the verified TLS connection the
+	// session just completed. Without the remote's advertisement the message
+	// still delivers (this hop's TLS satisfied the requirement); the
+	// requirement simply does not propagate further.
 	budget()
-	if err := client.Mail(from); err != nil {
-		return res, email.WrapSendError("MAIL FROM", from, err)
+	if opts.RequireTLS && res.Caps.REQUIRETLS {
+		if err := mailFromRequireTLS(client, from); err != nil {
+			return res, err
+		}
+	} else {
+		if err := client.Mail(from); err != nil {
+			return res, email.WrapSendError("MAIL FROM", from, err)
+		}
 	}
 
 	for _, r := range rcpts {
@@ -283,7 +332,7 @@ func runSession(ctx context.Context, opts SessionOptions, from string, rcpts []s
 	// with BDAT instead of DATA — the payload crosses the wire verbatim (no
 	// dot-stuffing), so byte-exact binary transparency holds end to end.
 	if res.Caps.CHUNKING {
-		berr := sendBdat(conn, msg)
+		berr := sendBdat(client, msg)
 		if berr != nil {
 			return res, berr
 		}
@@ -316,22 +365,65 @@ func runSession(ctx context.Context, opts SessionOptions, from string, rcpts []s
 	return res, nil
 }
 
+// mailFromRequireTLS issues MAIL FROM with the RFC 8689 REQUIRETLS parameter
+// through the client's own textproto connection (TLS-aware after STARTTLS) —
+// net/smtp's Client has no MAIL-parameter hook. The parameter set mirrors
+// net/smtp's own Mail (BODY=8BITMIME / SMTPUTF8 when advertised) plus
+// REQUIRETLS; the remote's advertisement was recorded before this call and
+// the REQUIRETLS parameter is valid only over the verified TLS connection the
+// session just completed (RFC 8689 §5.1). The exchange stays on the client's
+// shared textproto pipeline, whose socket is quiescent between EHLO and MAIL
+// FROM, so the reply read here sees exactly the MAIL FROM response and leaves
+// the pipeline consistent for RCPT TO.
+func mailFromRequireTLS(client *smtp.Client, from string) error {
+	cmd := "MAIL FROM:<%s>"
+	if ok, _ := client.Extension("8BITMIME"); ok {
+		cmd += " BODY=8BITMIME"
+	}
+	if ok, _ := client.Extension("SMTPUTF8"); ok {
+		cmd += " SMTPUTF8"
+	}
+	cmd += " REQUIRETLS"
+	id, err := client.Text.Cmd(cmd, from)
+	if err != nil {
+		return email.WrapSendError("MAIL FROM", from, err)
+	}
+	client.Text.StartResponse(id)
+	defer client.Text.EndResponse(id)
+	_, _, err = client.Text.ReadResponse(250)
+	if err != nil {
+		return email.WrapSendError("MAIL FROM", from, err)
+	}
+	return nil
+}
+
 // sendBdat ends the message transfer with one BDAT <n> LAST chunk (RFC 3030).
-// The command and the reply go through the raw socket: net/smtp's Client has
-// no BDAT, and the payload must NOT be dot-stuffed. The exchange is safe
+// The command and the reply go through the client's own textproto connection
+// (TLS-aware after STARTTLS — net/smtp's Client has no BDAT), and the payload
+// must NOT be dot-stuffed: the chunk crosses as raw bytes through the
+// connection's writer, never through the DotWriter. The exchange is safe
 // against the shared textproto pipeline because every earlier command
-// (Hello/Mail/Rcpt) flushed its reply synchronously — the socket is quiescent
-// between RCPT and this call, so the reply read here sees exactly the BDAT
-// response and leaves the client's pipeline consistent for Quit.
-func sendBdat(conn net.Conn, msg []byte) error {
-	if _, err := fmt.Fprintf(conn, "BDAT %d LAST\r\n", len(msg)); err != nil {
+// (Hello/Mail/Rcpt) flushed its reply synchronously — the pipeline is
+// quiescent between RCPT and this call, so the reply read here sees exactly
+// the BDAT response and leaves the client's pipeline consistent for Quit.
+// (2026-11-14: this exchange previously wrote to the raw TCP conn, which goes
+// stale after STARTTLS — textproto swaps the TLS conn in internally — so a
+// TLS + CHUNKING session corrupted the transfer; the latent bug was found by
+// the SF-02 REQUIRETLS work, which needs the same TLS-aware exchange.)
+func sendBdat(client *smtp.Client, msg []byte) error {
+	id, err := client.Text.Cmd("BDAT %d LAST", len(msg))
+	if err != nil {
 		return email.WrapSendError("BDAT", "", err)
 	}
-	if _, err := conn.Write(msg); err != nil {
+	client.Text.StartResponse(id)
+	defer client.Text.EndResponse(id)
+	if _, err := client.Text.W.Write(msg); err != nil {
 		return email.WrapSendError("BDAT", "", err)
 	}
-	tr := textproto.NewReader(bufio.NewReader(conn))
-	_, _, err := tr.ReadResponse(250)
+	if err := client.Text.W.Flush(); err != nil {
+		return email.WrapSendError("BDAT", "", err)
+	}
+	_, _, err = client.Text.ReadResponse(250)
 	if err != nil {
 		return email.WrapSendError("BDAT", "", err)
 	}

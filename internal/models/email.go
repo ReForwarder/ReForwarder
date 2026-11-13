@@ -110,6 +110,16 @@ type Email struct {
 	// mode-differentiated success notifications are not implemented.
 	DeliverBySeconds int `json:"deliver_by_seconds,omitempty" gorm:"default:0;not null"`
 
+	// RequireTLS is the RFC 8689 REQUIRETLS requirement (SF-02, additive
+	// column): set at the MSA when the submitting client carried the
+	// REQUIRETLS MAIL FROM parameter. A REQUIRETLS-marked message is never
+	// delivered over a plaintext hop: the direct session runner refuses a
+	// next hop that does not offer STARTTLS (transient, so the MX loop tries
+	// the next host or defers), the REQUIRETLS parameter propagates on the
+	// outbound MAIL FROM when the next hop advertises the extension, and a
+	// relay hop configured without TLS refuses the send.
+	RequireTLS bool `json:"require_tls,omitempty" gorm:"default:false;not null"`
+
 	// Write-once lifecycle timestamps: denormalized from the message-history
 	// event timeline and set only the first time the state is reached, so the
 	// logs list can filter and sort without joining email_events.

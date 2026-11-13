@@ -20,10 +20,13 @@
 package mta
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"net/textproto"
 	"sync"
 	"testing"
 	"time"
@@ -76,6 +79,7 @@ type recordedSubmit struct {
 	subject          string
 	expiresAt        *time.Time
 	deliverBySeconds int
+	requireTLS       bool
 }
 
 func (f *fakeSink) Submit(_ context.Context, userID, _ uint, _ *uint, ownerEmail string, req *email.SendRequest) error {
@@ -89,6 +93,7 @@ func (f *fakeSink) Submit(_ context.Context, userID, _ uint, _ *uint, ownerEmail
 		subject:          req.Subject,
 		expiresAt:        req.ExpiresAt,
 		deliverBySeconds: req.DeliverBySeconds,
+		requireTLS:       req.RequireTLS,
 	})
 	return nil
 }
@@ -437,5 +442,101 @@ func TestSubmissionDeliverByRefusesNonHonorableByTime(t *testing.T) {
 	}
 	if err := cl.Rcpt("dest@example.net", nil); err != nil {
 		t.Fatalf("plain RCPT TO after refusals: %v", err)
+	}
+}
+
+// ---------- SF-02: the RFC 8689 REQUIRETLS parameter recorded ----------
+
+// requireTLSClient dials the fixture MSA, authenticates, and returns the
+// connection plus the client: the REQUIRETLS parameter is then written raw
+// (the go-smtp client refuses to send it when the server has not advertised
+// it — RFC 8689 §3 has the server advertise only on TLS, and the fixture MSA
+// runs plaintext; the MAIL parameter itself is flag-gated, not TLS-gated, so
+// the parse is exercised honestly either way).
+func requireTLSClient(t *testing.T, addr string) (net.Conn, *gosmtp.Client) {
+	t.Helper()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial MSA: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	cl := gosmtp.NewClient(conn)
+	if err := cl.Hello("client.example.org"); err != nil {
+		t.Fatalf("EHLO: %v", err)
+	}
+	if err := cl.Auth(sasl.NewPlainClient("", "smtp_alice", "correct-horse")); err != nil {
+		t.Fatalf("AUTH: %v", err)
+	}
+	return conn, cl
+}
+
+// A client carrying the REQUIRETLS MAIL FROM parameter has the requirement
+// recorded on the message and persisted into the pipeline: the parameter is
+// written raw and the reply consumed before the client continues (the socket
+// is quiescent after AUTH, so the exchange leaves the client's pipeline
+// consistent).
+func TestSubmissionRequireTLSRecordedInPipeline(t *testing.T) {
+	addr, _, _, sink := newSubmissionFixture(t)
+	conn, cl := requireTLSClient(t, addr)
+
+	if _, err := fmt.Fprintf(conn, "MAIL FROM:<hello@verified.example> REQUIRETLS\r\n"); err != nil {
+		t.Fatalf("write MAIL FROM: %v", err)
+	}
+	tr := textproto.NewReader(bufio.NewReader(conn))
+	code, _, err := tr.ReadResponse(250)
+	if err != nil || code != 250 {
+		t.Fatalf("MAIL FROM with REQUIRETLS reply = %d (%v), want 250", code, err)
+	}
+	if err := cl.Rcpt("dest@example.net", nil); err != nil {
+		t.Fatalf("RCPT TO after the raw MAIL FROM: %v", err)
+	}
+	w, err := cl.Data()
+	if err != nil {
+		t.Fatalf("DATA: %v", err)
+	}
+	if _, err := io.WriteString(w, "Subject: requiretls\r\n\r\nbody\r\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("end of DATA: %v", err)
+	}
+	_ = cl.Quit()
+
+	if sink.count() != 1 {
+		t.Fatalf("sink submissions = %d, want 1", sink.count())
+	}
+	if sub := sink.last(); !sub.requireTLS {
+		t.Fatal("pipeline request RequireTLS = false, want true (the parameter was recorded)")
+	}
+}
+
+// The control: a plain MAIL FROM records no requirement.
+func TestSubmissionPlainMailRecordsNoRequirement(t *testing.T) {
+	addr, _, _, sink := newSubmissionFixture(t)
+	cl := submissionClient(t, addr, true)
+
+	if err := cl.Mail("hello@verified.example", nil); err != nil {
+		t.Fatalf("MAIL FROM: %v", err)
+	}
+	if err := cl.Rcpt("dest@example.net", nil); err != nil {
+		t.Fatalf("RCPT TO: %v", err)
+	}
+	w, err := cl.Data()
+	if err != nil {
+		t.Fatalf("DATA: %v", err)
+	}
+	if _, err := io.WriteString(w, "Subject: plain\r\n\r\nbody\r\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("end of DATA: %v", err)
+	}
+	_ = cl.Quit()
+
+	if sink.count() != 1 {
+		t.Fatalf("sink submissions = %d, want 1", sink.count())
+	}
+	if sub := sink.last(); sub.requireTLS {
+		t.Fatal("pipeline request RequireTLS = true, want false (no parameter carried)")
 	}
 }

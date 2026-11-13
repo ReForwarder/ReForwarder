@@ -90,6 +90,11 @@ type Envelope struct {
 	From        string
 	Recipients  []string
 	Msg         []byte
+	// RequireTLS is the RFC 8689 REQUIRETLS requirement (SF-02): the message
+	// must never cross a plaintext hop — the session runner refuses a next
+	// hop that does not offer STARTTLS and propagates the REQUIRETLS
+	// parameter on the outbound MAIL FROM when the next hop advertises it.
+	RequireTLS bool
 }
 
 // DeliveryResult reports what happened: Delivered true exactly when the
@@ -357,13 +362,14 @@ func (e *Executor) Deliver(ctx context.Context, spec DeliverySpec, env Envelope)
 			startedAt := nowFunc()
 
 			opts := SessionOptions{
-				Addr:       h.Addr(),
-				ServerName: h.Host,
-				HeloDomain: e.heloDomain,
-				BindIP:     parseBindIP(bindIP),
-				Target:     TargetMX,
-				TLSConfig:          e.tlsConfigFor(h.Host),
+				Addr:                h.Addr(),
+				ServerName:          h.Host,
+				HeloDomain:          e.heloDomain,
+				BindIP:              parseBindIP(bindIP),
+				Target:              TargetMX,
+				TLSConfig:           e.tlsConfigFor(h.Host),
 				ThrottleBytesPerSec: e.throttleBPS,
+				RequireTLS:          env.RequireTLS,
 			}
 			// SF-13: this attempt's message goes out with its own Received:
 			// trace header — MX host plus the attempt identity (email id +
