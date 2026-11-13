@@ -58,9 +58,9 @@ func (r *Router) mailComposeRoutes() []okapi.RouteDefinition {
 			Description: "Uploads one or more files (multipart/form-data, repeatable `file` parts). Each is scanned against clamd (ADR-006): a positive is refused with 409 and the signature, an unavailable scanner is refused under a closed fail mode and accepted unscanned under an open one. Content is stored in the encrypted blob layer; the response is the ref compose requests carry.",
 			Response:    &dto.Response[[]handlers.ComposeAttachmentRefResponse]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -73,9 +73,9 @@ func (r *Router) mailComposeRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.ComposeSendRequest{},
 			Response:    &dto.Response[handlers.SendResult]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -88,9 +88,9 @@ func (r *Router) mailComposeRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.ComposeSendRequest{},
 			Response:    &dto.Response[handlers.DraftResult]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -104,9 +104,9 @@ func (r *Router) mailComposeRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[handlers.DraftResult]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("uid", "integer", "Draft UID in the Drafts folder"),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -120,10 +120,10 @@ func (r *Router) mailComposeRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[handlers.SendResult]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("uid", "integer", "Draft UID in the Drafts folder"),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -137,9 +137,9 @@ func (r *Router) mailComposeRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[handlers.ReplyFrameResponse]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("uid", "integer", "Message UID in the folder"),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -153,9 +153,9 @@ func (r *Router) mailComposeRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[handlers.DeliveryStatusResponse]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("uid", "integer", "Message UID in the Sent folder"),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 			},
 		},
 	}

@@ -75,7 +75,7 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 			Description: "Issue a fresh verification email for the authenticated user",
 			Response:    &dto.Response[dto.MessageData]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(429, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(429, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -126,7 +126,7 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.GenerateRecoveryCodesRequest{},
 			Response:    &dto.Response[handlers.RecoveryCodesResponse]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -175,7 +175,7 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[any]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Session ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -218,7 +218,7 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.SubscribeRequest{},
 			Response:    &dto.Response[map[string]any]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -240,7 +240,7 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[map[string]string]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Push subscription ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -253,8 +253,8 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.SetDefaultWorkspaceRequest{},
 			Response:    &dto.Response[dto.MessageData]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -382,7 +382,7 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 			Description: "Returns the PublicKeyCredentialCreationOptions for navigator.credentials.create().",
 			Response:    &dto.Response[any]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 			},
 		},
 		okapi.RouteDefinition{
@@ -394,8 +394,8 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 			Description: "Validates the attestation response (raw WebAuthn credential JSON body) and stores the credential. Audited.",
 			Response:    &dto.Response[models.WebAuthnCredential]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 			},
 		},
 		okapi.RouteDefinition{
@@ -408,9 +408,9 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.BeginWebAuthnLoginRequest{},
 			Response:    &dto.Response[any]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(429, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(429, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 			},
 		},
 		okapi.RouteDefinition{
@@ -422,9 +422,9 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 			Description: "Verifies the assertion and issues the JWT + session like a password login. With 2FA enabled the assertion alone is not enough: the response is a requires_2fa 401 carrying a one-shot pending token that this endpoint redeems together with the TOTP code. Body: {email, assertion} or {email, pending_token, two_factor_code}.",
 			Response:    &dto.Response[handlers.AuthResponse]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(401, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(429, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(401, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(429, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 			},
 		},
 		okapi.RouteDefinition{
@@ -436,7 +436,7 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 			Description: "The authenticated user's registered passkeys, oldest first.",
 			Response:    &dto.Response[[]models.WebAuthnCredential]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 			},
 		},
 		okapi.RouteDefinition{
@@ -450,8 +450,8 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[dto.MessageData]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "string", "Credential ID (base64url)"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 			},
 		},
 		okapi.RouteDefinition{
@@ -464,8 +464,8 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[dto.MessageData]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "string", "Credential ID (base64url)"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 			},
 		},
 	)
@@ -490,7 +490,7 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 		Description: "Revokes the current impersonation session and expires the cookie; the admin re-authenticates. Audited.",
 		Response:    &dto.Response[okapi.M]{},
 		Options: []okapi.RouteOption{
-			okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+			okapi.DocResponse(400, &dto.ErrorResponseBody{}),
 		},
 	})
 
@@ -513,7 +513,7 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.CreateAppPasswordRequest{},
 			Response:    &dto.Response[handlers.AppPasswordCreatedResponse]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
 			},
 		},
 		okapi.RouteDefinition{
@@ -536,7 +536,7 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[any]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "App password ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 	)
@@ -559,8 +559,8 @@ func (r *Router) userRoutes() []okapi.RouteDefinition {
 		Request:     &handlers.RefreshRequest{},
 		Response:    &dto.Response[handlers.AuthResponse]{},
 		Options: []okapi.RouteOption{
-			okapi.DocErrorResponse(401, &dto.ErrorResponseBody{}),
-			okapi.DocErrorResponse(429, &dto.ErrorResponseBody{}),
+			okapi.DocResponse(401, &dto.ErrorResponseBody{}),
+			okapi.DocResponse(429, &dto.ErrorResponseBody{}),
 		},
 	})
 

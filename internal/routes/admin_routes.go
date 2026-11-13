@@ -49,7 +49,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.AdminCreateUserRequest{},
 			Options: []okapi.RouteOption{
 				okapi.DocResponse(201, &dto.Response[models.User]{}),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -72,8 +72,8 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[models.User]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "User ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -86,7 +86,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[handlers.UserDetailMetrics]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "User ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -99,7 +99,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "User ID"),
 				okapi.DocResponse(204, nil),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -113,8 +113,8 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "User ID"),
 				okapi.DocResponse(204, nil),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -127,7 +127,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[okapi.M]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "User ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -140,7 +140,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[okapi.M]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "User ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -153,7 +153,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[okapi.M]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "User ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -167,9 +167,9 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[handlers.ImpersonationResponse]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Target user ID"),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(403, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(403, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -182,7 +182,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[[]handlers.AdminWorkspace]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "User ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 
@@ -198,7 +198,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[dto.MessageData]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "User ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -211,7 +211,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[models.Plan]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "User ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 
@@ -314,7 +314,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.SettingHistoryRequest{},
 			Response:    &dto.PageableResponse[models.SettingHistory]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -327,8 +327,8 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.RollbackSettingRequest{},
 			Response:    &dto.Response[[]models.Setting]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 
@@ -374,7 +374,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.CreateAnnouncementRequest{},
 			Response:    &dto.Response[models.Announcement]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -387,7 +387,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[dto.MessageData]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Announcement ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 
@@ -412,7 +412,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[handlers.AdminDomainDetail]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Domain ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -424,7 +424,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Description: "Performs the same DNS checks the owning workspace would, on their behalf.",
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Domain ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -439,8 +439,8 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response: &dto.Response[models.Domain]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Domain ID"),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
 			},
 		},
 
@@ -465,7 +465,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[handlers.AdminWorkspaceDetail]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Workspace ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 
@@ -480,7 +480,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.CreatePlanRequest{},
 			Options: []okapi.RouteOption{
 				okapi.DocResponse(201, &dto.Response[models.Plan]{}),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -501,7 +501,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response: &dto.Response[models.Plan]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Plan ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -515,7 +515,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[models.Plan]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Plan ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -529,8 +529,8 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Plan ID"),
 				okapi.DocResponse(204, nil),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -543,7 +543,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[models.Plan]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Plan ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -557,7 +557,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[dto.MessageData]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Workspace ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -570,7 +570,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[models.Plan]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Workspace ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 
@@ -605,7 +605,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response: &dto.Response[models.Server]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Server ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -618,7 +618,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response: &dto.Response[models.Server]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Server ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -631,7 +631,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Server ID"),
 				okapi.DocResponse(204, nil),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -643,7 +643,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response: &dto.Response[models.Server]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Server ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -655,7 +655,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response: &dto.Response[models.Server]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Server ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -667,7 +667,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response: &dto.Response[dto.MessageData]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Server ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 	}
@@ -707,8 +707,8 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[handlers.QueueTaskPage]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("queue", "string", "Queue name (transactional, bulk or low)"),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		okapi.RouteDefinition{
@@ -723,8 +723,8 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("queue", "string", "Queue name"),
 				okapi.DocPathParam("task_id", "string", "Asynq task ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
 			},
 		},
 		okapi.RouteDefinition{
@@ -739,8 +739,8 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("queue", "string", "Queue name"),
 				okapi.DocPathParam("task_id", "string", "Asynq task ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
 			},
 		},
 		okapi.RouteDefinition{
@@ -755,8 +755,8 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("queue", "string", "Queue name"),
 				okapi.DocPathParam("task_id", "string", "Asynq task ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
 			},
 		},
 		okapi.RouteDefinition{
@@ -771,8 +771,8 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("queue", "string", "Queue name"),
 				okapi.DocPathParam("task_id", "string", "Asynq task ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
 			},
 		},
 	)
@@ -791,7 +791,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Description: "Stops task processing on the transactional, bulk and low queues (already-paused queues are reported unchanged). Audited. The per-queue paused flags appear in GET /admin/queues.",
 			Response:    &dto.Response[handlers.QueuePauseResult]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
 			},
 		},
 		okapi.RouteDefinition{
@@ -804,7 +804,7 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Description: "Resumes task processing on the transactional, bulk and low queues (already-running queues are reported unchanged). Audited.",
 			Response:    &dto.Response[handlers.QueuePauseResult]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
 			},
 		},
 	)
@@ -824,8 +824,8 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[handlers.QueueActionResponse]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("action", "string", "requeue_stuck or purge_archived_before"),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
 			},
 		})
 	}
@@ -845,8 +845,8 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Description: "Drops and re-creates the mail_messages.search_tsv generated tsvector column and its GIN index from the canonical definition (ADR-003 decision 3). The column regenerates automatically on every write, so this is an operator recovery path for schema or index drift, not a routine task; it takes an exclusive lock on mail_messages while the DDL runs. Idempotent. Audited.",
 			Response: &dto.Response[handlers.ReindexMailstoreSearchResponse]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(500, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(500, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 			},
 		})
 	}
@@ -871,8 +871,8 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 				Request:     &handlers.AdminListMailboxesRequest{},
 				Response:    &dto.PageableResponse[handlers.AdminMailboxRow]{},
 				Options: []okapi.RouteOption{
-					okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-					okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+					okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+					okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 				},
 			},
 			okapi.RouteDefinition{
@@ -886,10 +886,10 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 				Response:    &dto.Response[handlers.AdminMailboxRow]{},
 				Options: []okapi.RouteOption{
 					okapi.DocResponse(201, &dto.Response[handlers.AdminMailboxRow]{}),
-					okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-					okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-					okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
-					okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+					okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+					okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+					okapi.DocResponse(409, &dto.ErrorResponseBody{}),
+					okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 				},
 			},
 			okapi.RouteDefinition{
@@ -903,9 +903,9 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 				Response:    &dto.Response[handlers.AdminMailboxRow]{},
 				Options: []okapi.RouteOption{
 					okapi.DocPathParam("id", "integer", "Mailbox ID"),
-					okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-					okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-					okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+					okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+					okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+					okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 				},
 			},
 			okapi.RouteDefinition{
@@ -919,8 +919,8 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 				Response:    &dto.Response[dto.MessageData]{},
 				Options: []okapi.RouteOption{
 					okapi.DocPathParam("id", "integer", "Mailbox ID"),
-					okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-					okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+					okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+					okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 				},
 			},
 			okapi.RouteDefinition{
@@ -933,8 +933,8 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 				Response:    &dto.Response[handlers.AdminMailboxUsageResponse]{},
 				Options: []okapi.RouteOption{
 					okapi.DocPathParam("id", "integer", "Mailbox ID"),
-					okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-					okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+					okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+					okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 				},
 			},
 		)
@@ -1015,9 +1015,9 @@ func (r *Router) securityRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[models.SecurityBan]{},
 			Options: []okapi.RouteOption{
 				okapi.DocResponse(201, &dto.Response[models.SecurityBan]{}),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -1029,7 +1029,7 @@ func (r *Router) securityRoutes() []okapi.RouteDefinition {
 			Description: "Expires the ban in place; the row is kept as offense history",
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Ban ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -1043,8 +1043,8 @@ func (r *Router) securityRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[dto.MessageData]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Ban ID"),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 
@@ -1103,8 +1103,8 @@ func (r *Router) securityRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[models.SecurityAllowlist]{},
 			Options: []okapi.RouteOption{
 				okapi.DocResponse(201, &dto.Response[models.SecurityAllowlist]{}),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -1116,7 +1116,7 @@ func (r *Router) securityRoutes() []okapi.RouteDefinition {
 			Description: "Deletes the exemption; the address becomes subject to detection and existing bans again",
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Allowlist entry ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 	}

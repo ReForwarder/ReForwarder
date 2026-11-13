@@ -59,7 +59,7 @@ func (r *Router) automationRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.SaveAutomationRequest{},
 			Options: []okapi.RouteOption{
 				okapi.DocResponse(201, &dto.Response[handlers.AutomationResponse]{}),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -71,7 +71,7 @@ func (r *Router) automationRoutes() []okapi.RouteDefinition {
 			Response: &dto.Response[handlers.AutomationResponse]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Automation ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -85,8 +85,8 @@ func (r *Router) automationRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[handlers.AutomationResponse]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Automation ID"),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -99,8 +99,8 @@ func (r *Router) automationRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[dto.MessageData]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Automation ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -113,8 +113,8 @@ func (r *Router) automationRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[handlers.AutomationResponse]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Automation ID"),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -127,7 +127,7 @@ func (r *Router) automationRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[handlers.AutomationResponse]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Automation ID"),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -167,7 +167,7 @@ func (r *Router) automationRoutes() []okapi.RouteDefinition {
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Automation ID"),
 				okapi.DocPathParam("journeyId", "integer", "Journey ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -193,7 +193,7 @@ func (r *Router) automationRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[handlers.AutomationEventResponse]{},
 			Options: []okapi.RouteOption{
 				okapi.DocResponse(202, &dto.Response[handlers.AutomationEventResponse]{}),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
 			},
 		},
 	}

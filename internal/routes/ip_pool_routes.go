@@ -59,8 +59,8 @@ func (r *Router) ipPoolRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.CreateIPPoolRequest{},
 			Response:    &dto.Response[handlers.IPoolWire]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(403, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(403, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -73,8 +73,8 @@ func (r *Router) ipPoolRoutes() []okapi.RouteDefinition {
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("poolId", "integer", "IP pool ID"),
 				okapi.DocResponse(204, nil),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -87,8 +87,8 @@ func (r *Router) ipPoolRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.PoolMemberRequest{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("poolId", "integer", "IP pool ID"),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -102,7 +102,7 @@ func (r *Router) ipPoolRoutes() []okapi.RouteDefinition {
 				okapi.DocPathParam("poolId", "integer", "IP pool ID"),
 				okapi.DocPathParam("memberId", "integer", "Pool member ID"),
 				okapi.DocResponse(204, nil),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -115,7 +115,7 @@ func (r *Router) ipPoolRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.AssignDomainPoolRequest{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Domain ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -128,8 +128,8 @@ func (r *Router) ipPoolRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.SetDomainWarmupRequest{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Domain ID"),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -142,7 +142,7 @@ func (r *Router) ipPoolRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[reputation.DomainReport]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Domain ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 	}
@@ -179,7 +179,7 @@ func (r *Router) adminIPPoolRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.AdminCreateIPPoolRequest{},
 			Response:    &dto.Response[handlers.IPoolWire]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -192,8 +192,8 @@ func (r *Router) adminIPPoolRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.PoolMemberRequest{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("poolId", "integer", "IP pool ID"),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -207,7 +207,7 @@ func (r *Router) adminIPPoolRoutes() []okapi.RouteDefinition {
 				okapi.DocPathParam("poolId", "integer", "IP pool ID"),
 				okapi.DocPathParam("memberId", "integer", "Pool member ID"),
 				okapi.DocResponse(204, nil),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -221,7 +221,7 @@ func (r *Router) adminIPPoolRoutes() []okapi.RouteDefinition {
 			Options: []okapi.RouteOption{
 				okapi.DocQueryParam("ip", "string", "The source IP to look up", true),
 				okapi.DocQueryParam("days", "integer", "Lookback window in days (default 14, max 90)", false),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
 			},
 		},
 	}

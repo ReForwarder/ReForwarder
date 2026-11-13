@@ -131,9 +131,9 @@ func (r *Router) providerWebhookRoutes() []okapi.RouteDefinition {
 			Response:    &handlers.ProviderEventResponse{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("provider", "string", "Provider slug: ses, sendgrid, postmark or mailgun"),
-				okapi.DocErrorResponse(401, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(501, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(401, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(501, &dto.ErrorResponseBody{}),
 			},
 		},
 	}

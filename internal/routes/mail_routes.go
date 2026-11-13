@@ -66,8 +66,8 @@ func (r *Router) mailRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.MailFolderListRequest{},
 			Response:    &dto.Response[[]handlers.MailFolderResponse]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -80,9 +80,9 @@ func (r *Router) mailRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.MailFolderCreateRequest{},
 			Response:    &dto.Response[handlers.MailFolderResponse]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -96,9 +96,9 @@ func (r *Router) mailRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[handlers.MailFolderResponse]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Folder ID"),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -112,8 +112,8 @@ func (r *Router) mailRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[dto.MessageData]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Folder ID"),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -127,7 +127,7 @@ func (r *Router) mailRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[handlers.MailExpungeResponse]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Folder ID"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -140,9 +140,9 @@ func (r *Router) mailRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.MailMessageListRequest{},
 			Response:    &dto.PageableResponse[handlers.MailMessageSummary]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -156,7 +156,7 @@ func (r *Router) mailRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[handlers.MailMessageResponse]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("uid", "integer", "Message UID within the folder"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -171,7 +171,7 @@ func (r *Router) mailRoutes() []okapi.RouteDefinition {
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("uid", "integer", "Message UID within the folder"),
 				okapi.DocPathParam("index", "integer", "0-based attachment index"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -185,9 +185,9 @@ func (r *Router) mailRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[handlers.MailFlagsResponse]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("uid", "integer", "Message UID within the folder"),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(409, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(409, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -201,8 +201,8 @@ func (r *Router) mailRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[handlers.MailMoveResponse]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("uid", "integer", "Message UID within the folder"),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -216,8 +216,8 @@ func (r *Router) mailRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[handlers.MailMoveResponse]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("uid", "integer", "Message UID within the folder"),
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -231,7 +231,7 @@ func (r *Router) mailRoutes() []okapi.RouteDefinition {
 			Response:    &dto.Response[dto.MessageData]{},
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("uid", "integer", "Message UID within the folder"),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
 		{
@@ -244,9 +244,9 @@ func (r *Router) mailRoutes() []okapi.RouteDefinition {
 			Request:     &handlers.MailSearchRequest{},
 			Response:    &dto.PageableResponse[handlers.MailMessageSummary]{},
 			Options: []okapi.RouteOption{
-				okapi.DocErrorResponse(400, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(404, &dto.ErrorResponseBody{}),
-				okapi.DocErrorResponse(503, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 			},
 		},
 	}
