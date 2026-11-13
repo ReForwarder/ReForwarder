@@ -33,6 +33,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -247,6 +248,9 @@ func TestHostAllowlistHotReload(t *testing.T) {
 	}
 
 	added, removed := m.SyncHosts([]string{"mail.b.example", " Mail.C.Example. "})
+	// SyncHosts derives the delta by ranging over maps, so the returned
+	// slices carry no ordering guarantee — compare as sets.
+	sort.Strings(added)
 	if len(added) != 2 || added[0] != "mail.b.example" || added[1] != "mail.c.example" {
 		t.Fatalf("added = %v, want [mail.b.example mail.c.example]", added)
 	}
