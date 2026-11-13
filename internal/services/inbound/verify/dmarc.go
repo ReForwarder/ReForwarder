@@ -109,13 +109,13 @@ func (e *DMARCEvaluator) Evaluate(ctx context.Context, fromDomain string, spf SP
 	}
 
 	// RFC 7489 §6.6.1: DKIM aligned pass OR SPF aligned pass.
-	if dkim.Result == DKIMPass && aligns(dkim.Domain, fromDomain, policy.ADKIM) {
+	if dkim.Result == DKIMPass && Aligns(dkim.Domain, fromDomain, policy.ADKIM) {
 		v.Result = DMARCPass
 		v.Disposition = DispositionNone
 		v.AlignedBy = "dkim"
 		return v
 	}
-	if spf.Result == SPFPass && aligns(spf.Domain, fromDomain, policy.ASPF) {
+	if spf.Result == SPFPass && Aligns(spf.Domain, fromDomain, policy.ASPF) {
 		v.Result = DMARCPass
 		v.Disposition = DispositionNone
 		v.AlignedBy = "spf"
@@ -156,7 +156,7 @@ func (e *DMARCEvaluator) Evaluate(ctx context.Context, fromDomain string, spf SP
 // organizational domain (RFC 7489 §6.6.3). Returns (domain, policy, "",
 // "") on success or (domain, nil, result, reason) when no usable policy was
 // found.
-func (e *DMARCEvaluator) discoverPolicy(ctx context.Context, fromDomain string) (string, *dmarcPolicy, string, string) {
+func (e *DMARCEvaluator) discoverPolicy(ctx context.Context, fromDomain string) (string, *DMARCPolicy, string, string) {
 	domain, policy, result, reason := e.lookupPolicy(ctx, fromDomain)
 	if policy != nil {
 		return domain, policy, result, reason
@@ -179,7 +179,7 @@ func (e *DMARCEvaluator) discoverPolicy(ctx context.Context, fromDomain string) 
 	return org, nil, res, reason
 }
 
-func (e *DMARCEvaluator) lookupPolicy(ctx context.Context, domain string) (string, *dmarcPolicy, string, string) {
+func (e *DMARCEvaluator) lookupPolicy(ctx context.Context, domain string) (string, *DMARCPolicy, string, string) {
 	name := "_dmarc." + domain
 	txts, err := e.Resolver.LookupTXT(ctx, name)
 	if err != nil {
@@ -190,7 +190,7 @@ func (e *DMARCEvaluator) lookupPolicy(ctx context.Context, domain string) (strin
 	}
 	var records []string
 	for _, t := range txts {
-		if isDMARCRecord(t) {
+		if IsDMARCRecord(t) {
 			records = append(records, t)
 		}
 	}
@@ -200,15 +200,42 @@ func (e *DMARCEvaluator) lookupPolicy(ctx context.Context, domain string) (strin
 	case len(records) > 1:
 		return domain, nil, DMARCPermError, fmt.Sprintf("%d DMARC records for %s", len(records), domain)
 	}
-	policy, err := parseDMARCPolicy(records[0])
+	policy, err := ParseDMARCPolicy(records[0])
 	if err != nil {
 		return domain, nil, DMARCPermError, err.Error()
 	}
 	return domain, policy, "", ""
 }
 
-// dmarcPolicy is the parsed DMARC record (RFC 7489 §6.4).
-type dmarcPolicy struct {
+// DMARCPolicyForReporting resolves the published DMARC policy for the given
+// From-domain using the RFC 7489 §6.6.3 discovery (_dmarc.<from-domain>
+// first, then the organizational domain) and returns the domain whose record
+// was found together with the parsed policy. SF-25's aggregate-report send
+// side reads the live published policy for the policy-published block and
+// the rua endpoints — never stored addresses. A domain without a usable
+// policy record yields an error (nothing to report against); transient and
+// permanent resolver/record trouble do too, so the reporting pass skips the
+// domain rather than guessing.
+func DMARCPolicyForReporting(ctx context.Context, res Resolver, fromDomain string) (string, *DMARCPolicy, error) {
+	if res == nil {
+		return "", nil, fmt.Errorf("dmarc reporting: no resolver wired")
+	}
+	fromDomain = normalizeDomain(fromDomain)
+	if fromDomain == "" {
+		return "", nil, fmt.Errorf("dmarc reporting: empty domain")
+	}
+	eval := DMARCEvaluator{Resolver: res}
+	recordDomain, policy, _, _ := eval.discoverPolicy(ctx, fromDomain)
+	if policy == nil {
+		return recordDomain, nil, fmt.Errorf("dmarc reporting: no usable DMARC record for %s", fromDomain)
+	}
+	return recordDomain, policy, nil
+}
+
+// DMARCPolicy is the parsed DMARC record (RFC 7489 §6.4). Exported for the
+// aggregate-report send side (SF-25), which reads the live published policy
+// for the policy-published block and the rua endpoints.
+type DMARCPolicy struct {
 	P   string // p= (required)
 	SP  string // sp= (optional)
 	PCT int    // pct= (default 100)
@@ -218,9 +245,10 @@ type dmarcPolicy struct {
 	RI          int // ri= report interval seconds (default 86400)
 }
 
-// isDMARCRecord reports whether one TXT record is a DMARC policy record
-// (RFC 7489 §6.4: v=DMARC1, case-insensitive).
-func isDMARCRecord(record string) bool {
+// IsDMARCRecord reports whether one TXT record is a DMARC policy record
+// (RFC 7489 §6.4: v=DMARC1, case-insensitive). Exported for the aggregate
+// report send side (SF-25).
+func IsDMARCRecord(record string) bool {
 	for _, part := range strings.Split(record, ";") {
 		part = strings.TrimSpace(part)
 		if eq := strings.IndexByte(part, '='); eq > 0 && strings.EqualFold(strings.TrimSpace(part[:eq]), "v") {
@@ -230,9 +258,11 @@ func isDMARCRecord(record string) bool {
 	return false
 }
 
-// parseDMARCPolicy parses the tag=value list of one DMARC record.
-func parseDMARCPolicy(record string) (*dmarcPolicy, error) {
-	p := &dmarcPolicy{PCT: 100, ADKIM: "r", ASPF: "r", RI: 86400}
+// ParseDMARCPolicy parses the tag=value list of one DMARC record. Exported
+// for the aggregate report send side (SF-25), which reads the live published
+// policy for the policy-published block and the rua endpoints.
+func ParseDMARCPolicy(record string) (*DMARCPolicy, error) {
+	p := &DMARCPolicy{PCT: 100, ADKIM: "r", ASPF: "r", RI: 86400}
 	for _, part := range strings.Split(record, ";") {
 		part = strings.TrimSpace(part)
 		if part == "" {
@@ -287,9 +317,11 @@ func parseDMARCPolicy(record string) (*dmarcPolicy, error) {
 	return p, nil
 }
 
-// aligns reports whether authDomain is aligned with fromDomain under the
+// Aligns reports whether authDomain is aligned with fromDomain under the
 // given mode ("r" relaxed = same organizational domain, "s" strict = exact).
-func aligns(authDomain, fromDomain, mode string) bool {
+// Exported for the aggregate report send side (SF-25), whose
+// policy-evaluated blocks need the same alignment the evaluator applied.
+func Aligns(authDomain, fromDomain, mode string) bool {
 	if authDomain == "" || fromDomain == "" {
 		return false
 	}

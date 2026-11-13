@@ -106,6 +106,15 @@ replies to the sender. There is no auto-responder.
 * Spam scoring & retry on failure
 * Real-time SSE stream for inbound notifications
 
+### Mailboxes, IMAP & Webmail
+
+* Real mailboxes with folders, flags, quotas, and full-text search
+* Message bodies encrypted at rest (AES-256-GCM)
+* IMAP4rev1 and POP3 servers — works with any standard mail client
+* App-password-only authentication for mail clients (your main password is never used)
+* Built-in webmail — read, compose, and reply from the dashboard
+* Unified retention policies with automatic cleanup
+
 ### Web Form Messages
 
 * Public ingest endpoint per form — `POST /api/v1/f/{key}`, no API key on the page
@@ -147,6 +156,15 @@ replies to the sender. There is no auto-responder.
 * Shared SMTP pools for teams
 * Domain verification (SPF, DKIM, DMARC)
 * Verified sender enforcement
+* Direct-to-MX delivery with per-domain relay/direct routing — or bring your own upstream relay
+* Automatic DKIM signing with key generation, rotation, and retirement
+* DNS automation via Cloudflare, Route53, or DigitalOcean — records published for you
+* Automatic TLS certificates (ACME) with per-domain SNI on every SMTP listener
+* IP pools with warm-up schedules and per-IP reputation monitoring
+* MTA-STS policy publishing and TLS-RPT reports (both directions)
+* DMARC aggregate reports built and mailed to your `rua` addresses
+* `DELIVERBY` deadlines and `REQUIRETLS` (never sent over a plaintext hop) honored end to end
+* Per-recipient retry schedules, notification addresses, and message expiry
 
 ### Security
 
@@ -286,7 +304,7 @@ server and its workers.
 
 ## Project Roadmap
 
-Planning details live in `docs/project/`: [FEATURE_INVENTORY.md](docs/project/FEATURE_INVENTORY.md) is the detailed registry (126 entries as of 2026-11-14), [BACKLOG.md](docs/project/BACKLOG.md) the operational backlog, and the [ReForwarder Backlog](https://github.com/ReForwarder/ReForwarder/projects) board the task board. The Option B mail-infrastructure programme (Phases 0–6) **closed 2026-11-12 at HEAD `ee38ca8`** — the owner-mandated what-added / what-is-done / what-will-be-done / what-is-incomplete accounting lives in [todo.md](todo.md) Track A, and the delivered mail capabilities are registered as RF-F109–RF-F123 below.
+Planning details live in `docs/project/`: [FEATURE_INVENTORY.md](docs/project/FEATURE_INVENTORY.md) is the detailed registry (127 entries as of 2026-11-14), [BACKLOG.md](docs/project/BACKLOG.md) the operational backlog, and the [ReForwarder Backlog](https://github.com/ReForwarder/ReForwarder/projects) board the task board. The Option B mail-infrastructure programme (Phases 0–6) **closed 2026-11-12 at HEAD `ee38ca8`** — the owner-mandated what-added / what-is-done / what-will-be-done / what-is-incomplete accounting lives in [todo.md](todo.md) Track A, and the delivered mail capabilities are registered as RF-F109–RF-F123 below.
 
 ### To-dos
 
@@ -433,6 +451,7 @@ _None._
 - [x] [RF-F124] Queue schedule layer: per-recipient retry/notify schedules + message expiry (SF-08 — per-recipient interval lists honored at claim time and by the retry sweep/reconcile, notify addresses through the email.failed event taxonomy, TTL expiry sweep riding the unified retention cron; 2026-11-13)
 - [x] [RF-F125] SMTP DELIVERBY honoring via the queue expiry machinery (SF-09 — BY accepted at the MSA/relay receivers, deadline enforced at the claim-time boundary and by the retention sweep with DSN-style expiry events; FUTURERELEASE documented as unsupported by the receiver dependency; 2026-11-13)
 - [x] [RF-F126] SMTP REQUIRETLS honoring (SF-02 — the parameter parsed at the MSA, persisted on the message, TLS-only hops enforced by the session runner and the relay path, parameter propagation on TLS connections; 2026-11-14)
+- [x] [RF-F127] DMARC aggregate reports: send side (SF-25 — daily cron over the inbound verification verdicts, RFC 7489 aggregate XML with live-policy alignment, rua endpoints discovered from each reported domain's live _dmarc DNS record only, dispatched through the system-forward pipeline as gzipped application/dmarc+xml; 2026-11-14)
 
 ---
 

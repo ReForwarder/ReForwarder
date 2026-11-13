@@ -47,6 +47,7 @@ import (
 	"github.com/goposta/posta/internal/services/automation"
 	"github.com/goposta/posta/internal/services/certmanager"
 	"github.com/goposta/posta/internal/services/crypto"
+	"github.com/goposta/posta/internal/services/dmarc"
 	"github.com/goposta/posta/internal/services/email"
 	"github.com/goposta/posta/internal/services/emailhistory"
 	"github.com/goposta/posta/internal/services/eventbus"
@@ -390,6 +391,22 @@ func runServer(cli *okapicli.CLI) {
 					sender,
 					"mta-sts-report@"+cfg.MTASTSOrgDomain,
 					cfg.MTASTSOrgDomain,
+				))
+			}
+
+			// SF-25 send side (2026-11-14): the daily DMARC aggregate report
+			// pass over the inbound verification verdicts. Inert until the
+			// operator sets POSTA_DMARC_REPORT_ORG (reports are never sent
+			// without an explicit generator identity); reports go ONLY to
+			// mailto rua endpoints read from each reported domain's live
+			// _dmarc DNS record.
+			if res.cronManager != nil && cfg.DMARCReportOrgDomain != "" {
+				res.cronManager.Register(jobs.NewDMARCReportJob(
+					res.db,
+					dmarc.NewAggregator(res.db),
+					newDMARCReportSender(emailSvc, cfg),
+					"dmarc-report@"+cfg.DMARCReportOrgDomain,
+					cfg.DMARCReportOrgDomain,
 				))
 			}
 
@@ -994,6 +1011,40 @@ func newTLSRPTSender(emailSvc *email.Service, cfg *config.Config) tlsrpt.Sender 
 			}},
 			Metadata: map[string]any{
 				"tlsrpt":        true,
+				"policy_domain": req.PolicyDomain,
+				"report_id":     req.ReportID,
+			},
+		})
+		return err
+	})
+}
+
+// newDMARCReportSender adapts the email service's system path onto the DMARC
+// aggregate-report sender seam (SF-25 send side): the report rides the
+// standard outbound pipeline as system-provenance mail — queued, signed,
+// retried with the standard backoff — never through the tenant send path
+// (no suppression, quota or marketing limits apply to it, mirroring the
+// forwarding and TLS-RPT postures). The document is attached gzipped per
+// RFC 7489 §7.2.3.
+func newDMARCReportSender(emailSvc *email.Service, cfg *config.Config) dmarc.Sender {
+	return dmarc.SenderFunc(func(ctx context.Context, req *dmarc.OutboundReportRequest) error {
+		filename, body, err := dmarc.GzipAttachment(req)
+		if err != nil {
+			return err
+		}
+		_, err = emailSvc.SendSystemForward(ctx, &email.SystemForwardRequest{
+			From: req.From,
+			To:   req.To,
+			Subject: fmt.Sprintf("Report Domain: %s Submitter: %s Report-ID: %s",
+				req.PolicyDomain, cfg.DMARCReportOrgDomain, req.ReportID),
+			Text: dmarc.ReportText(req),
+			Attachments: []models.Attachment{{
+				Filename:    filename,
+				Content:     dmarc.Base64Attachment(body),
+				ContentType: "application/dmarc+xml",
+			}},
+			Metadata: map[string]any{
+				"dmarc_report":  true,
 				"policy_domain": req.PolicyDomain,
 				"report_id":     req.ReportID,
 			},

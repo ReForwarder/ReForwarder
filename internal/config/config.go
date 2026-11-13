@@ -348,6 +348,15 @@ type Config struct {
 	// reports are never sent without an explicit identity.
 	MTASTSOrgDomain string
 
+	// DMARCReportOrgDomain is the generator identity for outbound DMARC
+	// aggregate reports (SF-25 send side): the RFC 7489 <org_name> in the
+	// report document and the local domain of the dmarc-report@ sender
+	// address. Empty (POSTA_DMARC_REPORT_ORG empty) keeps the outbound report
+	// pass inert — reports are never sent without an explicit identity, and
+	// then only to rua endpoints read from each reported domain's live
+	// _dmarc DNS record.
+	DMARCReportOrgDomain string
+
 	// DNS automation (OB-6, ADR-007 decision 1): the provider publication
 	// layer. DNSAutomationEnabled (POSTA_DNS_AUTOMATION_ENABLED, default
 	// false) gates the connect/publish/drift routes and the drift cron —
@@ -794,8 +803,8 @@ func New() *Config {
 		SMTPDialTimeoutSecs: goutils.EnvInt("POSTA_SMTP_DIAL_TIMEOUT_SECS", 15),
 
 		// Outbound MTA (OB-1): EHLO name for direct-to-MX sessions.
-		MTAEhloName: goutils.Env("POSTA_MTA_EHLO_NAME", ""),
-		MTAMsgRatePerMin: goutils.EnvInt("POSTA_MTA_MSG_RATE_PER_MIN", 0),
+		MTAEhloName:          goutils.Env("POSTA_MTA_EHLO_NAME", ""),
+		MTAMsgRatePerMin:     goutils.EnvInt("POSTA_MTA_MSG_RATE_PER_MIN", 0),
 		DeliveryThrottleKBPS: goutils.EnvInt("POSTA_DELIVERY_THROTTLE_KBPS", 0),
 		MemoryBudgetMB:       goutils.EnvInt("POSTA_MEMORY_BUDGET_MB", 0),
 
@@ -803,6 +812,10 @@ func New() *Config {
 		// see the field comments for the gate semantics.
 		MTASTSEnabled:   goutils.EnvBool("POSTA_MTA_STS_ENABLED", false),
 		MTASTSOrgDomain: strings.ToLower(strings.TrimSpace(goutils.Env("POSTA_MTA_STS_ORG", ""))),
+
+		// DMARC aggregate reports (SF-25 send side): gated by the generator
+		// identity; see the field comment for the gate semantics.
+		DMARCReportOrgDomain: strings.ToLower(strings.TrimSpace(goutils.Env("POSTA_DMARC_REPORT_ORG", ""))),
 
 		// DNS automation (OB-6, ADR-007 decision 1): off by default; see the
 		// field comments for the gate semantics.

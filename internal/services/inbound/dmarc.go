@@ -103,6 +103,11 @@ type DMARCPolicyPublished struct {
 	ADKIM  string
 	ASP    string
 	Policy string
+	// SP and PCT complete the published policy (RFC 7489 §7.2.1.2/§7.2.1.3);
+	// SP empty when the record publishes none, PCT 0 when absent (the
+	// aggregate schema has no default).
+	SP  string
+	PCT int
 }
 
 // DMARCRecord is one <record>: a source IP's tally over the report window.
@@ -146,8 +151,13 @@ type dmarcFeedback struct {
 	Policy struct {
 		Domain string `xml:"domain"`
 		ADKIM  string `xml:"adkim"`
-		ASP    string `xml:"asp"`
-		P      string `xml:"p"`
+		// ASPF (RFC 7489 §7.2.1.1): the tag was previously parsed as "asp" —
+		// real reports carry <aspf>, so the value was silently dropped.
+		// Fixed 2026-11-14 (found by the SF-25 send side's round-trip test).
+		ASPF string `xml:"aspf"`
+		P    string `xml:"p"`
+		SP   string `xml:"sp"`
+		PCT  int    `xml:"pct"`
 	} `xml:"policy_published"`
 	Records []struct {
 		Row struct {
@@ -203,8 +213,10 @@ func ParseDMARCAggregateReport(raw []byte) (*DMARCAggregateReport, error) {
 		Policy: DMARCPolicyPublished{
 			Domain: fb.Policy.Domain,
 			ADKIM:  fb.Policy.ADKIM,
-			ASP:    fb.Policy.ASP,
+			ASP:    fb.Policy.ASPF,
 			Policy: fb.Policy.P,
+			SP:     fb.Policy.SP,
+			PCT:    fb.Policy.PCT,
 		},
 	}
 	if fb.Meta.DateRng.Begin > 0 {

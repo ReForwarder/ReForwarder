@@ -293,10 +293,10 @@ func TestDMARCRecordVersionValidation(t *testing.T) {
 	if got.Result != DMARCNone {
 		t.Fatalf("v=DMARC2 → %s, want none (no valid policy)", got.Result)
 	}
-	if !isDMARCRecord("V=DMARC1; p=none") {
+	if !IsDMARCRecord("V=DMARC1; p=none") {
 		t.Fatal("case-insensitive v=DMARC1 not accepted")
 	}
-	if isDMARCRecord("v=spf1 -all") {
+	if IsDMARCRecord("v=spf1 -all") {
 		t.Fatal("an SPF record must not parse as DMARC")
 	}
 }
