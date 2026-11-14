@@ -18,14 +18,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package conditions is the unified condition-evaluator surface (SF-103):
-// one Evaluator interface over the three condition currencies the platform
-// already evaluated separately, with adapters that delegate to each
-// currency's own implementation so every caller's behavior is preserved
-// byte-for-byte.
+// one package owning the condition currencies the platform evaluates, with
+// adapters that delegate to each currency's own implementation so every
+// caller's behavior is preserved byte-for-byte.
 //
-// The three currencies (they are NOT merged into one grammar — their
-// operator vocabularies and field sets are deliberately per-currency, and
-// merging them would change behavior):
+// The currencies (they are NOT merged into one grammar — their operator
+// vocabularies and field sets are deliberately per-currency, and merging
+// them would change behavior):
 //
 //   - CurrencyAutomation — models.FilterRule rule sets evaluated IN MEMORY
 //     against one subscriber (automation triggers and filter nodes; R-14
@@ -35,12 +34,20 @@
 //   - CurrencySegment — models.SegmentCondition documents compiled to a
 //     parameterized SQL WHERE (saved segments, campaign audience
 //     resolution, in_segment membership).
+//   - CurrencyTransportPolicy — models.FilterRule rule sets evaluated
+//     against ENVELOPE FACTS at the MTA's gate points (SF-50, ADR-001
+//     amendment): strictly fail-closed — an unknown field/operator or a
+//     non-parsable numeric is an ERROR, not a non-match; it speaks the
+//     FactEvaluator mode (a fact-map subject, not a subscriber).
 //
-// The invariants every adapter shares (pinned by the consistency tests):
-// an empty condition set matches everything; rules combine with AND (with
-// the currency's own group-logic layer on top where it has one); values are
-// bound as parameters — the only string ever interpolated into SQL text is
-// a custom-field key that survived that currency's strict key whitelist.
+// The invariants the first three adapters share (pinned by the consistency
+// tests): an empty condition set matches everything; rules combine with AND
+// (with the currency's own group-logic layer on top where it has one);
+// values are bound as parameters — the only string ever interpolated into
+// SQL text is a custom-field key that survived that currency's strict key
+// whitelist. The transport currency shares the AND-combination and swaps the
+// never-match posture for the strict fail-closed error by design (ADR-001
+// amendment).
 package conditions
 
 import (

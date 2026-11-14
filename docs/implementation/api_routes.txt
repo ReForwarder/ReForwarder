@@ -45,6 +45,7 @@ DELETE /api/v1/workspaces/current/campaigns/{id}
 DELETE /api/v1/workspaces/current/domains/{id}
 DELETE /api/v1/workspaces/current/domains/{id}/dns-provider
 DELETE /api/v1/workspaces/current/domains/{id}/signing-keys/{keyId}
+DELETE /api/v1/workspaces/current/domains/{id}/transport-policies/{pid}
 DELETE /api/v1/workspaces/current/forms/{id}
 DELETE /api/v1/workspaces/current/inbound-emails/{id}
 DELETE /api/v1/workspaces/current/inbound-quarantine/{id}
@@ -189,6 +190,7 @@ GET    /api/v1/workspaces/current/domains/{id}/reputation
 GET    /api/v1/workspaces/current/domains/{id}/sent-reports
 GET    /api/v1/workspaces/current/domains/{id}/signing-keys
 GET    /api/v1/workspaces/current/domains/{id}/tls-rpt
+GET    /api/v1/workspaces/current/domains/{id}/transport-policies
 GET    /api/v1/workspaces/current/emails
 GET    /api/v1/workspaces/current/emails/{id}
 GET    /api/v1/workspaces/current/emails/{id}/status
@@ -270,6 +272,7 @@ PATCH  /api/v1/workspaces/current/domains/{id}/delivery-mode
 PATCH  /api/v1/workspaces/current/domains/{id}/max-message-size
 PATCH  /api/v1/workspaces/current/domains/{id}/mta-sts
 PATCH  /api/v1/workspaces/current/domains/{id}/report-settings
+PATCH  /api/v1/workspaces/current/domains/{id}/transport-policies/{pid}
 POST   /api/v1/admin/announcements
 POST   /api/v1/admin/domains/{id}/verify
 POST   /api/v1/admin/impersonate/exit
@@ -379,6 +382,7 @@ POST   /api/v1/workspaces/current/domains/{id}/signing-keys
 POST   /api/v1/workspaces/current/domains/{id}/signing-keys/rotate
 POST   /api/v1/workspaces/current/domains/{id}/signing-keys/{keyId}/retire
 POST   /api/v1/workspaces/current/domains/{id}/signing-keys/{keyId}/verify-dns
+POST   /api/v1/workspaces/current/domains/{id}/transport-policies
 POST   /api/v1/workspaces/current/domains/{id}/verify
 POST   /api/v1/workspaces/current/emails/preview
 POST   /api/v1/workspaces/current/emails/{id}/retry

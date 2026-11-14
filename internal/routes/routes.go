@@ -137,6 +137,9 @@ type routerHandlers struct {
 	// reportObjects serves the SF-57 read surfaces for the report objects
 	// this deployment SENT (the SF-25/26 dispatch records).
 	reportObjects *handlers.ReportObjectHandler
+	// transportPolicies serves the SF-50 transport-policy admin surface
+	// (the ADR-001 amendment's per-domain policy CRUD).
+	transportPolicies *handlers.TransportPolicyHandler
 	// mtaStsPolicy serves the MTA-STS policy hosting path (SF-29, OB-6 W4).
 	mtaStsPolicy *handlers.MTASTSPolicyHandler
 	bounce               *handlers.BounceHandler
@@ -400,6 +403,7 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 			dnsProvider:      handlers.NewDNSProviderHandler(dnsSvc, domainRepo, auditLogger),
 			dmarc:            handlers.NewDMARCReportHandler(repositories.NewDMARCReportRepository(db), domainRepo, auditLogger),
 			reportObjects:    handlers.NewReportObjectHandler(repositories.NewDMARCSentReportRepository(db), repositories.NewARFReportRepository(db), domainRepo),
+			transportPolicies: handlers.NewTransportPolicyHandler(repositories.NewTransportPolicyRepository(db), domainRepo),
 			tlsrpt:           handlers.NewTLSRPTHandler(repositories.NewTLSRPTRepository(db), domainRepo, auditLogger),
 			mtaStsPolicy:     handlers.NewMTASTSPolicyHandler(domainRepo),
 			adminDomain:      handlers.NewAdminDomainHandler(db, domainRepo, auditLogger),

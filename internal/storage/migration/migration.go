@@ -150,6 +150,11 @@ func Run(db *gorm.DB) error {
 		// cron job run (scheduled tick or manual trigger), written by the cron
 		// manager's wrapper. Additive table — in-place upgrade, no step needed.
 		&models.CronRunHistory{},
+		// SF-50 transport policy rules (ADR-001 amendment): per-domain
+		// condition-driven overrides evaluated at the MTA's RCPT/delivery
+		// gates through the unified condition evaluator's transport currency.
+		// Additive table — in-place upgrade, no step needed.
+		&models.TransportPolicy{},
 		// OB-6 W3 (ADR-007 decision 7): IP pools, warm-up schedules and
 		// reputation rollups — additive tables only; every row carries
 		// workspace_id (or an explicit nil for deployment-wide pools), per

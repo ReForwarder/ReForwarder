@@ -151,6 +151,9 @@ type SubmissionBackend struct {
 	// stageHooks is the SF-16 per-SMTP-stage hook emitter (nil = the
 	// pre-SF-16 behavior byte-for-byte).
 	stageHooks *StageHookEmitter
+	// transportPolicy is the SF-50 transport-policy resolver (the ADR-001
+	// amendment's RCPT gate; nil = the gate disabled).
+	transportPolicy TransportPolicyResolver
 }
 
 // NewSubmissionBackend assembles the MSA backend. All three collaborators are
@@ -272,6 +275,12 @@ type submissionSession struct {
 	guard      *security.SessionGuard
 	credential *models.SMTPCredential
 	ownerEmail string
+	// senderDomain is the verified sending domain bound at MAIL (SF-50: the
+	// transport-policy gate's resolution subject); heloName is the client's
+	// EHLO name captured at NewSession (go-smtp populates it before
+	// NewSession — the SF-16 precedent).
+	senderDomain string
+	heloName     string
 	from       string
 	to         []string
 	// deliverBy is the strictest (shortest) DELIVERBY by-time carried by this
@@ -315,6 +324,11 @@ func (b *SubmissionBackend) SetDomainPolicy(p DomainPolicy) { b.domainPolicy = p
 // behavior byte-for-byte.
 func (b *SubmissionBackend) SetStageHooks(h *StageHookEmitter) { b.stageHooks = h }
 
+// SetTransportPolicy attaches the SF-50 transport-policy resolver (the
+// ADR-001 amendment's RCPT gate). Nil = the gate is disabled — the
+// pre-SF-50 behavior byte-for-byte.
+func (b *SubmissionBackend) SetTransportPolicy(r TransportPolicyResolver) { b.transportPolicy = r }
+
 func (b *SubmissionBackend) NewSession(c *gosmtp.Conn) (gosmtp.Session, error) {
 	// SF-108: backpressure at the front door under a memory-budget breach.
 	if b.memGuard != nil && b.memGuard.UnderPressure() {
@@ -343,7 +357,7 @@ func (b *SubmissionBackend) NewSession(c *gosmtp.Conn) (gosmtp.Session, error) {
 	if err := guard.GuardNewSession(); err != nil {
 		return nil, err
 	}
-	session := &submissionSession{backend: b, remote: remote, guard: guard, hookSession: hookSession}
+	session := &submissionSession{backend: b, remote: remote, guard: guard, hookSession: hookSession, heloName: c.Hostname()}
 	if hookSession != nil {
 		// The hook session attributes to the authenticated tenant once known;
 		// the connect/ehlo stages fire pre-auth without tenant attribution.
@@ -421,6 +435,7 @@ func (s *submissionSession) Mail(from string, opts *gosmtp.MailOptions) error {
 
 	// Sender domain must be tenant-verified (fail closed).
 	domain := senderDomainOf(addr.Address)
+	s.senderDomain = domain
 	workspaceID := s.credential.WorkspaceID
 	if !s.backend.domains.VerifiedSenderDomain(s.credential.UserID, &workspaceID, domain) {
 		return &gosmtp.SMTPError{
@@ -450,6 +465,32 @@ func (s *submissionSession) Rcpt(to string, opts *gosmtp.RcptOptions) error {
 	addr, err := mail.ParseAddress(to)
 	if err != nil || addr.Address == "" {
 		return &gosmtp.SMTPError{Code: 553, EnhancedCode: gosmtp.EnhancedCode{5, 1, 3}, Message: "invalid recipient address"}
+	}
+	// SF-50 (ADR-001 amendment): the transport-policy RCPT gate — the
+	// submitting domain's enabled policies are evaluated against the envelope
+	// facts; a matching reject policy refuses the recipient. Fail-closed: an
+	// evaluator or store error answers a temporary 451 (the client retries
+	// rather than slipping past a gate that might have rejected it). Nil seam
+	// = the gate is disabled.
+	if s.backend.transportPolicy != nil && s.senderDomain != "" && s.credential != nil {
+		o, matched, perr := s.backend.transportPolicy.ResolveForRcpt(context.Background(), s.credential.WorkspaceID, s.senderDomain, TransportFacts{
+			MailFrom:        s.from,
+			RcptTo:          addr.Address,
+			Helo:            s.heloName,
+			AuthenticatedAs: s.credential.Username,
+		})
+		if perr != nil {
+			logger.Warn("submission: transport policy evaluation failed; refusing temporarily",
+				"sender_domain", s.senderDomain, "error", perr)
+			return &gosmtp.SMTPError{Code: 451, EnhancedCode: gosmtp.EnhancedCode{4, 3, 1}, Message: "transport policy evaluation unavailable, try again later"}
+		}
+		if matched && o != nil && o.Reject {
+			reason := o.Reason
+			if strings.TrimSpace(reason) == "" {
+				reason = "rejected by transport policy " + o.PolicyName
+			}
+			return &gosmtp.SMTPError{Code: 550, EnhancedCode: gosmtp.EnhancedCode{5, 7, 1}, Message: reason}
+		}
 	}
 	// SF-09: the DELIVERBY by-time rides RCPT TO in the receiver dependency.
 	// A by-time the server cannot honor (non-positive — BY=0 would expire the

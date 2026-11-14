@@ -141,6 +141,10 @@ type Executor struct {
 	// sleepFn blocks until the pacing wait elapses or ctx is done; tests
 	// replace it to observe waits without real time.
 	sleepFn func(ctx context.Context, d time.Duration) error
+	// transport is the SF-50 transport-policy resolver (the ADR-001
+	// amendment's delivery gate; nil = the gate disabled — the pre-SF-50
+	// behavior byte-for-byte).
+	transport TransportPolicyResolver
 }
 
 // NewExecutor builds an executor. attempts may be nil (attempts not recorded —
@@ -187,6 +191,12 @@ func (e *Executor) SetSleeper(fn func(ctx context.Context, d time.Duration) erro
 	if fn != nil {
 		e.sleepFn = fn
 	}
+}
+
+// SetTransportPolicy attaches the SF-50 transport-policy resolver (the
+// ADR-001 amendment's delivery gate; nil = the gate disabled).
+func (e *Executor) SetTransportPolicy(r TransportPolicyResolver) {
+	e.transport = r
 }
 
 // sleepCtx blocks for d, honoring cancellation, never returning nil error on
@@ -301,6 +311,36 @@ func (e *Executor) Deliver(ctx context.Context, spec DeliverySpec, env Envelope)
 
 	for _, domain := range domains {
 		rcpts := groups[domain]
+
+		// SF-50 (ADR-001 amendment): the transport-policy delivery gate — the
+		// sender domain's enabled policies evaluated against the delivery-time
+		// envelope facts; the FIRST matching policy's overrides merge into the
+		// resolved per-domain policy (they can only tighten it or pin the
+		// source IP). Fail-closed: an evaluator or store error defers the
+		// message with a transient failure (the existing backoff retries it)
+		// rather than sending unpoliced. Policies are workspace-scoped —
+		// system mail (nil workspace) never matches, and a nil seam disables
+		// the gate (the pre-SF-50 behavior byte-for-byte).
+		if e.transport != nil && env.WorkspaceID != nil {
+			o, matched, perr := e.transport.ResolveForDelivery(ctx, *env.WorkspaceID, spec.SenderDomain, TransportFacts{
+				MailFrom:     env.From,
+				RcptTo:       rcpts[0],
+				SenderDomain: spec.SenderDomain,
+				MessageSize:  int64(len(env.Msg)),
+			})
+			if perr != nil {
+				e.record(env, attemptRow(env, attemptBase, "", "", bindIP, 451,
+					fmt.Sprintf("4.3.1 transport policy evaluation failed: %v", perr),
+					models.MTAAttemptTransientFailure, nowFunc(), nowFunc()))
+				return result, email.WrapSendError("POLICY", "", fmt.Errorf("mta: transport policy evaluation failed: %w", perr))
+			}
+			if matched && o != nil {
+				mergeTransportOverride(&policy, o)
+				if o.BindIP != "" {
+					bindIP = o.BindIP
+				}
+			}
+		}
 
 		// Per-domain policy: hourly budget (possibly capped by the active
 		// warm-up ramp). Exhaustion defers the message without contacting

@@ -1223,6 +1223,11 @@ func newARFReportSender(emailSvc *email.Service, cfg *config.Config, arfRepo *re
 // the executor.
 func newMTAExecutor(db *gorm.DB, cfg *config.Config) *mta.Executor {
 	executor := mta.NewExecutor(mta.NewResolver(), mta.NewBudgetKeeper(time.Hour), repositories.NewMTADeliveryAttemptRepository(db))
+	// SF-50 (ADR-001 amendment): the transport-policy delivery gate — the
+	// sender domain's enabled policies evaluated against the delivery-time
+	// envelope facts; the first match's overrides merge into the per-domain
+	// policy (fail-closed: an evaluation error defers the send).
+	executor.SetTransportPolicy(mta.NewTransportPolicyResolver(repositories.NewTransportPolicyRepository(db)))
 	executor.SetHeloDomain(cfg.MTAEhloName)
 	// CA-04: per-message send-rate pacing per sending domain; 0 (default)
 	// keeps the unpaced behavior.
@@ -1299,6 +1304,10 @@ func startSubmissionServer(
 	backend.SetMemoryGuard(memWatch)
 	// SF-17: the per-domain outbound size cap rides the same domain repo.
 	backend.SetDomainPolicy(repositories.NewDomainRepository(db))
+	// SF-50 (ADR-001 amendment): the transport-policy RCPT gate — a matching
+	// reject policy refuses the recipient; an evaluation error answers a
+	// temporary 451 (fail-closed).
+	backend.SetTransportPolicy(mta.NewTransportPolicyResolver(repositories.NewTransportPolicyRepository(db)))
 	// SF-16 (the ADR-001/002-gated slice): the per-SMTP-stage hook emitter —
 	// hook events fire asynchronously through the webhook machinery (never
 	// delaying the SMTP response) when the gate is on and a webhook
