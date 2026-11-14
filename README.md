@@ -304,7 +304,7 @@ server and its workers.
 
 ## Project Roadmap
 
-Planning details live in `docs/project/`: [FEATURE_INVENTORY.md](docs/project/FEATURE_INVENTORY.md) is the detailed registry (127 entries as of 2026-11-14), [BACKLOG.md](docs/project/BACKLOG.md) the operational backlog, and the [ReForwarder Backlog](https://github.com/ReForwarder/ReForwarder/projects) board the task board. The Option B mail-infrastructure programme (Phases 0–6) **closed 2026-11-12 at HEAD `ee38ca8`** — the owner-mandated what-added / what-is-done / what-will-be-done / what-is-incomplete accounting lives in [todo.md](todo.md) Track A, and the delivered mail capabilities are registered as RF-F109–RF-F123 below.
+Planning details live in `docs/project/`: [FEATURE_INVENTORY.md](docs/project/FEATURE_INVENTORY.md) is the detailed registry (128 entries as of 2026-11-14), [BACKLOG.md](docs/project/BACKLOG.md) the operational backlog, and the [ReForwarder Backlog](https://github.com/ReForwarder/ReForwarder/projects) board the task board. The Option B mail-infrastructure programme (Phases 0–6) **closed 2026-11-12 at HEAD `ee38ca8`** — the owner-mandated what-added / what-is-done / what-will-be-done / what-is-incomplete accounting lives in [todo.md](todo.md) Track A, and the delivered mail capabilities are registered as RF-F109–RF-F123 below.
 
 ### To-dos
 
@@ -316,7 +316,6 @@ Planning details live in `docs/project/`: [FEATURE_INVENTORY.md](docs/project/FE
 - [ ] [RF-F071] Automation workflow dry-run / test tooling
 - [ ] [RF-F073] Preference center (multi-list subscription management)
 - [ ] [RF-F074] Subscriber signup forms (form-to-subscriber capture)
-- [ ] [RF-F075] Double opt-in (DOI) confirmation flow
 - [ ] [RF-F076] Subscriber tags
 - [ ] [RF-F092] Admin-console IP allowlisting
 - [ ] [RF-F099] Delivered-state analytics, email.delivered emission, and dead delivered UI paths (GAP-02 residual)
@@ -452,6 +451,8 @@ _None._
 - [x] [RF-F125] SMTP DELIVERBY honoring via the queue expiry machinery (SF-09 — BY accepted at the MSA/relay receivers, deadline enforced at the claim-time boundary and by the retention sweep with DSN-style expiry events; FUTURERELEASE documented as unsupported by the receiver dependency; 2026-11-13)
 - [x] [RF-F126] SMTP REQUIRETLS honoring (SF-02 — the parameter parsed at the MSA, persisted on the message, TLS-only hops enforced by the session runner and the relay path, parameter propagation on TLS connections; 2026-11-14)
 - [x] [RF-F127] DMARC aggregate reports: send side (SF-25 — daily cron over the inbound verification verdicts, RFC 7489 aggregate XML with live-policy alignment, rua endpoints discovered from each reported domain's live _dmarc DNS record only, dispatched through the system-forward pipeline as gzipped application/dmarc+xml; 2026-11-14)
+- [x] [RF-F128] ARF auth-failure feedback reports (SF-26 — RFC 5965/6591: the multipart/report MIME built from the inbound verification verdicts with the stored Authentication-Results and the bounded offending message, abuse addresses discovered from each reported domain's live _arf DNS record only, bounded per-domain dispatch as system notifications; 2026-11-14)
+- [x] [RF-F075] Double opt-in (DOI) confirmation flow (GAP-25 — per-list `double_opt_in` setting; memberships start pending and confirm only via the emailed `/t/confirm/{token}` hosted page (GET renders the consent form, POST confirms — email-scanner prefetch-safe) with kind-prefixed HMAC tokens on a 72-hour window minted by the tracking service; confirmation email rides the system_doi provenance (no suppression/quota layers, the forwarding posture); `list.subscribed` fires at confirmation so welcome automations enroll only confirmed members; DOI-aware JSON/CSV imports with optional list targeting; pending members never resolve into campaign audiences (`ListConfirmedMembers`); dashboard per-list toggle, pending badge, and resend endpoint; 2026-11-14)
 
 ---
 

@@ -58,6 +58,22 @@ const EmailProvenanceMailCompose = "mail-compose"
 // (an undeliverable DSN cannot bounce again).
 const EmailProvenanceSystemDSN = "system_dsn"
 
+// EmailProvenanceSystemARF stamps a transactional Email row holding an
+// RFC 5965/6591 auth-failure feedback report this system generated for a
+// received message that failed DKIM/SPF authentication (SF-26). The row
+// carries the complete multipart/report message in TextBody — the worker
+// sends it verbatim with a null reverse path (the double-bounce stop), the
+// same relay semantics as the system_dsn rows.
+const EmailProvenanceSystemARF = "system_arf"
+
+// IsSystemNotification reports whether the provenance marks a system-
+// generated notification row (a DSN or an ARF feedback report): such rows
+// relay verbatim with a null reverse path and are never themselves the
+// subject of another notification.
+func IsSystemNotification(provenance string) bool {
+	return provenance == EmailProvenanceSystemDSN || provenance == EmailProvenanceSystemARF
+}
+
 type Email struct {
 	ID              uint           `json:"id" gorm:"primaryKey"`
 	UUID            string         `json:"uuid" gorm:"type:uuid;default:gen_random_uuid();uniqueIndex;not null"`

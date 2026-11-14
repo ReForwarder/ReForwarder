@@ -357,6 +357,15 @@ type Config struct {
 	// _dmarc DNS record.
 	DMARCReportOrgDomain string
 
+	// ARFReportOrgDomain is the generator identity for outbound RFC 5965/6591
+	// auth-failure feedback reports (SF-26 send side): the report's User-Agent
+	// organization and the local domain of the auth-failure-reports@ sender
+	// address. Empty (POSTA_ARF_REPORT_ORG empty) keeps the outbound report
+	// pass inert — reports are never sent without an explicit identity, and
+	// then only to abuse addresses read from each reported domain's live
+	// _arf DNS record.
+	ARFReportOrgDomain string
+
 	// DNS automation (OB-6, ADR-007 decision 1): the provider publication
 	// layer. DNSAutomationEnabled (POSTA_DNS_AUTOMATION_ENABLED, default
 	// false) gates the connect/publish/drift routes and the drift cron —
@@ -816,6 +825,10 @@ func New() *Config {
 		// DMARC aggregate reports (SF-25 send side): gated by the generator
 		// identity; see the field comment for the gate semantics.
 		DMARCReportOrgDomain: strings.ToLower(strings.TrimSpace(goutils.Env("POSTA_DMARC_REPORT_ORG", ""))),
+
+		// Auth-failure feedback reports (SF-26 send side): gated by the
+		// generator identity; see the field comment for the gate semantics.
+		ARFReportOrgDomain: strings.ToLower(strings.TrimSpace(goutils.Env("POSTA_ARF_REPORT_ORG", ""))),
 
 		// DNS automation (OB-6, ADR-007 decision 1): off by default; see the
 		// field comments for the gate semantics.

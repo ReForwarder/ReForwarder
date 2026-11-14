@@ -44,6 +44,7 @@ import (
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/observability"
 	"github.com/goposta/posta/internal/routes"
+	"github.com/goposta/posta/internal/services/arf"
 	"github.com/goposta/posta/internal/services/automation"
 	"github.com/goposta/posta/internal/services/certmanager"
 	"github.com/goposta/posta/internal/services/crypto"
@@ -408,6 +409,42 @@ func runServer(cli *okapicli.CLI) {
 					"dmarc-report@"+cfg.DMARCReportOrgDomain,
 					cfg.DMARCReportOrgDomain,
 				))
+			}
+
+			// SF-26 send side (2026-11-14): the daily RFC 5965/6591
+			// auth-failure report pass over the inbound verification verdicts.
+			// Inert until the operator sets POSTA_ARF_REPORT_ORG (reports are
+			// never sent without an explicit generator identity); reports go
+			// ONLY to abuse addresses read from each reported domain's live
+			// _arf DNS record, bounded per domain per window.
+			if res.cronManager != nil && cfg.ARFReportOrgDomain != "" {
+				inboundRepo := repositories.NewInboundEmailRepository(res.db)
+				arfJob := jobs.NewARFReportJob(
+					res.db,
+					arf.NewAggregator(res.db),
+					newARFReportSender(emailSvc, cfg),
+					"auth-failure-reports@"+cfg.ARFReportOrgDomain,
+					cfg.ARFReportOrgDomain,
+					config.Version,
+				)
+				// RFC 5965 §6.3's SHOULD: the offending message rides the
+				// report's third part, from the stored inbound row's text
+				// body (bounded by the report builder; a blob-stored raw .eml
+				// is not re-included — a named residual).
+				arfJob.SetMessageSource(func(ctx context.Context, inboundID uint) ([]byte, error) {
+					rec, err := inboundRepo.FindByID(inboundID)
+					if err != nil {
+						return nil, err
+					}
+					if rec.TextBody != "" {
+						return []byte(rec.TextBody), nil
+					}
+					if rec.HTMLBody != "" {
+						return []byte(rec.HTMLBody), nil
+					}
+					return nil, fmt.Errorf("arf: no stored body for inbound %d", inboundID)
+				})
+				res.cronManager.Register(arfJob)
 			}
 
 			if cfg.SMTPRelayEnabled && !cfg.DevMode {
@@ -1047,6 +1084,34 @@ func newDMARCReportSender(emailSvc *email.Service, cfg *config.Config) dmarc.Sen
 				"dmarc_report":  true,
 				"policy_domain": req.PolicyDomain,
 				"report_id":     req.ReportID,
+			},
+		})
+		return err
+	})
+}
+
+// newARFReportSender adapts the email service's system path onto the ARF
+// auth-failure report sender seam (SF-26 send side): the report is stored as
+// a system notification (system_arf provenance) that the outbound pipeline
+// relays verbatim — queued, DKIM-signed for the generator domain, retried
+// with the standard backoff — never through the tenant send path (no
+// suppression, quota or marketing limits apply to it, mirroring the
+// forwarding, TLS-RPT and DMARC postures). The document IS the complete
+// multipart/report body per RFC 5965 §6.
+func newARFReportSender(emailSvc *email.Service, cfg *config.Config) arf.Sender {
+	return arf.SenderFunc(func(ctx context.Context, req *arf.OutboundReportRequest) error {
+		_, err := emailSvc.SendSystemARF(ctx, &email.SystemARFRequest{
+			UserID:      req.UserID,
+			WorkspaceID: req.WorkspaceID,
+			From:        req.From,
+			To:          req.To,
+			Subject:     req.Subject,
+			Document:    req.Document,
+			Metadata: map[string]any{
+				"arf_report":     true,
+				"reported_domain": req.ReportedDomain,
+				"report_id":      req.ReportID,
+				"family":         req.Family,
 			},
 		})
 		return err

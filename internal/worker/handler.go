@@ -217,7 +217,7 @@ func (h *EmailSendHandler) SetQueueManager(m *queue.Manager) { h.queue = m }
 // system_dsn row always carries a NULL reverse path — an undeliverable DSN
 // must never bounce again.
 func (h *EmailSendHandler) envelopeSender(em *models.Email) string {
-	if em.Provenance == models.EmailProvenanceSystemDSN {
+	if models.IsSystemNotification(em.Provenance) {
 		return ""
 	}
 	if h.verp != nil {
@@ -427,7 +427,7 @@ func (h *EmailSendHandler) ProcessTask(ctx context.Context, t *asynq.Task) error
 		}, nil)
 	}
 
-	if em.Provenance == models.EmailProvenanceSystemDSN && em.TextBody != "" {
+	if models.IsSystemNotification(em.Provenance) && em.TextBody != "" {
 		// SF-10: the DSN's TextBody IS the complete multipart/report message;
 		// relay it verbatim with a null reverse path, DKIM-signed for the
 		// MAILER-DAEMON domain when a key exists.
@@ -712,7 +712,7 @@ func originalMessageID(em *models.Email) string {
 // rows (SF-10) carry the complete RFC 5322 multipart/report in TextBody -
 // it crosses verbatim; everything else goes through the standard builder.
 func (h *EmailSendHandler) outboundMessage(em *models.Email, prep *outgoingPrep) []byte {
-	if em.Provenance == models.EmailProvenanceSystemDSN && em.TextBody != "" {
+	if models.IsSystemNotification(em.Provenance) && em.TextBody != "" {
 		return []byte(em.TextBody)
 	}
 	return email.BuildMessage(em.Sender, prep.recipients, em.Subject, em.HTMLBody, em.TextBody, prep.attachments, prep.headers, em.ListUnsubscribeURL, em.ListUnsubscribeMailto, em.ListUnsubscribePost)
@@ -808,7 +808,7 @@ func (h *EmailSendHandler) processDirect(ctx context.Context, em *models.Email, 
 	// DKIM signs for the MAILER-DAEMON domain (the header From's domain).
 	envelopeFrom := h.envelopeSender(em)
 	senderDom := senderDomain(envelopeFrom)
-	if em.Provenance == models.EmailProvenanceSystemDSN {
+	if models.IsSystemNotification(em.Provenance) {
 		senderDom = senderDomain(em.Sender)
 	}
 
@@ -1133,7 +1133,7 @@ func emitDSNFor(m email.DSNMailer, enabled bool, reportingMTA string, em *models
 	if m == nil || !enabled {
 		return
 	}
-	if em.Provenance == models.EmailProvenanceSystemForward || em.Provenance == models.EmailProvenanceSystemDSN {
+	if em.Provenance == models.EmailProvenanceSystemForward || models.IsSystemNotification(em.Provenance) {
 		// The double-bounce stop: system copies and DSNs never notify.
 		return
 	}
