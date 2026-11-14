@@ -139,6 +139,13 @@ func Run(db *gorm.DB) error {
 		// ownership + ADR-006 malware verdict per uploaded blob ref. Additive
 		// table; the attachment bytes themselves live in the blob store.
 		&models.MailAttachmentUpload{},
+		// SF-65 mail-account aliases/groups (ADR-003 mailbox identity + ADR-002
+		// deliver action): additive tables only — new tables with defaults, so
+		// the AutoMigrate upgrades existing deployments in place (no upgrade
+		// step needed, the OB-6 W3 precedent above).
+		&models.MailAlias{},
+		&models.MailGroup{},
+		&models.MailGroupMember{},
 		// OB-6 W3 (ADR-007 decision 7): IP pools, warm-up schedules and
 		// reputation rollups — additive tables only; every row carries
 		// workspace_id (or an explicit nil for deployment-wide pools), per

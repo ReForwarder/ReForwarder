@@ -35,6 +35,7 @@ import (
 
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/mailstore"
+	"github.com/goposta/posta/internal/storage/repositories"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
@@ -64,7 +65,12 @@ var mhColumns = map[string][]string{
 		"body_size", "attachments_json", "created_at", "updated_at",
 	},
 	"mail_blob_refs": {"id", "blob_hash", "size", "ref_count", "last_referenced", "created_at"},
-	"workspaces":     {"id", "mail_quota_bytes"},
+	// SF-65 alias/group tables: the MailAliasRepository/MailGroupRepository
+	// statements route through the same generic select/insert/delete machinery.
+	"mail_aliases":       {"id", "user_id", "workspace_id", "mailbox_id", "address", "created_at"},
+	"mail_groups":        {"id", "user_id", "workspace_id", "mailbox_id", "address", "created_at"},
+	"mail_group_members": {"id", "group_id", "mailbox_id", "created_at"},
+	"workspaces":         {"id", "mail_quota_bytes"},
 }
 
 type mhTable struct {
@@ -398,6 +404,12 @@ func (c *mhConn) QueryContext(_ context.Context, query string, args []driver.Nam
 		return c.queryStatusCounts(lower, args)
 	case strings.Contains(lower, "count(*)"):
 		return c.queryCount(lower, args)
+	case strings.Contains(lower, "from mail_aliases"):
+		return c.querySelect("mail_aliases", lower, args)
+	case strings.Contains(lower, "from mail_group_members"):
+		return c.querySelect("mail_group_members", lower, args)
+	case strings.Contains(lower, "from mail_groups"):
+		return c.querySelect("mail_groups", lower, args)
 	case strings.Contains(lower, "from workspaces"):
 		return c.querySelect("workspaces", lower, args)
 	case strings.Contains(lower, "from mail_folders"):
@@ -1052,6 +1064,6 @@ func newMHFixture(t *testing.T) *mhFixture {
 		db:    db,
 		svc:   svc,
 		blobs: blobs,
-		h:     NewMailHandler(svc),
+		h:     NewMailHandler(svc, repositories.NewMailAliasRepository(db), repositories.NewMailGroupRepository(db)),
 	}
 }

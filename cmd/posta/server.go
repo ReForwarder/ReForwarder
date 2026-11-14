@@ -969,9 +969,15 @@ func newInboundBackend(
 		if msSvc, err := mailstore.New(db, mailstore.ZstdBlobCodec{}, blobStore, nil); err != nil {
 			logger.Error("mailstore service unavailable; inbound delivery stays archive-only", "error", err)
 		} else {
-			svc.SetMailboxDeliverer(inbound.NewMailboxDelivery(msSvc, domainRepo, inbound.MailboxDeliveryConfig{
+			delivery := inbound.NewMailboxDelivery(msSvc, domainRepo, inbound.MailboxDeliveryConfig{
 				AutoProvision: cfg.MailstoreAutoProvision,
-			}))
+			})
+			// SF-65: the deliver action expands recipient addresses through
+			// the owner-scoped mail-account aliases and groups — an alias
+			// delivers to its target mailbox, a group fans out to every
+			// member idempotently (cycles cut, depth bounded).
+			delivery.SetAliasGroups(repositories.NewMailAliasGroupResolver(db))
+			svc.SetMailboxDeliverer(delivery)
 			logger.Info("hosted-mailbox delivery enabled", "auto_provision", cfg.MailstoreAutoProvision)
 		}
 	} else {

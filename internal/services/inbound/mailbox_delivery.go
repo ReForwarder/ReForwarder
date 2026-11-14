@@ -105,6 +105,9 @@ type MailboxDelivery struct {
 	store   *mailstore.Service
 	domains *repositories.DomainRepository
 	cfg     MailboxDeliveryConfig
+	// aliases is the SF-65 alias/group expansion seam; nil (the default until
+	// wired) keeps the exact pre-SF-65 behavior: direct resolution only.
+	aliases AliasGroupResolver
 }
 
 // NewMailboxDelivery builds the seam over a mailstore service and the domain
@@ -113,11 +116,60 @@ func NewMailboxDelivery(store *mailstore.Service, domains *repositories.DomainRe
 	return &MailboxDelivery{store: store, domains: domains, cfg: cfg}
 }
 
+// AliasGroupResolver is the SF-65 expansion seam: the mail-account alias and
+// group mappings (owner-scoped mail_aliases/mail_groups tables) the deliver
+// action expands recipients through. The repositories satisfy it; nil (the
+// default) disables expansion — direct delivery only, byte-for-byte the
+// pre-SF-65 behavior. Every method resolves through the RECORD OWNER's
+// mappings only: another user's alias or group for the same address never
+// resolves (the tenant boundary).
+type AliasGroupResolver interface {
+	// ResolveAliasAddress returns the target mailbox ID for the owner's alias
+	// at address, ok=false when none.
+	ResolveAliasAddress(userID uint, address string) (mailboxID uint, ok bool)
+	// ResolveGroupAddress returns the member mailbox IDs of the owner's group
+	// at address, ok=false when none.
+	ResolveGroupAddress(userID uint, address string) (members []uint, ok bool)
+	// ResolveGroupByMailbox returns the member mailbox IDs when the mailbox
+	// anchors one of the owner's groups (list-of-lists expansion), ok=false
+	// otherwise.
+	ResolveGroupByMailbox(userID, mailboxID uint) (members []uint, ok bool)
+}
+
+// SetAliasGroups attaches the SF-65 alias/group expansion seam (nil = none).
+func (d *MailboxDelivery) SetAliasGroups(r AliasGroupResolver) { d.aliases = r }
+
+// maxGroupExpansionDepth bounds list-of-lists expansion: groups may include
+// other groups' anchor mailboxes, and the recursion stops at this depth even
+// for a (pathological) acyclic deep nesting. Cycles are cut earlier by the
+// expanded set.
+const maxGroupExpansionDepth = 5
+
+// expansionState carries one DeliverToMailbox call's fan-out bookkeeping.
+type expansionState struct {
+	// delivered holds mailbox IDs that already received an append attempt —
+	// the idempotency set: one copy per mailbox however many paths reach it
+	// (direct address, alias target, group membership).
+	delivered map[uint]bool
+	// expanded holds group ANCHOR mailbox IDs whose member list was already
+	// expanded — the cycle cut for nested/cyclic group configurations (it is
+	// separate from delivered: an anchor itself receives no copy from its
+	// group's expansion, but a directly addressed anchor must still get one).
+	expanded map[uint]bool
+	res      *MailboxDeliveryResult
+	quotaErr error
+	otherErr error
+}
+
 // DeliverToMailbox implements MailboxDeliverer. See the package-file comment
 // for the binding rules. Best-effort per recipient: every addressed mailbox
 // on the record's verified domain gets an append attempt; the first over-
 // quota error wins the return value (quarantine dominates), then the first
-// other error; success returns the delivered mailbox names.
+// other error; success returns the delivered mailbox names. SF-65: an
+// address that is one of the owner's aliases delivers to the alias's target
+// mailbox; an address that is one of the owner's groups fans out to every
+// member mailbox idempotently (with nested groups expanded, cycles cut, and
+// the depth bounded).
 func (d *MailboxDelivery) DeliverToMailbox(ctx context.Context, rec *models.InboundEmail, raw []byte) (*MailboxDeliveryResult, error) {
 	if d == nil || d.store == nil || rec == nil {
 		return nil, nil
@@ -146,8 +198,11 @@ func (d *MailboxDelivery) DeliverToMailbox(ctx context.Context, rec *models.Inbo
 		return nil, nil
 	}
 
-	res := &MailboxDeliveryResult{Mailboxes: []string{}}
-	var quotaErr, otherErr error
+	st := &expansionState{
+		delivered: make(map[uint]bool),
+		expanded:  make(map[uint]bool),
+		res:       &MailboxDeliveryResult{Mailboxes: []string{}},
+	}
 	seen := make(map[string]bool, len(rec.Recipients))
 	for _, rcpt := range rec.Recipients {
 		addr := strings.ToLower(strings.TrimSpace(rcpt))
@@ -168,36 +223,108 @@ func (d *MailboxDelivery) DeliverToMailbox(ctx context.Context, rec *models.Inbo
 			continue
 		}
 
+		// SF-65 expansion, in fixed order: alias, then group; an address that
+		// is neither resolves (and provisions) directly — the exact pre-SF-65
+		// path. A nil resolver skips straight to the direct path.
+		if d.aliases != nil {
+			if targetID, ok := d.aliases.ResolveAliasAddress(rec.UserID, addr); ok {
+				st.append(ctx, d, rec, raw, targetID, fmt.Sprintf("alias %q", addr))
+				continue
+			}
+			if memberIDs, ok := d.aliases.ResolveGroupAddress(rec.UserID, addr); ok {
+				d.expandGroup(ctx, rec, raw, memberIDs, 1, st, addr)
+				continue
+			}
+		}
+
 		mb, err := d.resolveOrProvision(rec.UserID, rec.WorkspaceID, addr)
 		if err != nil {
 			if errors.Is(err, errMailboxNotProvisioned) {
 				continue // no mailbox, auto-provision off: archive only
 			}
-			if otherErr == nil {
-				otherErr = fmt.Errorf("resolve mailbox %q: %w", addr, err)
+			if st.otherErr == nil {
+				st.otherErr = fmt.Errorf("resolve mailbox %q: %w", addr, err)
 			}
 			continue
 		}
-		if _, err := d.appendToInbox(ctx, rec.UserID, mb, raw); err != nil {
-			if errors.Is(err, mailstore.ErrQuotaExceeded) {
-				// Wrap keeps errors.As/Is working for the executor while
-				// naming the refusing mailbox in the chain.
-				if quotaErr == nil {
-					quotaErr = fmt.Errorf("mailbox %q over quota: %w", addr, err)
-				}
-				continue
+		st.append(ctx, d, rec, raw, mb.ID, fmt.Sprintf("recipient %q", addr))
+	}
+	if st.quotaErr != nil {
+		return st.res, st.quotaErr
+	}
+	return st.res, st.otherErr
+}
+
+// expandGroup fans one group's delivery out to its member mailboxes. A
+// member that anchors one of the owner's groups expands recursively (its
+// members receive; the anchor itself gets no copy from its own group) with
+// the expanded set cutting cycles and re-expansion and the depth bounded by
+// maxGroupExpansionDepth — a cyclic configuration terminates, every member
+// mailbox receives at most one copy.
+func (d *MailboxDelivery) expandGroup(ctx context.Context, rec *models.InboundEmail, raw []byte, memberIDs []uint, depth int, st *expansionState, groupAddr string) {
+	if depth > maxGroupExpansionDepth {
+		logger.Warn("inbound group expansion depth exceeded; cutting",
+			"inbound_id", rec.UUID, "group", groupAddr, "depth", depth)
+		return
+	}
+	for _, mbID := range memberIDs {
+		if d.aliases == nil {
+			break // seam unwired between calls: no further expansion
+		}
+		if st.delivered[mbID] {
+			continue // idempotency: one copy per mailbox
+		}
+		if nested, ok := d.aliases.ResolveGroupByMailbox(rec.UserID, mbID); ok {
+			if st.expanded[mbID] {
+				continue // cycle cut (or already expanded): never re-expand
 			}
-			if otherErr == nil {
-				otherErr = fmt.Errorf("append to mailbox %q: %w", addr, err)
-			}
+			st.expanded[mbID] = true
+			d.expandGroup(ctx, rec, raw, nested, depth+1, st, groupAddr)
 			continue
 		}
-		res.Mailboxes = append(res.Mailboxes, addr)
+		st.append(ctx, d, rec, raw, mbID, fmt.Sprintf("group %q member", groupAddr))
 	}
-	if quotaErr != nil {
-		return res, quotaErr
+}
+
+// append files the message into ONE mailbox (by ID) exactly once per
+// delivery: an already-attempted mailbox is skipped. Resolution goes through
+// the owner-scoped GetMailbox, so a missing or foreign mailbox (a stale
+// alias target, a member owned by another user) can never receive — that is
+// the isolation boundary, skipped without failing the delivery. Over quota
+// is the typed dominant outcome, exactly as on the direct path.
+func (st *expansionState) append(ctx context.Context, d *MailboxDelivery, rec *models.InboundEmail, raw []byte, mailboxID uint, source string) {
+	if st.delivered[mailboxID] {
+		return
 	}
-	return res, otherErr
+	mb, err := d.store.GetMailbox(mailboxID, rec.UserID, 0)
+	if err != nil {
+		if errors.Is(err, mailstore.ErrMailboxNotFound) || errors.Is(err, mailstore.ErrNotMailboxOwner) {
+			logger.Warn("mailbox delivery skipped: target mailbox missing or foreign",
+				"inbound_id", rec.UUID, "mailbox_id", mailboxID, "source", source)
+			st.delivered[mailboxID] = true
+			return
+		}
+		if st.otherErr == nil {
+			st.otherErr = fmt.Errorf("resolve mailbox %d (%s): %w", mailboxID, source, err)
+		}
+		return
+	}
+	st.delivered[mailboxID] = true
+	if _, err := d.appendToInbox(ctx, rec.UserID, mb, raw); err != nil {
+		if errors.Is(err, mailstore.ErrQuotaExceeded) {
+			// Wrap keeps errors.As/Is working for the executor while naming
+			// the refusing mailbox in the chain.
+			if st.quotaErr == nil {
+				st.quotaErr = fmt.Errorf("mailbox %q over quota: %w", mb.Name, err)
+			}
+			return
+		}
+		if st.otherErr == nil {
+			st.otherErr = fmt.Errorf("append to mailbox %q: %w", mb.Name, err)
+		}
+		return
+	}
+	st.res.Mailboxes = append(st.res.Mailboxes, mb.Name)
 }
 
 // errMailboxNotProvisioned — the recipient has no mailbox and auto-provision

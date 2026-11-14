@@ -557,14 +557,19 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 			if sr, serr := mailstore.NewPostgresSearcher(db); serr == nil {
 				msSvc.SetSearcher(sr)
 			}
-			r.h.mail = handlers.NewMailHandler(msSvc)
+			// SF-65: the alias/group repositories ride the same store — the
+			// alias/group endpoints answer 503 only when the whole mail
+			// surface is unavailable (the repos exist whenever the db does).
+			r.h.mail = handlers.NewMailHandler(msSvc,
+				repositories.NewMailAliasRepository(db),
+				repositories.NewMailGroupRepository(db))
 		}
 	}
 	if r.h.mail == nil {
 		// Unconfigured mailstore still gets a handler: it answers 503 on
 		// every endpoint instead of the route table dereferencing a nil
 		// handler (same pattern as the disabled-passkeys webauthn handler).
-		r.h.mail = handlers.NewMailHandler(nil)
+		r.h.mail = handlers.NewMailHandler(nil, nil, nil)
 	}
 
 	// Passkeys (R-19). The WebAuthn Relying Party identity is derived from the

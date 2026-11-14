@@ -157,7 +157,7 @@ func contractServer(t *testing.T) *okapi.TestServer {
 			// OB-5 W1 webmail routes are registered unconditionally in
 			// registerRoutes; nil store answers 503 at request time, and
 			// registration only captures the handler reference.
-			mail: handlers.NewMailHandler(nil),
+			mail: handlers.NewMailHandler(nil, nil, nil),
 			// OB-6 W4 (SF-29): the MTA-STS policy path is registered when
 			// MTASTSEnabled is on; nil store is fine here — registration only
 			// captures the handler reference.

@@ -29,7 +29,9 @@ DELETE /api/v1/admin/users/{id}
 DELETE /api/v1/admin/users/{id}/2fa
 DELETE /api/v1/admin/users/{id}/force
 DELETE /api/v1/auth/webauthn/credentials/{id}
+DELETE /api/v1/mail/aliases/{id}
 DELETE /api/v1/mail/folders/{id}
+DELETE /api/v1/mail/groups/{id}
 DELETE /api/v1/mail/messages/{uid}
 DELETE /api/v1/users/me/app-passwords/{id}
 DELETE /api/v1/users/me/oauth/{provider_id}
@@ -123,7 +125,9 @@ GET    /api/v1/inbound/attachments/{uuid}/{idx}
 GET    /api/v1/inbound/forward-confirm/{token}
 GET    /api/v1/info
 GET    /api/v1/invitations
+GET    /api/v1/mail/aliases
 GET    /api/v1/mail/folders
+GET    /api/v1/mail/groups
 GET    /api/v1/mail/mailboxes
 GET    /api/v1/mail/messages
 GET    /api/v1/mail/messages/{uid}
@@ -260,6 +264,7 @@ GET    /t/v/{token}
 PATCH  /api/v1/admin/mailboxes/{id}
 PATCH  /api/v1/admin/plans/{id}/default
 PATCH  /api/v1/mail/folders/{id}
+PATCH  /api/v1/mail/groups/{id}
 PATCH  /api/v1/workspaces/current/domains/{id}/delivery-mode
 PATCH  /api/v1/workspaces/current/domains/{id}/max-message-size
 PATCH  /api/v1/workspaces/current/domains/{id}/mta-sts
@@ -316,11 +321,13 @@ POST   /api/v1/invitations/accept
 POST   /api/v1/invitations/decline
 POST   /api/v1/invitations/{id}/accept
 POST   /api/v1/invitations/{id}/decline
+POST   /api/v1/mail/aliases
 POST   /api/v1/mail/attachments
 POST   /api/v1/mail/drafts
 POST   /api/v1/mail/drafts/{uid}/send
 POST   /api/v1/mail/folders
 POST   /api/v1/mail/folders/{id}/expunge
+POST   /api/v1/mail/groups
 POST   /api/v1/mail/messages/{uid}/copy
 POST   /api/v1/mail/messages/{uid}/flags
 POST   /api/v1/mail/messages/{uid}/move

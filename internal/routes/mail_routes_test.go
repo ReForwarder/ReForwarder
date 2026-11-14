@@ -52,7 +52,7 @@ func mailRouteDefs(t *testing.T, cfg *config.Config, o *okapi.TestServer) []okap
 			optionalWorkspace: middlewares.OptionalWorkspaceMiddleware(nil, nil),
 		},
 		h: routerHandlers{
-			mail: handlers.NewMailHandler(nil),
+			mail: handlers.NewMailHandler(nil, nil, nil),
 		},
 	}
 	return r.mailRoutes()
@@ -86,6 +86,14 @@ func TestMailRoutes_RegisteredOncePerMethodAndGated(t *testing.T) {
 		http.MethodPost + " /messages/{uid:int}/copy",
 		http.MethodDelete + " /messages/{uid:int}",
 		http.MethodPost + " /search",
+		// SF-65 mail-account aliases/groups.
+		http.MethodGet + " /aliases",
+		http.MethodPost + " /aliases",
+		http.MethodDelete + " /aliases/{id:int}",
+		http.MethodGet + " /groups",
+		http.MethodPost + " /groups",
+		http.MethodPatch + " /groups/{id:int}",
+		http.MethodDelete + " /groups/{id:int}",
 	}
 	if len(defs) != len(want) {
 		t.Fatalf("mailRoutes registered %d routes, want %d", len(defs), len(want))

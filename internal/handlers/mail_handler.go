@@ -32,6 +32,7 @@ import (
 	"github.com/goposta/posta/internal/dto"
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/mailstore"
+	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/jkaninda/okapi"
 )
 
@@ -49,14 +50,20 @@ import (
 //
 // A nil store is legal at construction (the deployment lacks the blob store
 // or the at-rest encryption key — SF-78 posture) and every endpoint answers
-// 503; see the wiring note in internal/routes/routes.go.
+// 503; see the wiring note in internal/routes/routes.go. The SF-65
+// alias/group repositories ride the same posture: nil repos disable the
+// alias/group endpoints (503) while the pre-SF-65 surface is untouched.
 type MailHandler struct {
-	store *mailstore.Service
+	store   *mailstore.Service
+	aliases *repositories.MailAliasRepository
+	groups  *repositories.MailGroupRepository
 }
 
 // NewMailHandler wires the webmail REST surface onto the mailstore service.
-func NewMailHandler(store *mailstore.Service) *MailHandler {
-	return &MailHandler{store: store}
+// The SF-65 alias/group repositories may be nil (the deployment posture
+// above); the alias/group endpoints answer 503 until they are wired.
+func NewMailHandler(store *mailstore.Service, aliases *repositories.MailAliasRepository, groups *repositories.MailGroupRepository) *MailHandler {
+	return &MailHandler{store: store, aliases: aliases, groups: groups}
 }
 
 // ─── Response shapes ─────────────────────────────────────────────────────────
