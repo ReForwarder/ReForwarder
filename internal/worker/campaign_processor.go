@@ -159,8 +159,9 @@ func (p *CampaignProcessor) HandleCampaignStart(_ context.Context, t *asynq.Task
 				return fmt.Errorf("failed to resolve dynamic list: %w", err)
 			}
 		} else {
-			// Static list: get all members
-			subscribers, _, err = p.listRepo.ListMembers(list.ID, -1, 0)
+			// Static list: confirmed members only — a pending double-opt-in
+			// membership (RF-F075) never resolves into a campaign audience.
+			subscribers, _, err = p.listRepo.ListConfirmedMembers(list.ID, -1, 0)
 			if err != nil {
 				return fmt.Errorf("failed to list members: %w", err)
 			}

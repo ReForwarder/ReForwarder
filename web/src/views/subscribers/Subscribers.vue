@@ -2,7 +2,8 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { subscribersApi } from '../../api/subscribers'
-import type { BulkImportResult, Subscriber, SubscriberStatus } from '../../api/types'
+import { subscriberListsApi } from '../../api/subscriberLists'
+import type { BulkImportResult, Subscriber, SubscriberStatus, SubscriberListItem } from '../../api/types'
 import Pagination from '../../components/Pagination.vue'
 import { usePagination } from '../../composables/usePagination'
 import { useNotificationStore } from '../../stores/notification'
@@ -31,7 +32,17 @@ const importing = ref(false)
 
 // CSV import
 const csvFileInput = ref<HTMLInputElement | null>(null)
+const showImportCsvModal = ref(false)
+const csvSelectedFile = ref<File | null>(null)
 const importingCsv = ref(false)
+
+// Target list for bulk imports (double opt-in, RF-F075): static lists only,
+// since dynamic lists have no members to target. Options are fetched once and
+// cached for both import dialogs.
+const importLists = ref<SubscriberListItem[]>([])
+const importListsLoaded = ref(false)
+const importListsLoading = ref(false)
+const importTargetListId = ref<number | ''>('')
 
 
 
@@ -92,13 +103,42 @@ async function createSubscriber() {
 
 function openImportJson() {
   importJsonText.value = ''
+  importTargetListId.value = ''
   showImportJsonModal.value = true
+  ensureImportLists()
+}
+
+function openImportCsv() {
+  csvSelectedFile.value = null
+  importTargetListId.value = ''
+  showImportCsvModal.value = true
+  ensureImportLists()
+}
+
+async function ensureImportLists() {
+  if (importListsLoaded.value || importListsLoading.value) return
+  importListsLoading.value = true
+  try {
+    const res = await subscriberListsApi.list(0, 200)
+    importLists.value = (res.data.data ?? []).filter(list => list.type === 'static')
+    importListsLoaded.value = true
+  } catch {
+    notify.error('Failed to load lists')
+  } finally {
+    importListsLoading.value = false
+  }
 }
 
 function importSummary(prefix: string, result: BulkImportResult): string {
   let msg = `${prefix}: ${result.created} created, ${result.skipped} skipped out of ${result.total}`
   if (result.invalid_timezones) {
     msg += ` (${result.invalid_timezones} with an unrecognised timezone, imported without one)`
+  }
+  if (result.members_added !== undefined) {
+    msg += `; Added to list: ${result.members_added}`
+  }
+  if (result.confirmations_sent !== undefined) {
+    msg += `; Confirmations sent: ${result.confirmations_sent}`
   }
   return msg
 }
@@ -109,7 +149,8 @@ async function importJson() {
   try {
     const data = JSON.parse(importJsonText.value)
     const subscribers = Array.isArray(data) ? data : [data]
-    const res = await subscribersApi.bulkImportJSON(subscribers)
+    const listId = importTargetListId.value === '' ? undefined : importTargetListId.value
+    const res = await subscribersApi.bulkImportJSON(subscribers, listId)
     const result = res.data.data
     notify.success(importSummary('Import complete', result))
     showImportJsonModal.value = false
@@ -129,21 +170,30 @@ function triggerCsvUpload() {
   csvFileInput.value?.click()
 }
 
-async function onCsvFileSelected(event: Event) {
+// The file is only staged here; the import runs when the modal's Import
+// button is clicked.
+function onCsvFileSelected(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
-  if (!file) return
+  csvSelectedFile.value = file ?? null
+}
+
+async function importCsv() {
+  if (!csvSelectedFile.value) return
   importingCsv.value = true
   try {
-    const res = await subscribersApi.bulkImportCSV(file)
+    const listId = importTargetListId.value === '' ? undefined : importTargetListId.value
+    const res = await subscribersApi.bulkImportCSV(csvSelectedFile.value, undefined, listId)
     const result = res.data.data
     notify.success(importSummary('CSV import complete', result))
+    showImportCsvModal.value = false
     await goToPage(pageable.value.current_page)
   } catch (e: any) {
     notify.error(e?.response?.data?.error?.message || 'Failed to import CSV')
   } finally {
     importingCsv.value = false
-    input.value = ''
+    // Allow re-selecting the same file after a failed attempt.
+    if (csvFileInput.value) csvFileInput.value.value = ''
   }
 }
 
@@ -173,6 +223,9 @@ const { watchClickStart: watchCreateStart, confirmClickEnd: confirmCreateEnd } =
 const { watchClickStart: watchImportStart, confirmClickEnd: confirmImportEnd } = useModalSafeClose(() => {
   showImportJsonModal.value = false
 })
+const { watchClickStart: watchCsvStart, confirmClickEnd: confirmCsvEnd } = useModalSafeClose(() => {
+  showImportCsvModal.value = false
+})
 </script>
 
 <template>
@@ -200,7 +253,7 @@ const { watchClickStart: watchImportStart, confirmClickEnd: confirmImportEnd } =
         </select>
         <div v-if="wsStore.canEdit" class="flex gap-2" style="margin-left: auto">
           <button class="btn btn-secondary" @click="openImportJson">Import JSON</button>
-          <button class="btn btn-secondary" :disabled="importingCsv" @click="triggerCsvUpload">
+          <button class="btn btn-secondary" :disabled="importingCsv" @click="openImportCsv">
             {{ importingCsv ? 'Importing...' : 'Import CSV' }}
           </button>
           <button class="btn btn-primary" @click="openCreate">Add Subscriber</button>
@@ -285,6 +338,13 @@ const { watchClickStart: watchImportStart, confirmClickEnd: confirmImportEnd } =
         </div>
         <div class="modal-body">
           <div class="form-group">
+            <label class="form-label">Target list</label>
+            <select v-model="importTargetListId" class="form-select" :disabled="importListsLoading">
+              <option value="">No list (contacts only)</option>
+              <option v-for="list in importLists" :key="list.id" :value="list.id">{{ list.name }}</option>
+            </select>
+          </div>
+          <div class="form-group">
             <label class="form-label">JSON Data</label>
             <textarea v-model="importJsonText" class="form-input" rows="10" placeholder='[{"email": "user@example.com", "name": "User"}]'></textarea>
           </div>
@@ -293,6 +353,36 @@ const { watchClickStart: watchImportStart, confirmClickEnd: confirmImportEnd } =
           <button class="btn btn-secondary" @click="showImportJsonModal = false">Cancel</button>
           <button class="btn btn-primary" :disabled="importing || !importJsonText.trim()" @click="importJson">
             {{ importing ? 'Importing...' : 'Import' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Import CSV Modal -->
+    <div v-if="showImportCsvModal" class="modal-overlay" @mousedown="watchCsvStart" @mouseup="confirmCsvEnd">
+      <div class="modal" @mousedown.stop @mouseup.stop>
+        <div class="modal-header">
+          <h2>Import Subscribers (CSV)</h2>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label class="form-label">Target list</label>
+            <select v-model="importTargetListId" class="form-select" :disabled="importListsLoading">
+              <option value="">No list (contacts only)</option>
+              <option v-for="list in importLists" :key="list.id" :value="list.id">{{ list.name }}</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">CSV file</label>
+            <button class="btn btn-secondary" :disabled="importingCsv" @click="triggerCsvUpload">
+              {{ csvSelectedFile ? csvSelectedFile.name : 'Choose file...' }}
+            </button>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" @click="showImportCsvModal = false">Cancel</button>
+          <button class="btn btn-primary" :disabled="importingCsv || !csvSelectedFile" @click="importCsv">
+            {{ importingCsv ? 'Importing...' : 'Import' }}
           </button>
         </div>
       </div>

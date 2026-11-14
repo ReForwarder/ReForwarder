@@ -413,6 +413,75 @@ func (s *Service) WebViewURL(emailUUID string) string {
 	return fmt.Sprintf("%s/t/v/%s", s.baseURL, s.SignWebViewToken(emailUUID, defaultWebViewTTL))
 }
 
+// defaultDOIConfirmTTL bounds how long a double-opt-in confirmation link
+// stays redeemable (RF-F075). Resending mints a fresh token, so a bounded
+// window costs nothing; 72 hours matches common transactional confirm links.
+const defaultDOIConfirmTTL = 72 * time.Hour
+
+// SignDOIConfirmToken creates an HMAC-signed token binding one (list,
+// subscriber) pair to a double-opt-in confirmation window (RF-F075). The
+// "doi:" prefix separates the token kind from the unsubscribe and web-view
+// tokens so none can be replayed against another handler, and the expiry
+// rides the signed payload — no server-side state.
+func (s *Service) SignDOIConfirmToken(listID, subscriberID uint, ttl time.Duration) string {
+	exp := time.Now().Add(ttl).Unix()
+	payload := fmt.Sprintf("doi:%d:%d:%d", listID, subscriberID, exp)
+	mac := hmac.New(sha256.New, s.hmacKey)
+	mac.Write([]byte(payload))
+	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return base64.RawURLEncoding.EncodeToString([]byte(payload)) + "." + sig
+}
+
+// VerifyDOIConfirmToken verifies the HMAC signature, the token kind, and the
+// expiry, returning the (list, subscriber) pair the token confirms.
+func (s *Service) VerifyDOIConfirmToken(token string) (listID, subscriberID uint, err error) {
+	parts := strings.SplitN(token, ".", 2)
+	if len(parts) != 2 {
+		return 0, 0, errors.New("invalid token format")
+	}
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return 0, 0, errors.New("invalid token encoding")
+	}
+	mac := hmac.New(sha256.New, s.hmacKey)
+	mac.Write(payloadBytes)
+	expectedSig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(parts[1]), []byte(expectedSig)) {
+		return 0, 0, errors.New("invalid token signature")
+	}
+	payload := string(payloadBytes)
+	if !strings.HasPrefix(payload, "doi:") {
+		return 0, 0, errors.New("wrong token kind")
+	}
+	fields := strings.Split(payload[len("doi:"):], ":")
+	if len(fields) != 3 {
+		return 0, 0, errors.New("invalid token payload")
+	}
+	lid, err := strconv.ParseUint(fields[0], 10, 64)
+	if err != nil {
+		return 0, 0, errors.New("invalid list ID in token")
+	}
+	sid, err := strconv.ParseUint(fields[1], 10, 64)
+	if err != nil {
+		return 0, 0, errors.New("invalid subscriber ID in token")
+	}
+	exp, err := strconv.ParseInt(fields[2], 10, 64)
+	if err != nil {
+		return 0, 0, errors.New("invalid token expiry")
+	}
+	if time.Now().Unix() > exp {
+		return 0, 0, errors.New("token expired")
+	}
+	return uint(lid), uint(sid), nil
+}
+
+// DOIConfirmURL returns the public hosted confirmation URL for one pending
+// (list, subscriber) membership (RF-F075). The path is /t/confirm/, distinct
+// from the click-tracking /t/c/ prefix.
+func (s *Service) DOIConfirmURL(listID, subscriberID uint) string {
+	return fmt.Sprintf("%s/t/confirm/%s", s.baseURL, s.SignDOIConfirmToken(listID, subscriberID, defaultDOIConfirmTTL))
+}
+
 // hashLink generates a deterministic hash for a campaign + URL combination.
 func hashLink(campaignID uint, url string) string {
 	h := sha256.New()

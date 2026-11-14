@@ -62,6 +62,8 @@ const (
 	pathSubscriberByID        = "/subscribers/{id:int}"
 	pathSubscriberListByID    = "/subscriber-lists/{id:int}"
 	pathSubscriberListMembers = "/subscriber-lists/{id:int}/members"
-	pathUnsubscribeListByID   = "/unsubscribe-lists/{id:int}"
+	// pathSubscriberListMemberResend is the RF-F075 double-opt-in resend.
+	pathSubscriberListMemberResend = "/subscriber-lists/{id:int}/members/{subscriberId:int}/resend-confirmation"
+	pathUnsubscribeListByID        = "/unsubscribe-lists/{id:int}"
 	pathWorkspaceByID         = "/workspaces/{id:int}"
 )

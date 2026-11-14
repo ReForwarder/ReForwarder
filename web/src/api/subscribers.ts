@@ -19,14 +19,24 @@ export const subscribersApi = {
   delete(id: number) {
     return api.delete(`/workspaces/current/subscribers/${id}`)
   },
-  bulkImportJSON(subscribers: { email: string; name?: string; custom_fields?: Record<string, any> }[]) {
-    return api.post<ApiResponse<BulkImportResult>>('/workspaces/current/subscribers/import/json', { subscribers })
+  bulkImportJSON(subscribers: { email: string; name?: string; custom_fields?: Record<string, any> }[], listId?: number) {
+    return api.post<ApiResponse<BulkImportResult>>('/workspaces/current/subscribers/import/json', {
+      subscribers,
+      // Double opt-in (RF-F075): optionally target a list; the backend honors
+      // the list's double opt-in policy.
+      list_id: listId,
+    })
   },
-  bulkImportCSV(file: File, columnMapping?: Record<string, string>) {
+  bulkImportCSV(file: File, columnMapping?: Record<string, string>, listId?: number) {
     const formData = new FormData()
     formData.append('file', file)
     if (columnMapping) {
       formData.append('column_mapping', JSON.stringify(columnMapping))
+    }
+    // Double opt-in (RF-F075): optionally target a list; the backend honors
+    // the list's double opt-in policy.
+    if (listId !== undefined) {
+      formData.append('list_id', String(listId))
     }
     return api.post<ApiResponse<BulkImportResult>>('/workspaces/current/subscribers/import/csv', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },

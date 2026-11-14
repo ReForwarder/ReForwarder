@@ -26,6 +26,7 @@ const saving = ref(false)
 // Edit form
 const editName = ref('')
 const editDescription = ref('')
+const editDoubleOptIn = ref(false)
 
 // Add member (static lists)
 const showAddModal = ref(false)
@@ -58,6 +59,7 @@ async function loadList() {
     list.value = res.data.data
     editName.value = list.value.name
     editDescription.value = list.value.description
+    editDoubleOptIn.value = list.value.double_opt_in ?? false
   } catch {
     notify.error('Subscriber list not found')
     router.push({ name: 'subscriber-lists-page' })
@@ -81,10 +83,16 @@ async function saveDetails() {
   if (!list.value || !editName.value.trim()) return
   saving.value = true
   try {
-    const res = await subscriberListsApi.update(listId, {
+    // The backend update treats a missing double_opt_in as "leave unchanged",
+    // so the key is only sent for static lists — the only kind that has it.
+    const payload: { name: string; description: string; double_opt_in?: boolean } = {
       name: editName.value.trim(),
       description: editDescription.value.trim(),
-    })
+    }
+    if (list.value.type === 'static') {
+      payload.double_opt_in = editDoubleOptIn.value
+    }
+    const res = await subscriberListsApi.update(listId, payload)
     list.value = res.data.data
     notify.success('List updated')
   } catch (e: any) {
@@ -136,6 +144,18 @@ async function removeMember(subscriber: Subscriber) {
     await loadList()
   } catch {
     notify.error('Failed to remove member')
+  }
+}
+
+// Double opt-in (RF-F075): re-send the confirmation email to a member whose
+// membership is still pending.
+async function resendConfirmation(member: Subscriber) {
+  try {
+    await subscriberListsApi.resendConfirmation(listId, member.id)
+    notify.success('Confirmation email sent')
+    await loadMembers(pageable.value.current_page)
+  } catch (e: any) {
+    notify.error(e?.response?.data?.error?.message || 'Failed to resend confirmation')
   }
 }
 
@@ -205,6 +225,13 @@ onMounted(async () => {
         <div class="form-group">
           <label class="form-label">Description</label>
           <input v-model="editDescription" class="form-input" />
+        </div>
+        <div v-if="list?.type === 'static'" class="form-group">
+          <label class="checkbox-label">
+            <input v-model="editDoubleOptIn" type="checkbox" />
+            Double opt-in
+          </label>
+          <span class="form-hint">Subscribers must confirm via email before joining this list</span>
         </div>
         <div v-if="wsStore.canEdit" style="margin-top: 12px">
           <button class="btn btn-primary" :disabled="saving || !editName.trim()" @click="saveDetails">
@@ -310,10 +337,19 @@ onMounted(async () => {
                 <tr v-for="member in members" :key="member.id">
                   <td class="cell-mono">{{ member.email }}</td>
                   <td>{{ member.name || '-' }}</td>
-                  <td><span :class="statusBadgeClass(member.status)">{{ member.status }}</span></td>
+                  <td>
+                    <!-- Double opt-in: a pending membership is the state that matters here. -->
+                    <span v-if="member.member_status === 'pending'" class="badge badge-warning">pending</span>
+                    <span v-else :class="statusBadgeClass(member.status)">{{ member.status }}</span>
+                  </td>
                   <td>{{ formatDate(member.created_at) }}</td>
                   <td v-if="wsStore.canEdit">
-                    <button class="btn btn-danger btn-sm" @click="removeMember(member)">Remove</button>
+                    <div style="display: flex; gap: 6px">
+                      <button v-if="member.member_status === 'pending'" class="btn btn-secondary btn-sm" @click="resendConfirmation(member)">
+                        Resend confirmation
+                      </button>
+                      <button class="btn btn-danger btn-sm" @click="removeMember(member)">Remove</button>
+                    </div>
                   </td>
                 </tr>
               </tbody>

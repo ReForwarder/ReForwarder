@@ -93,7 +93,11 @@ var autoHColumns = map[string][]string{
 		"email", "current_node_id", "status", "exit_reason", "scheduled_at", "retry_count",
 		"last_error", "context_json", "entered_at", "last_advanced_at", "completed_at"},
 	"subscribers":      {"id", "user_id", "workspace_id", "email", "name", "status", "custom_fields", "timezone", "language", "subscribed_at", "unsubscribed_at", "created_at", "updated_at"},
-	"subscriber_lists": {"id", "user_id", "workspace_id", "name", "description", "type", "filter_rules", "created_at", "updated_at"},
+	"subscriber_lists": {"id", "user_id", "workspace_id", "name", "description", "type", "filter_rules", "double_opt_in", "created_at", "updated_at"},
+	// subscriber_list_members backs the RF-F075 double-opt-in handler tests:
+	// membership rows with their consent status.
+	"subscriber_list_members": {"id", "list_id", "subscriber_id", "status", "confirmed_at", "created_at"},
+	"subscriber_list_unsubscribes": {"id", "list_id", "subscriber_id", "reason", "unsubscribed_at"},
 }
 
 var autoHDefaults = map[string]map[string]func() driver.Value{
@@ -118,6 +122,15 @@ var autoHDefaults = map[string]map[string]func() driver.Value{
 type autoHTable struct {
 	columns []string
 	rows    [][]driver.Value
+}
+
+// autoHUniqueKeys mirrors the composite unique indexes the real schema
+// declares on these tables, so ON CONFLICT DO NOTHING inserts behave like
+// Postgres (skip the duplicate, return no id).
+var autoHUniqueKeys = map[string][]string{
+	"subscribers":                  {"workspace_id", "email"},
+	"subscriber_list_members":      {"list_id", "subscriber_id"},
+	"subscriber_list_unsubscribes": {"list_id", "subscriber_id"},
 }
 
 type autoHState struct {
@@ -315,14 +328,20 @@ func (c *autoHConn) QueryContext(_ context.Context, query string, args []driver.
 func (c *autoHConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	lower := strings.Join(strings.Fields(strings.ToLower(query)), " ")
 	table := autoHTableOf(lower)
-	if table == "" || !strings.Contains(lower, "update ") {
+	if table == "" {
+		return nil, fmt.Errorf("autoHState: unsupported exec: %s", query)
+	}
+	if strings.Contains(lower, "delete from") {
+		return c.s.handleDelete(table, lower, args)
+	}
+	if !strings.Contains(lower, "update ") {
 		return nil, fmt.Errorf("autoHState: unsupported exec: %s", query)
 	}
 	return c.s.handleUpdate(table, lower, args)
 }
 
 func autoHTableOf(lowerQuery string) string {
-	for _, name := range []string{"automation_journeys", "subscriber_lists", "automations", "subscribers"} {
+	for _, name := range []string{"automation_journeys", "subscriber_list_unsubscribes", "subscriber_list_members", "subscriber_lists", "automations", "subscribers"} {
 		for _, pat := range []string{`from "` + name + `"`, `update "` + name + `"`, `into "` + name + `"`} {
 			if strings.Contains(lowerQuery, pat) {
 				return name
@@ -533,17 +552,30 @@ func (s *autoHState) handleInsert(query string, args []driver.NamedValue) (drive
 	}
 	valText := query[vi+len(" values "):]
 	end := strings.LastIndex(valText, ")")
-	valParts := strings.Split(valText[1:end], ",")
-	if len(valParts) != len(cols) {
-		return nil, fmt.Errorf("autoHState: %d columns but %d values", len(cols), len(valParts))
+	// gorm batch inserts emit one VALUES group per row: "($1,$2),($3,$4)".
+	// Split on the group boundary so both the single-row and batch shapes
+	// parse (the RF-F075 import tests exercise the batch shape).
+	var groups []string
+	if strings.Contains(valText[1:end], "),(") {
+		groups = strings.Split(valText[1:end], "),(")
+	} else {
+		groups = []string{valText[1:end]}
 	}
-	vals := make([]driver.Value, len(valParts))
-	for i, p := range valParts {
-		n, err := strconv.Atoi(strings.TrimSpace(p)[1:])
-		if err != nil {
-			return nil, err
+	allVals := make([][]driver.Value, 0, len(groups))
+	for _, group := range groups {
+		valParts := strings.Split(group, ",")
+		if len(valParts) != len(cols) {
+			return nil, fmt.Errorf("autoHState: %d columns but %d values", len(cols), len(valParts))
 		}
-		vals[i] = autoHArg(args, n)
+		vals := make([]driver.Value, len(valParts))
+		for i, p := range valParts {
+			n, err := strconv.Atoi(strings.TrimSpace(p)[1:])
+			if err != nil {
+				return nil, err
+			}
+			vals[i] = autoHArg(args, n)
+		}
+		allVals = append(allVals, vals)
 	}
 
 	var returning []string
@@ -556,28 +588,88 @@ func (s *autoHState) handleInsert(query string, args []driver.NamedValue) (drive
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	spec := autoHColumns[table]
-	row := make([]driver.Value, len(spec))
-	for i, col := range spec {
-		row[i] = nil
-		if def, ok := autoHDefaults[table][col]; ok {
-			row[i] = def()
+	outRows := make([][]driver.Value, 0, len(allVals))
+	for _, vals := range allVals {
+		row := make([]driver.Value, len(spec))
+		for i, col := range spec {
+			row[i] = nil
+			if def, ok := autoHDefaults[table][col]; ok {
+				row[i] = def()
+			}
+		}
+		for j, col := range cols {
+			row[s.colIndex(table, col)] = vals[j]
+		}
+		// The real tables carry unique indexes that the ON CONFLICT DO
+		// NOTHING inserts rely on (BulkCreate's idx_sublist_sub duplicate
+		// skip, AddMember's pair conflict, SuppressMember's opt-out row):
+		// a duplicate must not insert and must not return an id. NULL key
+		// values stay distinct, mirroring Postgres NULLS DISTINCT.
+		if keys, ok := autoHUniqueKeys[table]; ok {
+			dup := false
+			for _, existing := range s.tables[table].rows {
+				match := true
+				for _, k := range keys {
+					idx := s.colIndex(table, k)
+					if row[idx] == nil || existing[idx] == nil {
+						match = false
+						break
+					}
+					if !autoHEqual(existing[idx], row[idx]) {
+						match = false
+						break
+					}
+				}
+				if match {
+					dup = true
+					break
+				}
+			}
+			if dup {
+				continue
+			}
+		}
+		s.seq++
+		row[s.colIndex(table, "id")] = s.seq
+		if idx := s.colIndex(table, "uuid"); idx >= 0 && row[idx] == nil {
+			row[idx] = fmt.Sprintf("%s-%v-uuid", table, row[s.colIndex(table, "id")])
+		}
+		s.tables[table].rows = append(s.tables[table].rows, row)
+		if len(returning) > 0 {
+			out := make([]driver.Value, len(returning))
+			for i, c := range returning {
+				out[i] = row[s.colIndex(table, c)]
+			}
+			outRows = append(outRows, out)
 		}
 	}
-	for j, col := range cols {
-		row[s.colIndex(table, col)] = vals[j]
-	}
-	s.seq++
-	row[s.colIndex(table, "id")] = s.seq
-	if idx := s.colIndex(table, "uuid"); idx >= 0 && row[idx] == nil {
-		row[idx] = fmt.Sprintf("%s-%v-uuid", table, row[s.colIndex(table, "id")])
-	}
-	s.tables[table].rows = append(s.tables[table].rows, row)
+	return &autoHRows{cols: returning, rows: outRows}, nil
+}
 
-	out := make([]driver.Value, len(returning))
-	for i, c := range returning {
-		out[i] = row[s.colIndex(table, c)]
+// handleDelete removes the rows matched by the WHERE clause. The RF-F075
+// tests exercise it through UnsuppressMember / SuppressMember.
+func (s *autoHState) handleDelete(table, compact string, args []driver.NamedValue) (driver.Result, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	matched, err := s.evalWhere(table, compact, args)
+	if err != nil {
+		return nil, err
 	}
-	return &autoHRows{cols: returning, rows: [][]driver.Value{out}}, nil
+	if len(matched) == 0 {
+		return autoHResult{rows: 0}, nil
+	}
+	kept := s.tables[table].rows[:0]
+	removed := map[string]bool{}
+	for _, row := range matched {
+		removed[fmt.Sprint(row)] = true
+	}
+	for _, row := range s.tables[table].rows {
+		if !removed[fmt.Sprint(row)] {
+			kept = append(kept, row)
+		}
+	}
+	s.tables[table].rows = kept
+	return autoHResult{rows: int64(len(matched))}, nil
 }
 
 func (s *autoHState) handleUpdate(table, compact string, args []driver.NamedValue) (driver.Result, error) {

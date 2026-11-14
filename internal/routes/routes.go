@@ -22,6 +22,7 @@ package routes
 import (
 	"context"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/goposta/posta/internal/config"
@@ -725,6 +726,23 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 	// hosted "view in browser"), used to resolve reserved {{ posta_* }} template
 	// variables once an email's identity is known.
 	emailService.SetLinkGenerator(trackingService)
+
+	// RF-F075 double opt-in: confirmation links come from the tracking
+	// service's token mint, and the confirmation email rides the system_doi
+	// provenance. The From identity is the platform transactional sender
+	// (SystemSMTP.From), falling back to no-reply@<web host> so a plain
+	// deployment still sends confirmations. Unconfigured both ways, the
+	// membership still goes pending and the dashboard's resend covers it.
+	doiFrom := strings.TrimSpace(cfg.SystemSMTP.From)
+	if doiFrom == "" && cfg.AppWebURL != "" {
+		if u, perr := url.Parse(cfg.AppWebURL); perr == nil && u.Hostname() != "" {
+			doiFrom = "no-reply@" + u.Hostname()
+		}
+	}
+	if doiFrom != "" {
+		r.h.subscriberList.SetDOIConfirmation(emailService, trackingService, doiFrom)
+		r.h.subscriber.SetListDOIImport(subscriberListRepo, emailService, trackingService, doiFrom)
+	}
 
 	// Open/click tracking for all email: the send path rewrites links through the
 	// tracking service when the email_tracking_enabled setting allows it, and the

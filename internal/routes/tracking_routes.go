@@ -80,6 +80,22 @@ func (r *Router) trackingRoutes() []okapi.RouteDefinition {
 		},
 		{
 			Method:  http.MethodGet,
+			Path:    "/t/confirm/{token}",
+			Handler: okapi.H(r.h.tracking.DOIConfirmPage),
+			Tags:    []string{tagTracking},
+			Summary: "Double opt-in confirmation page",
+			Options: []okapi.RouteOption{okapi.DocHide()},
+		},
+		{
+			Method:  http.MethodPost,
+			Path:    "/t/confirm/{token}",
+			Handler: okapi.H(r.h.tracking.DOIConfirm),
+			Tags:    []string{tagTracking},
+			Summary: "Confirm double opt-in subscription",
+			Options: []okapi.RouteOption{okapi.DocHide()},
+		},
+		{
+			Method:  http.MethodGet,
 			Path:    "/t/v/{token}",
 			Handler: okapi.H(r.h.tracking.WebView),
 			Tags:    []string{tagTracking},

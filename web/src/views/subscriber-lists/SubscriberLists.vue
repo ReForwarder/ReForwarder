@@ -24,6 +24,7 @@ const formName = ref('')
 const formDescription = ref('')
 const formType = ref<SubscriberListType>('static')
 const formFilterRules = ref<FilterRule[]>([])
+const formDoubleOptIn = ref(false)
 const saving = ref(false)
 
 const operatorOptions = [
@@ -55,6 +56,7 @@ function openCreate() {
   formDescription.value = ''
   formType.value = 'static'
   formFilterRules.value = []
+  formDoubleOptIn.value = false
   showModal.value = true
 }
 
@@ -75,6 +77,8 @@ async function saveList() {
       description: formDescription.value.trim(),
       type: formType.value,
       filter_rules: formType.value === 'dynamic' ? formFilterRules.value : undefined,
+      // Double opt-in only applies to static lists (dynamic ones have no members).
+      double_opt_in: formType.value === 'static' ? formDoubleOptIn.value : undefined,
     })
     notify.success('Subscriber list created')
     showModal.value = false
@@ -194,6 +198,14 @@ const { watchClickStart, confirmClickEnd } = useModalSafeClose(() => {
               <option value="static">Static</option>
               <option value="dynamic">Dynamic</option>
             </select>
+          </div>
+
+          <div v-if="formType === 'static'" class="form-group">
+            <label class="checkbox-label">
+              <input v-model="formDoubleOptIn" type="checkbox" />
+              Double opt-in
+            </label>
+            <span class="form-hint">Subscribers must confirm via email before joining this list</span>
           </div>
 
           <template v-if="formType === 'dynamic'">

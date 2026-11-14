@@ -20,25 +20,50 @@
 package handlers
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"html"
 	"strings"
 	"time"
 
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/automation"
+	"github.com/goposta/posta/internal/services/email"
 	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/jkaninda/okapi"
 	"gorm.io/gorm"
 )
 
+// DOIConfirmLinkGenerator mints the public double-opt-in confirmation URLs
+// (RF-F075). *tracking.Service satisfies it; the narrow interface keeps the
+// handler decoupled from the tracking package.
+type DOIConfirmLinkGenerator interface {
+	DOIConfirmURL(listID, subscriberID uint) string
+}
+
 type SubscriberListHandler struct {
 	repo              *repositories.SubscriberListRepository
 	subscriberRepo    *repositories.SubscriberRepository
 	automationTrigger automation.AutomationTrigger
+	doiMailer         email.DOIConfirmationSender
+	doiLinks          DOIConfirmLinkGenerator
+	doiFrom           string
 }
 
 func NewSubscriberListHandler(repo *repositories.SubscriberListRepository, subscriberRepo *repositories.SubscriberRepository) *SubscriberListHandler {
 	return &SubscriberListHandler{repo: repo, subscriberRepo: subscriberRepo}
+}
+
+// SetDOIConfirmation wires the double-opt-in confirmation seams (RF-F075):
+// the system-notification mailer, the public confirm-URL generator, and the
+// transactional From identity. Any nil or empty part leaves the confirmation
+// email step inert — memberships still become pending, the dashboard offers
+// resend, and the subscribe response reports confirmation_sent=false.
+func (h *SubscriberListHandler) SetDOIConfirmation(mailer email.DOIConfirmationSender, links DOIConfirmLinkGenerator, from string) {
+	h.doiMailer = mailer
+	h.doiLinks = links
+	h.doiFrom = strings.TrimSpace(from)
 }
 
 // SetAutomationTrigger wires the automation engine behind the membership
@@ -54,6 +79,7 @@ type CreateSubscriberListRequest struct {
 		Description string              `json:"description"`
 		Type        string              `json:"type"`
 		FilterRules []models.FilterRule `json:"filter_rules"`
+		DoubleOptIn bool                `json:"double_opt_in"`
 	} `json:"body"`
 }
 
@@ -63,6 +89,9 @@ type UpdateSubscriberListRequest struct {
 		Name        string              `json:"name"`
 		Description string              `json:"description"`
 		FilterRules []models.FilterRule `json:"filter_rules"`
+		// DoubleOptIn is a pointer so "absent" and "false" stay distinct on
+		// PUT — an update without the field must not silently turn DOI off.
+		DoubleOptIn *bool `json:"double_opt_in"`
 	} `json:"body"`
 }
 
@@ -135,10 +164,14 @@ type ListSubscribeResponse struct {
 	ListID            uint   `json:"list_id"`
 	SubscriberID      uint   `json:"subscriber_id"`
 	Email             string `json:"email"`
-	Action            string `json:"action"` // "subscribed" | "unsubscribed" | "resubscribed" | "noop"
+	Action            string `json:"action"` // "subscribed" | "pending_confirmation" | "unsubscribed" | "resubscribed" | "noop"
 	ListCreated       bool   `json:"list_created,omitempty"`
 	SubscriberCreated bool   `json:"subscriber_created,omitempty"`
 	MemberAdded       bool   `json:"member_added,omitempty"`
+	// ConfirmationSent (RF-F075): whether the double-opt-in confirmation
+	// email was successfully enqueued for a pending membership. A false on a
+	// pending action means the dashboard's resend action is the way out.
+	ConfirmationSent bool `json:"confirmation_sent,omitempty"`
 }
 
 type SubscriberListWithCount struct {
@@ -147,6 +180,7 @@ type SubscriberListWithCount struct {
 	Description string                    `json:"description"`
 	Type        models.SubscriberListType `json:"type"`
 	FilterRules models.FilterRules        `json:"filter_rules,omitempty"`
+	DoubleOptIn bool                      `json:"double_opt_in"`
 	MemberCount int64                     `json:"member_count"`
 	CreatedAt   time.Time                 `json:"created_at"`
 	UpdatedAt   *time.Time                `json:"updated_at"`
@@ -170,6 +204,7 @@ func (h *SubscriberListHandler) Create(c *okapi.Context, req *CreateSubscriberLi
 		Description: req.Body.Description,
 		Type:        listType,
 		FilterRules: req.Body.FilterRules,
+		DoubleOptIn: req.Body.DoubleOptIn,
 	}
 
 	if err := h.repo.Create(list); err != nil {
@@ -199,6 +234,7 @@ func (h *SubscriberListHandler) List(c *okapi.Context, req *ListRequest) error {
 			Description: l.Description,
 			Type:        l.Type,
 			FilterRules: l.FilterRules,
+			DoubleOptIn: l.DoubleOptIn,
 			MemberCount: count,
 			CreatedAt:   l.CreatedAt,
 			UpdatedAt:   l.UpdatedAt,
@@ -226,6 +262,7 @@ func (h *SubscriberListHandler) Get(c *okapi.Context, req *GetSubscriberListRequ
 		Description: list.Description,
 		Type:        list.Type,
 		FilterRules: list.FilterRules,
+		DoubleOptIn: list.DoubleOptIn,
 		MemberCount: count,
 		CreatedAt:   list.CreatedAt,
 		UpdatedAt:   list.UpdatedAt,
@@ -249,6 +286,9 @@ func (h *SubscriberListHandler) Update(c *okapi.Context, req *UpdateSubscriberLi
 	}
 	if req.Body.FilterRules != nil {
 		list.FilterRules = req.Body.FilterRules
+	}
+	if req.Body.DoubleOptIn != nil {
+		list.DoubleOptIn = *req.Body.DoubleOptIn
 	}
 	now := time.Now()
 	list.UpdatedAt = &now
@@ -294,9 +334,20 @@ func (h *SubscriberListHandler) AddMember(c *okapi.Context, req *AddSubscriberTo
 	member := &models.SubscriberListMember{
 		ListID:       list.ID,
 		SubscriberID: sub.ID,
+		Status:       models.MemberStatusConfirmed,
+	}
+	// RF-F075: on a DOI list even an operator-added membership starts
+	// pending — the emailed confirmation is the consent evidence, and the
+	// dashboard's resend action covers delivery hiccups.
+	if list.DoubleOptIn {
+		member.Status = models.MemberStatusPending
 	}
 	if err := h.repo.AddMember(member); err != nil {
 		return c.AbortConflict("subscriber already in list")
+	}
+	if member.Status == models.MemberStatusPending {
+		sent := sendDOIConfirmation(c.Request().Context(), h.doiMailer, h.doiLinks, h.doiFrom, getScope(c), list, sub)
+		return ok(c, okapi.M{"message": "subscriber added to list (pending confirmation)", "confirmation_sent": sent})
 	}
 	notifyAutomation(c.Request().Context(), h.automationTrigger, automation.TriggerEvent{
 		Kind:       models.AutomationEventListSubscribed,
@@ -336,7 +387,10 @@ func (h *SubscriberListHandler) ListMembers(c *okapi.Context, req *ListSubscribe
 		return paginated(c, items, total, page, size)
 	}
 
-	items, total, err := h.repo.ListMembers(list.ID, size, offset)
+	// RF-F075: the member view carries the membership's own consent status
+	// (member_status), so pending double-opt-in rows are visible and
+	// resendable next to confirmed ones.
+	items, total, err := h.repo.ListMembersWithStatus(list.ID, size, offset)
 	if err != nil {
 		return c.AbortInternalServerError("failed to list members")
 	}
@@ -436,9 +490,46 @@ func (h *SubscriberListHandler) Subscribe(c *okapi.Context, req *ListSubscribeRe
 	_ = h.repo.UnsuppressMember(list.ID, sub.ID)
 
 	memberAdded := !h.repo.IsMember(list.ID, sub.ID)
+
+	// RF-F075: on a DOI list the membership starts pending and the consent
+	// trigger (list.subscribed) is deferred to the confirmation click, so
+	// welcome automations only ever see confirmed members. A repeat call for
+	// a still-pending member re-sends the confirmation with a fresh window;
+	// an already-CONFIRMED member keeps the classic repeat-subscribe
+	// semantics (no consent mail re-sent to someone who already consented).
+	if list.DoubleOptIn {
+		alreadyConfirmed := false
+		if !memberAdded {
+			if status, ok := h.repo.MemberStatus(list.ID, sub.ID); ok && status == models.MemberStatusConfirmed {
+				alreadyConfirmed = true
+			}
+		}
+		if !alreadyConfirmed {
+			if err := h.repo.AddMember(&models.SubscriberListMember{
+				ListID:       list.ID,
+				SubscriberID: sub.ID,
+				Status:       models.MemberStatusPending,
+			}); err != nil {
+				return c.AbortInternalServerError("failed to add to list")
+			}
+			sent := sendDOIConfirmation(c.Request().Context(), h.doiMailer, h.doiLinks, h.doiFrom, scope, list, sub)
+			return ok(c, ListSubscribeResponse{
+				ListID:            list.ID,
+				SubscriberID:      sub.ID,
+				Email:             sub.Email,
+				Action:            "pending_confirmation",
+				ListCreated:       listCreated,
+				SubscriberCreated: subscriberCreated,
+				MemberAdded:       memberAdded,
+				ConfirmationSent:  sent,
+			})
+		}
+	}
+
 	if err := h.repo.AddMember(&models.SubscriberListMember{
 		ListID:       list.ID,
 		SubscriberID: sub.ID,
+		Status:       models.MemberStatusConfirmed,
 	}); err != nil {
 		return c.AbortInternalServerError("failed to add to list")
 	}
@@ -505,10 +596,28 @@ func (h *SubscriberListHandler) ResubscribeByEmail(c *okapi.Context, req *ListRe
 		return c.AbortInternalServerError("failed to resubscribe")
 	}
 	if list.Type == models.SubscriberListTypeStatic {
+		status := models.MemberStatusConfirmed
+		// RF-F075: a DOI list re-consents through the same confirmation flow
+		// — the prior opt-out was an explicit withdrawal, so the re-join is
+		// pending until the emailed token is redeemed again.
+		if list.DoubleOptIn {
+			status = models.MemberStatusPending
+		}
 		_ = h.repo.AddMember(&models.SubscriberListMember{
 			ListID:       list.ID,
 			SubscriberID: sub.ID,
+			Status:       status,
 		})
+		if status == models.MemberStatusPending {
+			sent := sendDOIConfirmation(c.Request().Context(), h.doiMailer, h.doiLinks, h.doiFrom, getScope(c), list, sub)
+			return ok(c, ListSubscribeResponse{
+				ListID:           list.ID,
+				SubscriberID:     sub.ID,
+				Email:            sub.Email,
+				Action:           "resubscribed",
+				ConfirmationSent: sent,
+			})
+		}
 	}
 	return ok(c, ListSubscribeResponse{
 		ListID:       list.ID,
@@ -516,4 +625,81 @@ func (h *SubscriberListHandler) ResubscribeByEmail(c *okapi.Context, req *ListRe
 		Email:        sub.Email,
 		Action:       "resubscribed",
 	})
+}
+
+// ResendListMemberConfirmationRequest is the dashboard's resend of one
+// pending membership's double-opt-in confirmation email (RF-F075).
+type ResendListMemberConfirmationRequest struct {
+	ID           int `param:"id"`
+	SubscriberID int `param:"subscriberId"`
+}
+
+// ResendConfirmation re-mints the confirmation token and re-sends the
+// double-opt-in email for one pending membership (RF-F075). Confirmed
+// memberships are rejected: resending consent mail to someone who already
+// consented is noise.
+func (h *SubscriberListHandler) ResendConfirmation(c *okapi.Context, req *ResendListMemberConfirmationRequest) error {
+	if err := requireEdit(c); err != nil {
+		return c.AbortForbidden("Insufficient workspace permissions", err)
+	}
+	list, err := h.repo.FindByID(uint(req.ID))
+	if err != nil || !ownsResource(c, list.UserID, list.WorkspaceID) {
+		return c.AbortNotFound("list not found")
+	}
+	sub, err := h.subscriberRepo.FindByID(uint(req.SubscriberID))
+	if err != nil || !ownsResource(c, sub.UserID, sub.WorkspaceID) {
+		return c.AbortNotFound("subscriber not found")
+	}
+	member, err := h.repo.FindMember(list.ID, sub.ID)
+	if err != nil {
+		return c.AbortNotFound("subscriber is not a member of this list")
+	}
+	if member.Status != models.MemberStatusPending {
+		return c.AbortBadRequest("membership is already confirmed")
+	}
+	if !sendDOIConfirmation(c.Request().Context(), h.doiMailer, h.doiLinks, h.doiFrom, getScope(c), list, sub) {
+		return c.AbortInternalServerError("failed to send confirmation email")
+	}
+	return ok(c, okapi.M{"message": "confirmation email sent"})
+}
+
+// sendDOIConfirmation mints a fresh confirmation token and enqueues the
+// confirmation email for one pending membership (RF-F075). It never fails
+// the calling flow: a failed send leaves the membership pending for the
+// dashboard's resend action, and the boolean reports whether the email went
+// out.
+func sendDOIConfirmation(ctx context.Context, mailer email.DOIConfirmationSender, links DOIConfirmLinkGenerator, from string, scope repositories.ResourceScope, list *models.SubscriberList, sub *models.Subscriber) bool {
+	if mailer == nil || links == nil || strings.TrimSpace(from) == "" || list == nil || sub == nil || sub.Email == "" {
+		return false
+	}
+	confirmURL := links.DOIConfirmURL(list.ID, sub.ID)
+	subject := fmt.Sprintf("Confirm your subscription to %s", list.Name)
+	_, err := mailer.SendSystemDOIConfirmation(ctx, &email.SystemDOIConfirmationRequest{
+		UserID:      scope.UserID,
+		WorkspaceID: scope.WorkspaceID,
+		From:        from,
+		To:          []string{sub.Email},
+		Subject:     subject,
+		HTML:        doiConfirmHTML(list.Name, sub.Email, confirmURL),
+		Text:        doiConfirmText(list.Name, sub.Email, confirmURL),
+	})
+	return err == nil
+}
+
+// doiConfirmHTML renders the confirmation email's HTML body: the consent
+// question, the redeemable link, and the no-action fallback (RF-F075).
+func doiConfirmHTML(listName, email, confirmURL string) string {
+	return fmt.Sprintf(`<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;max-width:480px;margin:0 auto;padding:24px;color:#374151;line-height:1.6">
+<p>Hi,</p>
+<p>Please confirm that <strong>%s</strong> should join the list <strong>%s</strong>.</p>
+<p style="margin:24px 0"><a href="%s" style="background:#7c3aed;color:#ffffff;text-decoration:none;font-weight:600;padding:12px 28px;border-radius:8px;display:inline-block">Confirm subscription</a></p>
+<p>Or paste this link into your browser:<br>%s</p>
+<p>If you didn't request this, you can ignore this email — nothing will change.</p>
+<p>This link expires in 72 hours.</p>
+</div>`, html.EscapeString(email), html.EscapeString(listName), html.EscapeString(confirmURL), html.EscapeString(confirmURL))
+}
+
+// doiConfirmText is the plain-text twin of doiConfirmHTML (RF-F075).
+func doiConfirmText(listName, email, confirmURL string) string {
+	return fmt.Sprintf("Confirm your subscription\n\nPlease confirm that %s should join the list \"%s\".\n\nConfirm here: %s\n\nIf you didn't request this, you can ignore this email — nothing will change. This link expires in 72 hours.", email, listName, confirmURL)
 }

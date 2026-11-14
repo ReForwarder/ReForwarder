@@ -250,10 +250,10 @@ func (e *Engine) executeABTestNode(nc *nodeContext, node *models.AutomationNode)
 }
 
 // executeListStatusNode branches on the contact's standing in the configured
-// list. Membership rows carry no status column, so the branches map onto the
-// platform's data: a live membership row is active, a list-scoped opt-out
-// (subscriber_list_unsubscribes) is non_active, and anything else is
-// not_in_list.
+// list. The branches map onto the platform's data (RF-F075): a membership
+// counts as active only once its double-opt-in confirmation is in, a pending
+// membership and a list-scoped opt-out (subscriber_list_unsubscribes) are
+// both non_active, and anything else is not_in_list.
 func (e *Engine) executeListStatusNode(nc *nodeContext, node *models.AutomationNode) (*nodeResult, error) {
 	cfg, err := nc.workflow.ListStatusConfig(node)
 	if err != nil {
@@ -263,10 +263,11 @@ func (e *Engine) executeListStatusNode(nc *nodeContext, node *models.AutomationN
 		return nil, fmt.Errorf("list_status node %q: list_id is missing", node.ID)
 	}
 	branch := BranchNotInList
+	status, isMember := e.lists.MemberStatus(cfg.ListID, nc.journey.SubscriberID)
 	switch {
-	case e.lists.IsMember(cfg.ListID, nc.journey.SubscriberID):
+	case isMember && status == models.MemberStatusConfirmed:
 		branch = BranchActive
-	case e.lists.IsSuppressed(cfg.ListID, nc.journey.SubscriberID):
+	case isMember || e.lists.IsSuppressed(cfg.ListID, nc.journey.SubscriberID):
 		branch = BranchNonActive
 	}
 	return &nodeResult{
@@ -276,7 +277,10 @@ func (e *Engine) executeListStatusNode(nc *nodeContext, node *models.AutomationN
 }
 
 // executeAddToListNode adds the journey contact to the list. The insert is
-// ON CONFLICT DO NOTHING, so re-entry is idempotent.
+// ON CONFLICT DO NOTHING, so re-entry is idempotent. On a list that requires
+// double opt-in (RF-F075) the membership starts pending — the automation
+// must not mint confirmed consent by side effect; the confirmation rides the
+// dashboard's resend action.
 func (e *Engine) executeAddToListNode(nc *nodeContext, node *models.AutomationNode) (*nodeResult, error) {
 	cfg, err := nc.workflow.AddToListConfig(node)
 	if err != nil {
@@ -285,9 +289,14 @@ func (e *Engine) executeAddToListNode(nc *nodeContext, node *models.AutomationNo
 	if cfg.ListID == 0 {
 		return nil, fmt.Errorf("add_to_list node %q: list_id is missing", node.ID)
 	}
+	status := models.MemberStatusConfirmed
+	if list, err := e.lists.FindByID(cfg.ListID); err == nil && list.DoubleOptIn {
+		status = models.MemberStatusPending
+	}
 	member := &models.SubscriberListMember{
 		ListID:       cfg.ListID,
 		SubscriberID: nc.journey.SubscriberID,
+		Status:       status,
 	}
 	if err := e.lists.AddMember(member); err != nil {
 		return nil, fmt.Errorf("add_to_list node %q: %w", node.ID, err)

@@ -30,12 +30,17 @@ import (
 
 	"github.com/goposta/posta/internal/models"
 	"github.com/goposta/posta/internal/services/automation"
+	"github.com/goposta/posta/internal/services/email"
 	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/jkaninda/okapi"
 )
 
 type SubscriberHandler struct {
 	repo              *repositories.SubscriberRepository
+	listRepo          *repositories.SubscriberListRepository
+	doiMailer         email.DOIConfirmationSender
+	doiLinks          DOIConfirmLinkGenerator
+	doiFrom           string
 	automationTrigger automation.AutomationTrigger
 }
 
@@ -48,6 +53,17 @@ func NewSubscriberHandler(repo *repositories.SubscriberRepository) *SubscriberHa
 // (the default) leaves the hooks inert.
 func (h *SubscriberHandler) SetAutomationTrigger(at automation.AutomationTrigger) {
 	h.automationTrigger = at
+}
+
+// SetListDOIImport wires the import-side double-opt-in seams (RF-F075): the
+// list repo for membership creation, the confirmation mailer and link
+// generator, and the transactional From identity. Unwired (the default),
+// list targeting on imports is rejected rather than half-applied.
+func (h *SubscriberHandler) SetListDOIImport(listRepo *repositories.SubscriberListRepository, mailer email.DOIConfirmationSender, links DOIConfirmLinkGenerator, from string) {
+	h.listRepo = listRepo
+	h.doiMailer = mailer
+	h.doiLinks = links
+	h.doiFrom = strings.TrimSpace(from)
 }
 
 type CreateSubscriberRequest struct {
@@ -90,6 +106,10 @@ type ListSubscribersRequest struct {
 type BulkImportSubscribersRequest struct {
 	Body struct {
 		Subscribers []BulkSubscriberEntry `json:"subscribers" required:"true"`
+		// ListID (RF-F075): optional target static list. When set, every
+		// imported contact joins it — pending plus a confirmation email when
+		// the list requires double opt-in, confirmed otherwise. 0 = no list.
+		ListID uint `json:"list_id"`
 	} `json:"body"`
 }
 
@@ -108,6 +128,11 @@ type BulkImportResult struct {
 	// InvalidTimezones counts imported subscribers whose timezone was not an
 	// IANA name. They are still imported, with no timezone.
 	InvalidTimezones int `json:"invalid_timezones"`
+	// MembersAdded / ConfirmationsSent (RF-F075) appear when the import
+	// targeted a list: memberships created and double-opt-in confirmation
+	// emails enqueued for them.
+	MembersAdded      int `json:"members_added,omitempty"`
+	ConfirmationsSent int `json:"confirmations_sent,omitempty"`
 }
 
 // subscriberTimezone returns tz when it is an IANA name (the check okapi's
@@ -249,6 +274,15 @@ func (h *SubscriberHandler) BulkImportJSON(c *okapi.Context, req *BulkImportSubs
 	}
 	scope := getScope(c)
 
+	// RF-F075: validate the optional list target before any contact is
+	// created, so a bad list_id aborts with no side effects. okapi's Abort
+	// helpers write the response and return a nil error, so the second
+	// return value — not the error — carries the abort.
+	targetList, targetOK := h.resolveImportList(c, req.Body.ListID)
+	if !targetOK {
+		return nil
+	}
+
 	now := time.Now()
 	var subscribers []models.Subscriber
 	invalidTZ := 0
@@ -282,12 +316,16 @@ func (h *SubscriberHandler) BulkImportJSON(c *okapi.Context, req *BulkImportSubs
 	// duplicates keep a zero ID. Only genuinely new contacts enroll.
 	h.notifyCreated(subscribers)
 
-	return ok(c, BulkImportResult{
+	result := BulkImportResult{
 		Created:          created,
 		Skipped:          skipped,
 		Total:            len(subscribers),
 		InvalidTimezones: invalidTZ,
-	})
+	}
+	if targetList != nil {
+		h.attachImportToList(c.Request().Context(), scope, targetList, subscribers, &result)
+	}
+	return ok(c, result)
 }
 
 func (h *SubscriberHandler) BulkImportCSV(c *okapi.Context) error {
@@ -295,6 +333,23 @@ func (h *SubscriberHandler) BulkImportCSV(c *okapi.Context) error {
 		return c.AbortForbidden("Insufficient workspace permissions", err)
 	}
 	scope := getScope(c)
+
+	// RF-F075: optional list_id form field, validated before any contact is
+	// created so a bad value aborts with no side effects. okapi's Abort
+	// helpers write the response and return a nil error, so the second
+	// return value — not the error — carries the abort.
+	listID := uint(0)
+	if raw := strings.TrimSpace(c.Request().FormValue("list_id")); raw != "" {
+		parsed, perr := strconv.ParseUint(raw, 10, 64)
+		if perr != nil {
+			return c.AbortBadRequest("list_id must be a positive integer")
+		}
+		listID = uint(parsed)
+	}
+	targetList, targetOK := h.resolveImportList(c, listID)
+	if !targetOK {
+		return nil
+	}
 
 	file, _, err := c.Request().FormFile("file")
 	if err != nil {
@@ -389,12 +444,93 @@ func (h *SubscriberHandler) BulkImportCSV(c *okapi.Context) error {
 	// ones that came back with an ID) fire contact.created.
 	h.notifyCreated(subscribers)
 
-	return ok(c, BulkImportResult{
+	result := BulkImportResult{
 		Created:          createdCount,
 		Skipped:          skipped,
 		Total:            len(subscribers),
 		InvalidTimezones: invalidTZ,
-	})
+	}
+	if targetList != nil {
+		h.attachImportToList(c.Request().Context(), scope, targetList, subscribers, &result)
+	}
+	return ok(c, result)
+}
+
+// resolveImportList validates the optional list target of a bulk import
+// (RF-F075): it must exist, be in scope, and be static. The boolean is false
+// when the request was aborted (okapi's Abort helpers write the response and
+// return a nil error, so the caller must stop on !ok, not on err) and when
+// no list was requested.
+func (h *SubscriberHandler) resolveImportList(c *okapi.Context, listID uint) (*models.SubscriberList, bool) {
+	if listID == 0 {
+		return nil, true
+	}
+	if h.listRepo == nil {
+		c.AbortBadRequest("list targeting is not available on this import endpoint")
+		return nil, false
+	}
+	list, err := h.listRepo.FindByID(listID)
+	if err != nil || !ownsResource(c, list.UserID, list.WorkspaceID) {
+		c.AbortNotFound("target list not found")
+		return nil, false
+	}
+	if list.Type != models.SubscriberListTypeStatic {
+		c.AbortBadRequest("cannot import into a dynamic list")
+		return nil, false
+	}
+	return list, true
+}
+
+// attachImportToList applies an import's list targeting (RF-F075): every
+// imported contact joins the list — pending plus a confirmation email when
+// the list requires double opt-in, confirmed otherwise. Duplicates of
+// existing contacts join too, mirroring the subscribe endpoint's
+// find-or-create posture. The result counters are updated in place; a
+// membership or email that fails is skipped, not fatal (the import itself
+// already succeeded).
+func (h *SubscriberHandler) attachImportToList(ctx context.Context, scope repositories.ResourceScope, list *models.SubscriberList, subscribers []models.Subscriber, res *BulkImportResult) {
+	for i := range subscribers {
+		s := &subscribers[i]
+		if s.Email == "" {
+			continue
+		}
+		id := s.ID
+		// confirmSub is the subscriber the confirmation email is bound to:
+		// for a duplicate email the freshly built s keeps a zero ID, and a
+		// token minted for subscriber 0 could never be redeemed (the
+		// confirmation must carry the EXISTING contact's id).
+		confirmSub := s
+		if id == 0 {
+			// BulkCreate skipped this email as a duplicate of an existing
+			// contact; that contact joins the list as well.
+			existing, err := h.repo.FindByEmail(scope, s.Email)
+			if err != nil || existing == nil {
+				continue
+			}
+			id = existing.ID
+			confirmSub = existing
+		}
+		if h.listRepo.IsMember(list.ID, id) {
+			continue
+		}
+		status := models.MemberStatusConfirmed
+		if list.DoubleOptIn {
+			status = models.MemberStatusPending
+		}
+		if err := h.listRepo.AddMember(&models.SubscriberListMember{
+			ListID:       list.ID,
+			SubscriberID: id,
+			Status:       status,
+		}); err != nil {
+			continue
+		}
+		res.MembersAdded++
+		if status == models.MemberStatusPending {
+			if sendDOIConfirmation(ctx, h.doiMailer, h.doiLinks, h.doiFrom, scope, list, confirmSub) {
+				res.ConfirmationsSent++
+			}
+		}
+	}
 }
 
 // notifyCreated enrolls every freshly inserted subscriber of a bulk import

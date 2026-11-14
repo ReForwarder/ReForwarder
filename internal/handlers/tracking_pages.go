@@ -55,6 +55,17 @@ type webViewData struct {
 	Body    template.HTML
 }
 
+// confirmData drives the double-opt-in confirmation page (RF-F075): a GET
+// renders the consent question, the POST performs it.
+type confirmData struct {
+	Title       string
+	Heading     string
+	Message     string
+	Recipient   string
+	ButtonLabel string
+	Fine        string
+}
+
 func trackingHTMLView(c *okapi.Context, status int, page string, data any) error {
 	return c.HTMLView(status, trackingPageTemplates+`{{template "`+page+`" .}}`, data)
 }
@@ -126,6 +137,21 @@ const trackingPageTemplates = `
 </html>{{end}}
 
 {{define "unsubscribe"}}{{template "head" .}}
+<body>
+  <div class="card">
+    <div class="badge badge-brand">{{template "icon" "brand"}}</div>
+    <h1>{{.Heading}}</h1>
+    {{if .Message}}<p>{{.Message}}</p>{{end}}
+    {{if .Recipient}}<span class="recipient">{{.Recipient}}</span>{{end}}
+    <form method="POST">
+      <button type="submit" class="btn btn-primary">{{.ButtonLabel}}</button>
+    </form>
+    {{if .Fine}}<p class="fine">{{.Fine}}</p>{{end}}
+  </div>
+</body>
+</html>{{end}}
+
+{{define "confirm"}}{{template "head" .}}
 <body>
   <div class="card">
     <div class="badge badge-brand">{{template "icon" "brand"}}</div>

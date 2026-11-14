@@ -66,7 +66,7 @@ var engColumns = map[string][]string{
 	"automation_trigger_log":       {"id", "automation_id", "subscriber_id", "triggered_at"},
 	"subscribers":                  {"id", "user_id", "workspace_id", "email", "name", "status", "custom_fields", "timezone", "language", "subscribed_at", "unsubscribed_at", "created_at", "updated_at"},
 	"subscriber_lists":             {"id", "user_id", "workspace_id", "name", "description", "type", "filter_rules", "created_at", "updated_at"},
-	"subscriber_list_members":      {"id", "list_id", "subscriber_id", "created_at"},
+	"subscriber_list_members":      {"id", "list_id", "subscriber_id", "status", "confirmed_at", "created_at"},
 	"subscriber_list_unsubscribes": {"id", "list_id", "subscriber_id", "reason", "unsubscribed_at"},
 	"segments":                     {"id", "user_id", "workspace_id", "name", "description", "condition", "created_at", "updated_at"},
 }
@@ -96,6 +96,12 @@ var engDefaults = map[string]map[string]func() driver.Value{
 		"retry_count":  func() driver.Value { return int64(0) },
 		"exit_reason":  func() driver.Value { return "" },
 		"last_error":   func() driver.Value { return "" },
+	},
+	"subscriber_list_members": {
+		// RF-F075: the membership status column's DB default keeps every
+		// membership seeded without an explicit status confirmed, exactly
+		// like the real schema's pre-DOI rows.
+		"status": func() driver.Value { return models.MemberStatusConfirmed },
 	},
 	"automation_node_runs": {
 		"action":      func() driver.Value { return models.AutomationRunActionEntered },

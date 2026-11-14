@@ -1381,6 +1381,20 @@ func (r *Router) workspaceResourceRoutes() []okapi.RouteDefinition {
 			Options:  []okapi.RouteOption{okapi.DocPathParam("id", "integer", "List ID")},
 		},
 		{
+			Method:   http.MethodPost,
+			Path:     pathSubscriberListMemberResend,
+			Handler:  okapi.H(r.h.subscriberList.ResendConfirmation),
+			Group:    opsGroup,
+			Tags:     []string{tagSubscriberLists},
+			Summary:  "Resend double opt-in confirmation",
+			Request:  &handlers.ResendListMemberConfirmationRequest{},
+			Response: &dto.Response[okapi.M]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "List ID"),
+				okapi.DocPathParam("subscriberId", "integer", "Subscriber ID"),
+			},
+		},
+		{
 			Method:   http.MethodGet,
 			Path:     pathSubscriberListMembers,
 			Handler:  okapi.H(r.h.subscriberList.ListMembers),
@@ -1388,7 +1402,7 @@ func (r *Router) workspaceResourceRoutes() []okapi.RouteDefinition {
 			Tags:     []string{tagSubscriberLists},
 			Summary:  "List members of subscriber list",
 			Request:  &handlers.ListSubscriberListMembersRequest{},
-			Response: &dto.PageableResponse[models.Subscriber]{},
+			Response: &dto.PageableResponse[models.SubscriberWithMemberStatus]{},
 			Options:  []okapi.RouteOption{okapi.DocPathParam("id", "integer", "List ID")},
 		},
 		{

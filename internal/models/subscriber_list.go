@@ -71,6 +71,11 @@ type SubscriberList struct {
 	Description string             `json:"description"`
 	Type        SubscriberListType `json:"type" gorm:"type:varchar(10);default:'static';not null"`
 	FilterRules FilterRules        `json:"filter_rules,omitempty" gorm:"type:text"`
+	// DoubleOptIn (RF-F075): when true, every new membership on this list
+	// starts pending and must be confirmed via the emailed /t/confirm/{token}
+	// link before it resolves into a campaign audience. Off (the default)
+	// keeps the historical immediate-subscribe behavior.
+	DoubleOptIn bool               `json:"double_opt_in" gorm:"default:false;not null"`
 	CreatedAt   time.Time          `json:"created_at"`
 	UpdatedAt   *time.Time         `json:"updated_at"`
 	User        User               `json:"-" gorm:"foreignKey:UserID"`
@@ -80,7 +85,12 @@ type SubscriberListMember struct {
 	ID           uint      `json:"id" gorm:"primaryKey"`
 	ListID       uint      `json:"list_id" gorm:"uniqueIndex:idx_sublist_sub;not null"`
 	SubscriberID uint      `json:"subscriber_id" gorm:"uniqueIndex:idx_sublist_sub;not null;index"`
-	CreatedAt    time.Time `json:"created_at"`
+	// Status is the membership's consent state (RF-F075): pending until the
+	// subscriber confirms a DOI list's emailed token, confirmed otherwise.
+	// The default keeps every pre-DOI membership and insert site confirmed.
+	Status      SubscriberListMemberStatus `json:"status" gorm:"type:varchar(20);default:'confirmed';not null"`
+	ConfirmedAt *time.Time                 `json:"confirmed_at"`
+	CreatedAt   time.Time                  `json:"created_at"`
 
 	List       SubscriberList `json:"-" gorm:"foreignKey:ListID"`
 	Subscriber Subscriber     `json:"-" gorm:"foreignKey:SubscriberID"`

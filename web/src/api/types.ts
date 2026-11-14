@@ -1289,6 +1289,10 @@ export interface WorkspaceSSOConfig {
 // Subscribers
 export type SubscriberStatus = 'subscribed' | 'unsubscribed' | 'bounced' | 'complained'
 
+// Double opt-in (RF-F075): membership state on a list. Pending members only
+// become recipients once they confirm via the emailed link.
+export type SubscriberListMemberStatus = 'pending' | 'confirmed'
+
 export interface Subscriber {
   id: number
   email: string
@@ -1299,6 +1303,9 @@ export interface Subscriber {
   unsubscribed_at: string | null
   created_at: string
   updated_at: string | null
+  // Only present on rows returned by the list-members endpoint — it describes
+  // the membership on that list, not the subscriber itself.
+  member_status?: SubscriberListMemberStatus
 }
 
 export type SubscriberListType = 'static' | 'dynamic'
@@ -1315,6 +1322,9 @@ export interface SubscriberListItem {
   description: string
   type: SubscriberListType
   filter_rules?: FilterRule[]
+  // Double opt-in (RF-F075): new members join as pending until they confirm
+  // via email. Static lists only.
+  double_opt_in: boolean
   member_count: number
   created_at: string
   updated_at: string | null
@@ -1326,6 +1336,10 @@ export interface BulkImportResult {
   total: number
   // Imported anyway, with no timezone.
   invalid_timezones?: number
+  // Present when the import targeted a list: members actually added and
+  // confirmation emails sent (double opt-in, RF-F075).
+  members_added?: number
+  confirmations_sent?: number
 }
 
 // Campaigns

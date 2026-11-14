@@ -142,6 +142,84 @@ func (r *SubscriberListRepository) BulkAddMembers(listID uint, subscriberIDs []u
 	return int(result.RowsAffected), result.Error
 }
 
+// FindMember returns the membership row for one (list, subscriber) pair.
+// gorm.ErrRecordNotFound when the contact is not currently a member —
+// including after a list-scoped opt-out, which deletes the row.
+func (r *SubscriberListRepository) FindMember(listID, subscriberID uint) (*models.SubscriberListMember, error) {
+	var member models.SubscriberListMember
+	if err := r.db.Where("list_id = ? AND subscriber_id = ?", listID, subscriberID).
+		First(&member).Error; err != nil {
+		return nil, err
+	}
+	return &member, nil
+}
+
+// MemberStatus reports the membership's consent status and existence for one
+// (list, subscriber) pair (RF-F075).
+func (r *SubscriberListRepository) MemberStatus(listID, subscriberID uint) (models.SubscriberListMemberStatus, bool) {
+	member, err := r.FindMember(listID, subscriberID)
+	if err != nil {
+		return "", false
+	}
+	return member.Status, true
+}
+
+// ConfirmMember flips a pending membership to confirmed and stamps the
+// confirmation time (RF-F075 consent evidence). Returns whether a pending
+// row was actually updated — an already-confirmed row is left untouched, so
+// the hosted confirm page treats a second click as an idempotent success.
+func (r *SubscriberListRepository) ConfirmMember(listID, subscriberID uint) (bool, error) {
+	now := time.Now()
+	res := r.db.Model(&models.SubscriberListMember{}).
+		Where("list_id = ? AND subscriber_id = ? AND status = ?", listID, subscriberID, models.MemberStatusPending).
+		Updates(map[string]any{"status": models.MemberStatusConfirmed, "confirmed_at": now})
+	return res.RowsAffected > 0, res.Error
+}
+
+// ListConfirmedMembers is the campaign-audience view of a static list
+// (RF-F075): members whose membership is confirmed. A pending membership is
+// still awaiting its double-opt-in confirmation and never resolves into an
+// audience.
+func (r *SubscriberListRepository) ListConfirmedMembers(listID uint, limit, offset int) ([]models.Subscriber, int64, error) {
+	var subscribers []models.Subscriber
+	var total int64
+
+	r.db.Model(&models.SubscriberListMember{}).
+		Where("list_id = ? AND status = ?", listID, models.MemberStatusConfirmed).
+		Count(&total)
+
+	if err := r.db.
+		Joins("JOIN subscriber_list_members ON subscriber_list_members.subscriber_id = subscribers.id").
+		Where("subscriber_list_members.list_id = ? AND subscriber_list_members.status = ?", listID, models.MemberStatusConfirmed).
+		Order("subscribers.created_at DESC").
+		Limit(limit).Offset(offset).
+		Find(&subscribers).Error; err != nil {
+		return nil, 0, err
+	}
+	return subscribers, total, nil
+}
+
+// ListMembersWithStatus is the dashboard member view (RF-F075): every current
+// member with its membership consent status, so pending double-opt-in rows
+// are visible (and resendable) next to confirmed ones.
+func (r *SubscriberListRepository) ListMembersWithStatus(listID uint, limit, offset int) ([]models.SubscriberWithMemberStatus, int64, error) {
+	var members []models.SubscriberWithMemberStatus
+	var total int64
+
+	r.db.Model(&models.SubscriberListMember{}).Where("list_id = ?", listID).Count(&total)
+
+	if err := r.db.Table("subscribers").
+		Select("subscribers.*, subscriber_list_members.status AS member_status").
+		Joins("JOIN subscriber_list_members ON subscriber_list_members.subscriber_id = subscribers.id").
+		Where("subscriber_list_members.list_id = ?", listID).
+		Order("subscribers.created_at DESC").
+		Limit(limit).Offset(offset).
+		Find(&members).Error; err != nil {
+		return nil, 0, err
+	}
+	return members, total, nil
+}
+
 // SuppressMember records a list-scoped opt-out (works for static and dynamic
 func (r *SubscriberListRepository) SuppressMember(listID, subscriberID uint, reason string) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {

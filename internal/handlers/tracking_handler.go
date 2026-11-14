@@ -22,6 +22,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"html"
 	"html/template"
 	"net/http"
@@ -298,6 +299,90 @@ func (h *TrackingHandler) TxUnsubscribeConfirm(c *okapi.Context, req *TrackingUn
 
 	return trackingNotice(c, http.StatusOK, "You're unsubscribed",
 		"You'll no longer receive emails of this type from the sender.", "success")
+}
+
+// doiConfirmResolution is the verified triple a double-opt-in confirmation
+// acts on (RF-F075): the list, the membership row, and the subscriber.
+type doiConfirmResolution struct {
+	list   *models.SubscriberList
+	member *models.SubscriberListMember
+	sub    *models.Subscriber
+}
+
+// resolveDOIConfirm verifies the confirmation token and loads the list, the
+// membership, and the subscriber. The error text distinguishes invalid
+// token, unknown list, and unknown membership for logs only — every failure
+// renders the same not-found notice, so nothing about the address is
+// enumerable. A membership row that no longer exists (removed, or the
+// list-scoped opt-out that deletes it) is indistinguishable from a bad
+// token, which is exactly the posture we want: an old token can never
+// resurrect a withdrawn consent.
+func (h *TrackingHandler) resolveDOIConfirm(token string) (*doiConfirmResolution, error) {
+	listID, subscriberID, err := h.trackingService.VerifyDOIConfirmToken(token)
+	if err != nil {
+		return nil, err
+	}
+	list, err := h.listRepo.FindByID(listID)
+	if err != nil {
+		return nil, fmt.Errorf("doi confirm: list %d not found", listID)
+	}
+	member, err := h.listRepo.FindMember(listID, subscriberID)
+	if err != nil {
+		return nil, fmt.Errorf("doi confirm: membership (%d,%d) not found", listID, subscriberID)
+	}
+	sub, err := h.subRepo.FindByID(member.SubscriberID)
+	if err != nil {
+		return nil, fmt.Errorf("doi confirm: subscriber %d not found", member.SubscriberID)
+	}
+	return &doiConfirmResolution{list: list, member: member, sub: sub}, nil
+}
+
+// DOIConfirmPage renders the hosted double-opt-in confirmation page
+// (RF-F075). The GET only previews the consent question — the POST performs
+// it — so email-scanner prefetches cannot confirm a subscription as a side
+// effect.
+func (h *TrackingHandler) DOIConfirmPage(c *okapi.Context, req *TrackingUnsubscribeRequest) error {
+	res, err := h.resolveDOIConfirm(req.Token)
+	if err != nil {
+		return trackingNotice(c, http.StatusNotFound, "Link expired", "This confirmation link is invalid or has expired.", "error")
+	}
+	if res.member.Status == models.MemberStatusConfirmed {
+		return trackingNotice(c, http.StatusOK, "Already confirmed", "This subscription has already been confirmed.", "success")
+	}
+	return trackingHTMLView(c, http.StatusOK, "confirm", confirmData{
+		Title:       "Confirm subscription",
+		Heading:     "Confirm your subscription",
+		Message:     fmt.Sprintf("Do you want to join the list \u201c%s\u201d?", res.list.Name),
+		Recipient:   res.sub.Email,
+		ButtonLabel: "Confirm subscription",
+		Fine:        "Only the sender who sent you this link can add you to the list.",
+	})
+}
+
+// DOIConfirm processes the hosted double-opt-in confirmation POST (RF-F075):
+// the membership becomes confirmed and list.subscribed fires here — never at
+// subscribe time — so welcome automations enroll only confirmed members.
+// Repeat clicks are idempotent.
+func (h *TrackingHandler) DOIConfirm(c *okapi.Context, req *TrackingUnsubscribeRequest) error {
+	res, err := h.resolveDOIConfirm(req.Token)
+	if err != nil {
+		return trackingNotice(c, http.StatusNotFound, "Link expired", "This confirmation link is invalid or has expired.", "error")
+	}
+	confirmed, err := h.listRepo.ConfirmMember(res.list.ID, res.member.SubscriberID)
+	if err != nil {
+		return trackingNotice(c, http.StatusInternalServerError, "Something went wrong", "We couldn't confirm your subscription right now. Please try again.", "error")
+	}
+	if confirmed {
+		if sub, err := h.subRepo.FindByID(res.member.SubscriberID); err == nil {
+			notifyAutomation(context.Background(), h.automationTrigger, automation.TriggerEvent{
+				Kind:       models.AutomationEventListSubscribed,
+				ListID:     &res.list.ID,
+				Subscriber: sub,
+			})
+		}
+		return trackingNotice(c, http.StatusOK, "Subscription confirmed", fmt.Sprintf("You're now on the list \u201c%s\u201d.", res.list.Name), "success")
+	}
+	return trackingNotice(c, http.StatusOK, "Already confirmed", "This subscription has already been confirmed.", "success")
 }
 
 // notifyUnsubscribed enrolls contact.unsubscribed for the recipient of a

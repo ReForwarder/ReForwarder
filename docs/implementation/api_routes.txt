@@ -246,6 +246,7 @@ GET    /healthz
 GET    /metrics
 GET    /readyz
 GET    /t/c/{message_id}/{hash}
+GET    /t/confirm/{token}
 GET    /t/o/{message_id}
 GET    /t/u/tx/{token}
 GET    /t/u/{token}
@@ -392,6 +393,7 @@ POST   /api/v1/workspaces/current/stylesheets
 POST   /api/v1/workspaces/current/subscriber-lists
 POST   /api/v1/workspaces/current/subscriber-lists/preview-segment
 POST   /api/v1/workspaces/current/subscriber-lists/{id}/members
+POST   /api/v1/workspaces/current/subscriber-lists/{id}/members/{subscriberId}/resend-confirmation
 POST   /api/v1/workspaces/current/subscriber-lists/{id}/resubscribe
 POST   /api/v1/workspaces/current/subscriber-lists/{id}/unsubscribe
 POST   /api/v1/workspaces/current/subscribers
@@ -410,6 +412,7 @@ POST   /api/v1/workspaces/current/templates/{id}/versions/{versionId}/preview
 POST   /api/v1/workspaces/current/unsubscribe-lists
 POST   /api/v1/workspaces/current/webhook-deliveries/{id}/replay
 POST   /api/v1/workspaces/current/webhooks
+POST   /t/confirm/{token}
 POST   /t/u/tx/{token}
 POST   /t/u/{token}
 PUT    /api/v1/admin/domains/{id}/verification

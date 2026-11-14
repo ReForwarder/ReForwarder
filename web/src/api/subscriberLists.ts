@@ -22,10 +22,10 @@ export const subscriberListsApi = {
   get(id: number) {
     return api.get<ApiResponse<SubscriberListItem>>(`/workspaces/current/subscriber-lists/${id}`)
   },
-  create(data: { name: string; description: string; type: string; filter_rules?: FilterRule[] }) {
+  create(data: { name: string; description: string; type: string; filter_rules?: FilterRule[]; double_opt_in?: boolean }) {
     return api.post<ApiResponse<SubscriberListItem>>('/workspaces/current/subscriber-lists', data)
   },
-  update(id: number, data: { name?: string; description?: string; filter_rules?: FilterRule[] }) {
+  update(id: number, data: { name?: string; description?: string; filter_rules?: FilterRule[]; double_opt_in?: boolean }) {
     return api.put<ApiResponse<SubscriberListItem>>(`/workspaces/current/subscriber-lists/${id}`, data)
   },
   delete(id: number) {
@@ -39,6 +39,11 @@ export const subscriberListsApi = {
   },
   removeMember(id: number, subscriberId: number) {
     return api.delete(`/workspaces/current/subscriber-lists/${id}/members`, { data: { subscriber_id: subscriberId } })
+  },
+  // Double opt-in (RF-F075): re-send the confirmation email to a member whose
+  // membership is still pending.
+  resendConfirmation(id: number, subscriberId: number) {
+    return api.post<ApiResponse<null>>(`/workspaces/current/subscriber-lists/${id}/members/${subscriberId}/resend-confirmation`)
   },
   previewSegment(filterRules: FilterRule[]) {
     return api.post<ApiResponse<SegmentPreview>>('/workspaces/current/subscriber-lists/preview-segment', { filter_rules: filterRules })
