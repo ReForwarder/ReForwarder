@@ -35,6 +35,8 @@ import (
 	"github.com/emersion/go-smtp"
 	"github.com/jkaninda/okapi"
 
+	"encoding/json"
+
 	"github.com/goposta/posta/internal/config"
 	cronpkg "github.com/goposta/posta/internal/cron"
 	"github.com/goposta/posta/internal/cron/jobs"
@@ -405,7 +407,7 @@ func runServer(cli *okapicli.CLI) {
 				res.cronManager.Register(jobs.NewDMARCReportJob(
 					res.db,
 					dmarc.NewAggregator(res.db),
-					newDMARCReportSender(emailSvc, cfg),
+					newDMARCReportSender(emailSvc, cfg, repositories.NewDMARCSentReportRepository(res.db)),
 					"dmarc-report@"+cfg.DMARCReportOrgDomain,
 					cfg.DMARCReportOrgDomain,
 				))
@@ -422,7 +424,7 @@ func runServer(cli *okapicli.CLI) {
 				arfJob := jobs.NewARFReportJob(
 					res.db,
 					arf.NewAggregator(res.db),
-					newARFReportSender(emailSvc, cfg),
+					newARFReportSender(emailSvc, cfg, repositories.NewARFReportRepository(res.db)),
 					"auth-failure-reports@"+cfg.ARFReportOrgDomain,
 					cfg.ARFReportOrgDomain,
 					config.Version,
@@ -1063,13 +1065,13 @@ func newTLSRPTSender(emailSvc *email.Service, cfg *config.Config) tlsrpt.Sender 
 // (no suppression, quota or marketing limits apply to it, mirroring the
 // forwarding and TLS-RPT postures). The document is attached gzipped per
 // RFC 7489 §7.2.3.
-func newDMARCReportSender(emailSvc *email.Service, cfg *config.Config) dmarc.Sender {
+func newDMARCReportSender(emailSvc *email.Service, cfg *config.Config, sentRepo *repositories.DMARCSentReportRepository) dmarc.Sender {
 	return dmarc.SenderFunc(func(ctx context.Context, req *dmarc.OutboundReportRequest) error {
 		filename, body, err := dmarc.GzipAttachment(req)
 		if err != nil {
 			return err
 		}
-		_, err = emailSvc.SendSystemForward(ctx, &email.SystemForwardRequest{
+		_, sendErr := emailSvc.SendSystemForward(ctx, &email.SystemForwardRequest{
 			From: req.From,
 			To:   req.To,
 			Subject: fmt.Sprintf("Report Domain: %s Submitter: %s Report-ID: %s",
@@ -1086,8 +1088,42 @@ func newDMARCReportSender(emailSvc *email.Service, cfg *config.Config) dmarc.Sen
 				"report_id":     req.ReportID,
 			},
 		})
-		return err
+		// SF-57: the dispatched aggregate lands on the admin-object read
+		// surface (sent on success; failed rows carry the error — best-effort
+		// reporting means a failure is dropped after the record, the next
+		// window superseding it).
+		status := "sent"
+		errorMessage := ""
+		if sendErr != nil {
+			status = "failed"
+			errorMessage = sendErr.Error()
+		}
+		if rerr := sentRepo.Record(&models.DMARCSentReport{
+			ReportID:      req.ReportID,
+			ReportedDomain: req.PolicyDomain,
+			Policy:        "",
+			WindowStart:   req.WindowStart,
+			WindowEnd:     req.WindowEnd,
+			RuaAddresses:  marshalJSONList(req.To),
+			RecordCount:   0,
+			Document:      string(req.XML),
+			Status:        status,
+			ErrorMessage:  errorMessage,
+		}); rerr != nil {
+			logger.Error("dmarc: failed to record the sent report", "report_id", req.ReportID, "error", rerr)
+		}
+		return sendErr
 	})
+}
+
+// marshalJSONList encodes a string list for the report objects' address
+// columns (a small JSON array; empty input stores an empty array).
+func marshalJSONList(items []string) string {
+	b, err := json.Marshal(items)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
 }
 
 // newARFReportSender adapts the email service's system path onto the ARF
@@ -1098,9 +1134,9 @@ func newDMARCReportSender(emailSvc *email.Service, cfg *config.Config) dmarc.Sen
 // suppression, quota or marketing limits apply to it, mirroring the
 // forwarding, TLS-RPT and DMARC postures). The document IS the complete
 // multipart/report body per RFC 5965 §6.
-func newARFReportSender(emailSvc *email.Service, cfg *config.Config) arf.Sender {
+func newARFReportSender(emailSvc *email.Service, cfg *config.Config, arfRepo *repositories.ARFReportRepository) arf.Sender {
 	return arf.SenderFunc(func(ctx context.Context, req *arf.OutboundReportRequest) error {
-		_, err := emailSvc.SendSystemARF(ctx, &email.SystemARFRequest{
+		_, sendErr := emailSvc.SendSystemARF(ctx, &email.SystemARFRequest{
 			UserID:      req.UserID,
 			WorkspaceID: req.WorkspaceID,
 			From:        req.From,
@@ -1108,13 +1144,35 @@ func newARFReportSender(emailSvc *email.Service, cfg *config.Config) arf.Sender 
 			Subject:     req.Subject,
 			Document:    req.Document,
 			Metadata: map[string]any{
-				"arf_report":     true,
+				"arf_report":      true,
 				"reported_domain": req.ReportedDomain,
-				"report_id":      req.ReportID,
-				"family":         req.Family,
+				"report_id":       req.ReportID,
+				"family":          req.Family,
 			},
 		})
-		return err
+		// SF-57: the dispatched feedback report lands on the admin-object
+		// read surface (sent on success; failed rows carry the error).
+		status := "sent"
+		errorMessage := ""
+		if sendErr != nil {
+			status = "failed"
+			errorMessage = sendErr.Error()
+		}
+		if rerr := arfRepo.Record(&models.ARFReport{
+			ReportID:       req.ReportID,
+			ReportedDomain: req.ReportedDomain,
+			Family:         req.Family,
+			InboundID:      req.InboundID,
+			UserID:         req.UserID,
+			WorkspaceID:    req.WorkspaceID,
+			Recipients:     marshalJSONList(req.To),
+			Document:       req.Document,
+			Status:         status,
+			ErrorMessage:   errorMessage,
+		}); rerr != nil {
+			logger.Error("arf: failed to record the sent report", "report_id", req.ReportID, "error", rerr)
+		}
+		return sendErr
 	})
 }
 

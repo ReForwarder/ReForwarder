@@ -38,6 +38,24 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 	adminGroup.WithBearerAuth()
 
 	routes := []okapi.RouteDefinition{
+		// ==================== Report admin objects (SF-57) ====================
+		{
+			Method:   http.MethodGet,
+			Path:     "/arf-reports",
+			Handler:  okapi.H(r.h.reportObjects.ListAllARFReports),
+			Summary:  "List all ARF auth-failure reports",
+			Description: "The newest RFC 5965/6591 auth-failure feedback reports this deployment dispatched, deployment-wide (SF-26 send side; SF-57 admin objects). Reports go only to abuse addresses read from each reported domain's live _arf DNS record.",
+			Response: &dto.Response[handlers.AdminARFReportsResponse]{},
+		},
+		{
+			Method:   http.MethodGet,
+			Path:     "/dmarc-reports",
+			Handler:  okapi.H(r.h.reportObjects.ListAllDMARCSentReports),
+			Summary:  "List all sent DMARC aggregates",
+			Description: "The newest RFC 7489 aggregate reports this deployment dispatched to published rua endpoints, deployment-wide (SF-25 send side; SF-57 admin objects).",
+			Response: &dto.Response[handlers.AdminDMARCSentReportsResponse]{},
+		},
+
 		// ==================== Users ====================
 		{
 			Method:      http.MethodPost,

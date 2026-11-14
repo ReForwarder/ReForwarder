@@ -153,6 +153,7 @@ GET    /api/v1/workspaces/current/analytics/providers
 GET    /api/v1/workspaces/current/api-keys
 GET    /api/v1/workspaces/current/api-keys/{id}
 GET    /api/v1/workspaces/current/api-keys/{id}/usage
+GET    /api/v1/workspaces/current/arf-reports
 GET    /api/v1/workspaces/current/audit-log
 GET    /api/v1/workspaces/current/audit-log/{id}
 GET    /api/v1/workspaces/current/automations
@@ -171,6 +172,7 @@ GET    /api/v1/workspaces/current/contacts
 GET    /api/v1/workspaces/current/contacts/{id}
 GET    /api/v1/workspaces/current/dashboard/stats
 GET    /api/v1/workspaces/current/data/export
+GET    /api/v1/workspaces/current/dmarc-reports
 GET    /api/v1/workspaces/current/domains
 GET    /api/v1/workspaces/current/domains/{id}
 GET    /api/v1/workspaces/current/domains/{id}/dmarc
@@ -178,6 +180,7 @@ GET    /api/v1/workspaces/current/domains/{id}/dns-drift
 GET    /api/v1/workspaces/current/domains/{id}/dns-provider
 GET    /api/v1/workspaces/current/domains/{id}/health
 GET    /api/v1/workspaces/current/domains/{id}/reputation
+GET    /api/v1/workspaces/current/domains/{id}/sent-reports
 GET    /api/v1/workspaces/current/domains/{id}/signing-keys
 GET    /api/v1/workspaces/current/domains/{id}/tls-rpt
 GET    /api/v1/workspaces/current/emails
@@ -242,6 +245,8 @@ GET    /api/v1/workspaces/current/unsubscribe-lists
 GET    /api/v1/workspaces/current/unsubscribe-lists/{id}
 GET    /api/v1/workspaces/current/webhook-deliveries
 GET    /api/v1/workspaces/current/webhooks
+GET    /arf-reports
+GET    /dmarc-reports
 GET    /healthz
 GET    /metrics
 GET    /readyz

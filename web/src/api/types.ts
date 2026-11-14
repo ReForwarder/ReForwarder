@@ -2529,3 +2529,44 @@ export interface DomainDmarcResponse {
   summary: DmarcSummary
   records: DmarcReportRecord[]
 }
+
+// SF-57: one RFC 7489 aggregate report this deployment dispatched to a
+// reported domain's published rua endpoints.
+export interface DmarcSentReport {
+  id: number
+  report_id: string
+  reported_domain: string
+  policy?: string
+  window_start: string
+  window_end: string
+  rua_addresses: string
+  record_count: number
+  status: string
+  error_message?: string
+  created_at: string
+}
+
+// SF-57: the per-domain view of the sent DMARC aggregates.
+export interface DomainSentReportsResponse {
+  domain: string
+  reports: DmarcSentReport[]
+}
+
+// SF-57: the workspace-attributed RFC 5965/6591 auth-failure reports.
+export interface ArfReportRow {
+  id: number
+  user_id: number
+  workspace_id?: number
+  report_id: string
+  reported_domain: string
+  family: string
+  inbound_id: number
+  recipients: string
+  status: string
+  error_message?: string
+  created_at: string
+}
+
+export interface ArfReportsResponse {
+  reports: ArfReportRow[]
+}

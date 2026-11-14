@@ -1,5 +1,5 @@
 import api from './client'
-import type { ApiResponse, PaginatedResponse, Domain, SigningKey, DnsRecordView, DomainHealthReport, DomainDmarcResponse, DomainReputationReport, IPPoolView, IPPoolMemberView, DnsStatusView, DnsPublishResult, DnsDriftStatusView, DnsCredentialView } from './types'
+import type { ApiResponse, PaginatedResponse, Domain, SigningKey, DnsRecordView, DomainHealthReport, DomainDmarcResponse, DomainSentReportsResponse, ArfReportsResponse, DomainReputationReport, IPPoolView, IPPoolMemberView, DnsStatusView, DnsPublishResult, DnsDriftStatusView, DnsCredentialView } from './types'
 
 export const domainsApi = {
   list(page = 0, size = 20) {
@@ -60,6 +60,19 @@ export const domainsApi = {
   // report plus the newest stored records.
   dmarcSummary(id: number) {
     return api.get<ApiResponse<DomainDmarcResponse>>(`/workspaces/current/domains/${id}/dmarc`)
+  },
+
+  // SF-57: the RFC 7489 aggregates this deployment dispatched to THIS
+  // domain's published rua endpoints (the DMARC panel's "reports we sent"
+  // view).
+  sentDmarcReports(id: number) {
+    return api.get<ApiResponse<DomainSentReportsResponse>>(`/workspaces/current/domains/${id}/sent-reports`)
+  },
+
+  // SF-57: the RFC 5965/6591 auth-failure feedback reports this deployment
+  // dispatched, attributed to the workspace scope.
+  listArfReports() {
+    return api.get<ApiResponse<ArfReportsResponse>>('/workspaces/current/arf-reports')
   },
 
   // ---- IP pools, warm-up, reputation (OB-6 W3, ADR-007 decision 7) ----

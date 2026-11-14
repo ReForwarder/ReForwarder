@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { domainsApi } from '../../api/domains'
-import type { Domain, DnsRecord, Pageable, SigningKey, DomainHealthReport, DomainDmarcResponse, DomainReputationReport, IPPoolView, DnsStatusView, DnsPublishResult } from '../../api/types'
+import type { Domain, DnsRecord, Pageable, SigningKey, DomainHealthReport, DomainDmarcResponse, DomainSentReportsResponse, ArfReportRow, DomainReputationReport, IPPoolView, DnsStatusView, DnsPublishResult } from '../../api/types'
 import { useNotificationStore } from '../../stores/notification'
 import { apiMessage } from '../../composables/apiError'
 import { useConfirm } from '../../composables/useConfirm'
@@ -160,6 +160,8 @@ async function viewDnsRecords(domain: Domain) {
   loadSigningKeys(domain.id)
   loadHealth(domain.id)
   loadDmarcSummary(domain.id)
+  void loadSentReports(domain.id)
+  void loadArfReports()
   loadPools(domain.id)
   loadReputation(domain.id)
   loadDNSAutomation(domain.id)
@@ -296,7 +298,7 @@ async function deleteKey(domain: Domain, key: SigningKey) {
 
 // ---- Deliverability health (R-07) ----
 // The stored report loads lazily on first row expansion and is cached per
-// domain id; Diagnose replaces the cache entry with the fresh report the
+// domain id. Diagnose replaces the cache entry with the fresh report the
 // backend returns from the live re-check.
 const healthByDomain = ref<Record<number, DomainHealthReport>>({})
 const healthLoadingId = ref<number | null>(null)
@@ -351,6 +353,43 @@ const dmarcLoadingId = ref<number | null>(null)
 const expandedDmarc = computed(() =>
   expandedDomainId.value ? dmarcByDomain.value[expandedDomainId.value] ?? null : null,
 )
+
+// ---- SF-57: the DMARC aggregates and ARF auth-failure reports this
+// deployment SENT (loaded alongside the received aggregates on expansion;
+// non-fatal when nothing was sent) ----
+const sentReportsByDomain = ref<Record<number, DomainSentReportsResponse | null>>({})
+const arfReports = ref<ArfReportRow[] | null>(null)
+const arfLoadedOnce = ref(false)
+
+const expandedSentReports = computed(() =>
+  expandedDomainId.value ? sentReportsByDomain.value[expandedDomainId.value] ?? null : null,
+)
+
+async function loadSentReports(domainId: number) {
+  if (sentReportsByDomain.value[domainId] !== undefined) return
+  sentReportsByDomain.value[domainId] = null
+  try {
+    const res = await domainsApi.sentDmarcReports(domainId)
+    sentReportsByDomain.value[domainId] = res.data.data
+  } catch {
+    sentReportsByDomain.value[domainId] = null
+  }
+}
+
+async function loadArfReports() {
+  if (arfLoadedOnce.value) return
+  arfLoadedOnce.value = true
+  try {
+    const res = await domainsApi.listArfReports()
+    arfReports.value = res.data.data.reports
+  } catch {
+    arfReports.value = []
+  }
+}
+
+function arfFamilyLabel(family: string): string {
+  return family === 'dkim' ? 'DKIM' : family === 'spf' ? 'SPF' : family
+}
 
 const dispositionLabels: Record<string, string> = {
   none: 'None',
@@ -1172,6 +1211,44 @@ const { watchClickStart, confirmClickEnd } = useModalSafeClose(() => {
                           </template>
 
                           <div v-else class="signing-empty">No DMARC reports ingested yet.</div>
+
+                          <!-- SF-57: the aggregates + ARF reports this deployment SENT -->
+                          <div class="health-row-head" style="margin-top: 12px">
+                            <span class="dns-label">Reports we sent</span>
+                          </div>
+                          <template v-if="expandedSentReports && expandedSentReports.reports.length > 0">
+                            <div v-for="sr in expandedSentReports.reports" :key="sr.id" class="health-dmarc-record">
+                              <div class="health-row-head">
+                                <span class="health-dmarc-reporter">{{ sr.report_id }}</span>
+                                <span class="badge" :class="sr.status === 'sent' ? 'badge-neutral' : 'badge-danger'">
+                                  {{ sr.status }}
+                                </span>
+                              </div>
+                              <div class="health-dmarc-meta">
+                                {{ sr.record_count }} records · {{ formatDate(sr.window_start) }} →
+                                {{ formatDate(sr.window_end) }} · to {{ sr.rua_addresses }}
+                              </div>
+                            </div>
+                          </template>
+                          <div v-else class="signing-empty">No aggregate reports sent for this domain yet.</div>
+
+                          <div class="health-row-head" style="margin-top: 12px">
+                            <span class="dns-label">Auth-failure (ARF) reports we sent</span>
+                          </div>
+                          <template v-if="arfReports && arfReports.length > 0">
+                            <div v-for="ar in arfReports" :key="ar.id" class="health-dmarc-record">
+                              <div class="health-row-head">
+                                <span class="health-dmarc-reporter">{{ ar.reported_domain }}</span>
+                                <span class="badge" :class="ar.status === 'sent' ? 'badge-neutral' : 'badge-danger'">
+                                  {{ arfFamilyLabel(ar.family) }} · {{ ar.status }}
+                                </span>
+                              </div>
+                              <div class="health-dmarc-meta">
+                                report {{ ar.report_id }} · {{ formatDate(ar.created_at) }}
+                              </div>
+                            </div>
+                          </template>
+                          <div v-else class="signing-empty">No auth-failure reports sent yet.</div>
                         </div>
                       </div>
 

@@ -134,6 +134,9 @@ type routerHandlers struct {
 	dmarc                *handlers.DMARCReportHandler
 	// tlsrpt serves the per-domain SMTP TLS report read view (SF-31, OB-6 W4).
 	tlsrpt *handlers.TLSRPTHandler
+	// reportObjects serves the SF-57 read surfaces for the report objects
+	// this deployment SENT (the SF-25/26 dispatch records).
+	reportObjects *handlers.ReportObjectHandler
 	// mtaStsPolicy serves the MTA-STS policy hosting path (SF-29, OB-6 W4).
 	mtaStsPolicy *handlers.MTASTSPolicyHandler
 	bounce               *handlers.BounceHandler
@@ -396,6 +399,7 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 			domainHealth:     handlers.NewDomainHealthHandler(domainpkg.NewHealthService(db, repositories.NewDomainSigningKeyRepository(db)), domainRepo, auditLogger),
 			dnsProvider:      handlers.NewDNSProviderHandler(dnsSvc, domainRepo, auditLogger),
 			dmarc:            handlers.NewDMARCReportHandler(repositories.NewDMARCReportRepository(db), domainRepo, auditLogger),
+			reportObjects:    handlers.NewReportObjectHandler(repositories.NewDMARCSentReportRepository(db), repositories.NewARFReportRepository(db), domainRepo),
 			tlsrpt:           handlers.NewTLSRPTHandler(repositories.NewTLSRPTRepository(db), domainRepo, auditLogger),
 			mtaStsPolicy:     handlers.NewMTASTSPolicyHandler(domainRepo),
 			adminDomain:      handlers.NewAdminDomainHandler(db, domainRepo, auditLogger),

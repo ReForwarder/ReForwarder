@@ -304,7 +304,7 @@ server and its workers.
 
 ## Project Roadmap
 
-Planning details live in `docs/project/`: [FEATURE_INVENTORY.md](docs/project/FEATURE_INVENTORY.md) is the detailed registry (128 entries as of 2026-11-14), [BACKLOG.md](docs/project/BACKLOG.md) the operational backlog, and the [ReForwarder Backlog](https://github.com/ReForwarder/ReForwarder/projects) board the task board. The Option B mail-infrastructure programme (Phases 0–6) **closed 2026-11-12 at HEAD `ee38ca8`** — the owner-mandated what-added / what-is-done / what-will-be-done / what-is-incomplete accounting lives in [todo.md](todo.md) Track A, and the delivered mail capabilities are registered as RF-F109–RF-F123 below.
+Planning details live in `docs/project/`: [FEATURE_INVENTORY.md](docs/project/FEATURE_INVENTORY.md) is the detailed registry (129 entries as of 2026-11-14), [BACKLOG.md](docs/project/BACKLOG.md) the operational backlog, and the [ReForwarder Backlog](https://github.com/ReForwarder/ReForwarder/projects) board the task board. The Option B mail-infrastructure programme (Phases 0–6) **closed 2026-11-12 at HEAD `ee38ca8`** — the owner-mandated what-added / what-is-done / what-will-be-done / what-is-incomplete accounting lives in [todo.md](todo.md) Track A, and the delivered mail capabilities are registered as RF-F109–RF-F123 below.
 
 ### To-dos
 
@@ -452,6 +452,7 @@ _None._
 - [x] [RF-F126] SMTP REQUIRETLS honoring (SF-02 — the parameter parsed at the MSA, persisted on the message, TLS-only hops enforced by the session runner and the relay path, parameter propagation on TLS connections; 2026-11-14)
 - [x] [RF-F127] DMARC aggregate reports: send side (SF-25 — daily cron over the inbound verification verdicts, RFC 7489 aggregate XML with live-policy alignment, rua endpoints discovered from each reported domain's live _dmarc DNS record only, dispatched through the system-forward pipeline as gzipped application/dmarc+xml; 2026-11-14)
 - [x] [RF-F128] ARF auth-failure feedback reports (SF-26 — RFC 5965/6591: the multipart/report MIME built from the inbound verification verdicts with the stored Authentication-Results and the bounded offending message, abuse addresses discovered from each reported domain's live _arf DNS record only, bounded per-domain dispatch as system notifications; 2026-11-14)
+- [x] [RF-F129] DMARC/TLS/ARF report admin objects (SF-57 — additive sent-report tables recorded by the SF-25/26 dispatchers, tenant/admin/per-domain read surfaces beside the TLS-RPT route, DMARC-panel surfacing of the reports we sent; 2026-11-14)
 - [x] [RF-F075] Double opt-in (DOI) confirmation flow (GAP-25 — per-list `double_opt_in` setting; memberships start pending and confirm only via the emailed `/t/confirm/{token}` hosted page (GET renders the consent form, POST confirms — email-scanner prefetch-safe) with kind-prefixed HMAC tokens on a 72-hour window minted by the tracking service; confirmation email rides the system_doi provenance (no suppression/quota layers, the forwarding posture); `list.subscribed` fires at confirmation so welcome automations enroll only confirmed members; DOI-aware JSON/CSV imports with optional list targeting; pending members never resolve into campaign audiences (`ListConfirmedMembers`); dashboard per-list toggle, pending badge, and resend endpoint; 2026-11-14)
 
 ---

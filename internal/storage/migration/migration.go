@@ -68,6 +68,16 @@ func Run(db *gorm.DB) error {
 		// new table + new nullable column with defaults upgrade deployed
 		// instances in place (the OB-6 W3 ip_pools precedent).
 		&models.EmailQueueSchedule{},
+
+		// SF-57 (report admin objects): the sent-side report records — the
+		// RFC 7489 aggregates this deployment dispatched to published rua
+		// endpoints (SF-25) and the RFC 5965/6591 auth-failure feedback
+		// reports dispatched to published _arf abuse addresses (SF-26).
+		// Additive tables; the deterministic report ids make re-runs
+		// idempotent. No upgrade step is needed: new tables with defaults
+		// upgrade deployed instances in place (the OB-6 W3 precedent).
+		&models.DMARCSentReport{},
+		&models.ARFReport{},
 		&models.Webhook{},
 		&models.Domain{},
 		&models.DomainSigningKey{},
