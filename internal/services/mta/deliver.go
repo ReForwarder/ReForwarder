@@ -110,6 +110,12 @@ type DeliveryResult struct {
 type Executor struct {
 	resolver *Resolver
 	budget   *BudgetKeeper
+	// slots is the session-reservation registry (SF-43): one outbound
+	// connection slot per recipient domain is reserved before the heavy SMTP
+	// session runs, enforcing Policy.MaxConnections with exclusive
+	// reservations. nil (tests constructing Executor directly) disables the
+	// gate.
+	slots    *ConnSlotKeeper
 	attempts AttemptRecorder
 	numberer AttemptNumberer
 	// heloDomain is the EHLO identifier presented to remote MX hosts.
@@ -144,6 +150,7 @@ func NewExecutor(resolver *Resolver, budget *BudgetKeeper, attempts AttemptRecor
 	return &Executor{
 		resolver:     resolver,
 		budget:       budget,
+		slots:        NewConnSlotKeeper(),
 		attempts:     attempts,
 		numberer:     nil,
 		heloDomain:   DefaultHeloDomain,
@@ -358,6 +365,23 @@ func (e *Executor) Deliver(ctx context.Context, spec DeliverySpec, env Envelope)
 			if err := e.throttleWait(ctx, env, attemptBase, result.Attempts, bindIP, spec.SenderDomain, policy); err != nil {
 				return result, email.WrapSendError("THROTTLE", "", err)
 			}
+			// SF-43 bounded-spec item 3: reserve one of the recipient domain's
+			// outbound connection slots before the heavy session (dial +
+			// STARTTLS + transfer). A fully reserved domain defers without
+			// dialing — the constraint binds the domain, not one MX host, so
+			// trying the next host would violate the same budget.
+			release, reserved := e.slots.Reserve(domain, policy)
+			if !reserved {
+				metrics.IncrementMTASlotDeferral()
+				e.record(env, attemptRow(env, attemptBase, "", "", bindIP, 450,
+					fmt.Sprintf("4.3.1 connection budget for %s fully reserved; defer", domain),
+					models.MTAAttemptDeferredSlots, nowFunc(), nowFunc()))
+				return result, &email.SendError{
+					Stage: "POLICY", Code: 450,
+					Msg: fmt.Sprintf("connection budget exhausted for domain %s", domain),
+					Err: fmt.Errorf("mta: deferred (slots), retry as the domain's connections drain"),
+				}
+			}
 			attemptNo := attemptBase + result.Attempts
 			startedAt := nowFunc()
 
@@ -379,7 +403,10 @@ func (e *Executor) Deliver(ctx context.Context, spec DeliverySpec, env Envelope)
 			msg := mailtrace.Prepend(env.Msg, mailtrace.OutboundReceived(
 				e.heloDomain, h.Host,
 				fmt.Sprintf("%d.%d", env.EmailID, attemptNo), startedAt))
-			sres, serr := runSession(ctx, opts, env.From, rcpts, msg)
+			sres, serr := func() (*SessionResult, error) {
+				defer release()
+				return runSession(ctx, opts, env.From, rcpts, msg)
+			}()
 			finishedAt := nowFunc()
 			result.Attempts++
 

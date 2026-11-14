@@ -280,6 +280,26 @@ var (
 		},
 	)
 
+	// SF-43: connections disconnected for exceeding the per-connection
+	// aggregate byte budget (POSTA_CONN_BYTE_BUDGET_MB) after the gradual
+	// throttle.
+	connBudgetDisconnectsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "posta_mta_conn_budget_disconnects_total",
+			Help: "Connections disconnected for exceeding the per-connection byte budget (SF-43)",
+		},
+	)
+
+	// SF-43: deliveries deferred because the recipient domain's outbound
+	// connection slots (Policy.MaxConnections) were fully reserved — the
+	// session-reservation gate fired before any dial.
+	mtaSlotDeferralsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "posta_mta_slot_deferrals_total",
+			Help: "Deliveries deferred with the recipient domain's connection slots fully reserved (SF-43)",
+		},
+	)
+
 	// CA-04: seconds each outbound delivery spent waiting for its
 	// per-sending-domain message-rate token before MAIL FROM. Pacing disabled
 	// (POSTA_MTA_MSG_RATE_PER_MIN unset) never observes here.
@@ -325,6 +345,8 @@ func init() {
 	prometheus.MustRegister(webhookEventsDroppedTotal)
 	prometheus.MustRegister(mtaThrottleWait)
 	prometheus.MustRegister(mtaMemoryPressureTotal)
+	prometheus.MustRegister(connBudgetDisconnectsTotal)
+	prometheus.MustRegister(mtaSlotDeferralsTotal)
 }
 
 // IncrementEmailSent increments the emails sent counter.
@@ -378,6 +400,18 @@ func ObserveMTAThrottleWait(seconds float64) {
 // IncrementMTAMemoryPressure counts one memory-pressure episode (SF-108).
 func IncrementMTAMemoryPressure() {
 	mtaMemoryPressureTotal.Inc()
+}
+
+// IncrementConnBudgetDisconnect counts one connection disconnected for
+// exceeding the per-connection aggregate byte budget (SF-43).
+func IncrementConnBudgetDisconnect() {
+	connBudgetDisconnectsTotal.Inc()
+}
+
+// IncrementMTASlotDeferral counts one delivery deferred because the
+// recipient domain's outbound connection slots were fully reserved (SF-43).
+func IncrementMTASlotDeferral() {
+	mtaSlotDeferralsTotal.Inc()
 }
 
 // IncrementBounce increments the bounce counter for the given type (hard, soft, complaint).

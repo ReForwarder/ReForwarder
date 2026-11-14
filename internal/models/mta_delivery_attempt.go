@@ -37,6 +37,11 @@ const (
 	// MTAAttemptDeferredBudget — the per-domain hourly budget was exhausted;
 	// the message is deferred (retry later) without contacting the MX.
 	MTAAttemptDeferredBudget = "deferred_budget"
+	// MTAAttemptDeferredSlots — the recipient domain's outbound connection
+	// budget (Policy.MaxConnections) was fully reserved by concurrent
+	// deliveries; the message is deferred (retry later) without contacting
+	// the MX (SF-43 session reservations).
+	MTAAttemptDeferredSlots = "deferred_slots"
 	// MTAAttemptRefusedUnverifiedSender — fail-closed: direct delivery was
 	// requested for a sender domain that is not ownership-verified.
 	MTAAttemptRefusedUnverifiedSender = "refused_unverified_sender"

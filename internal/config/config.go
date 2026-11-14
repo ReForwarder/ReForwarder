@@ -321,6 +321,16 @@ type Config struct {
 	// 451 and posta_mta_memory_pressure_total counts the episodes.
 	MemoryBudgetMB int
 
+	// Per-connection byte budget (SF-43): ConnByteBudgetMB
+	// (POSTA_CONN_BYTE_BUDGET_MB, default 100 = 100 MiB) meters every
+	// SMTP-family listener connection's aggregate inbound bytes — commands
+	// and message payloads charged across the whole session. Above 80% of
+	// the budget each read is delayed on a linear ramp (gradual throttling);
+	// past the budget the connection is disconnected and
+	// posta_mta_conn_budget_disconnects_total counts it. 0 disables the
+	// budget.
+	ConnByteBudgetMB int
+
 	// Per-message send-rate pacing (CA-04): MTAMsgRatePerMin
 	// (POSTA_MTA_MSG_RATE_PER_MIN, default 0 = disabled) paces outbound
 	// MAIL FROM commands to n messages per minute per sending domain
@@ -824,6 +834,7 @@ func New() *Config {
 		MTAMsgRatePerMin:     goutils.EnvInt("POSTA_MTA_MSG_RATE_PER_MIN", 0),
 		DeliveryThrottleKBPS: goutils.EnvInt("POSTA_DELIVERY_THROTTLE_KBPS", 0),
 		MemoryBudgetMB:       goutils.EnvInt("POSTA_MEMORY_BUDGET_MB", 0),
+		ConnByteBudgetMB:     goutils.EnvInt("POSTA_CONN_BYTE_BUDGET_MB", 100),
 
 		// MTA-STS policy hosting (SF-29, OB-6 W4): gated well-known path;
 		// see the field comments for the gate semantics.

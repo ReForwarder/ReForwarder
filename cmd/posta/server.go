@@ -796,6 +796,15 @@ func newInboundFilter(db *gorm.DB, cfg *config.Config, svc *inbound.Service, blo
 	)
 }
 
+// newConnByteBudget arms the SF-43 per-connection aggregate byte budget from
+// config (nil — disabled — when POSTA_CONN_BYTE_BUDGET_MB is 0). Every
+// SMTP-family listener (inbound, LMTP, relay, submission) meters its accepted
+// connections through one budget instance; the budget is per connection, so
+// sharing the constructor result is only a convenience.
+func newConnByteBudget(cfg *config.Config) *memorywatch.ConnectionBudget {
+	return memorywatch.NewConnectionBudget(cfg.ConnByteBudgetMB)
+}
+
 // startInboundSMTPServer configures and launches the built-in SMTP receiver.
 // Returns the server so it can be gracefully shut down on exit.
 func startInboundSMTPServer(
@@ -835,7 +844,11 @@ func startInboundSMTPServer(
 			logger.Error("inbound SMTP server error", "error", err)
 			return
 		}
-		listener := security.NewCountingListener(l, secEng, cfg.InboundSMTPPort, "smtp")
+		// SF-43: the per-connection byte budget wraps the raw listener under
+		// the security layer — every accepted SMTP connection meters its
+		// aggregate inbound bytes (throttled past 80%, disconnected past the
+		// budget).
+		listener := security.NewCountingListener(memorywatch.BudgetListener(l, newConnByteBudget(cfg)), secEng, cfg.InboundSMTPPort, "smtp")
 		err = srv.Serve(listener)
 		if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, smtp.ErrServerClosed) {
 			logger.Error("inbound SMTP server error", "error", err)
@@ -882,7 +895,7 @@ func startLMTPServer(
 			logger.Error("LMTP server error", "error", err)
 			return
 		}
-		listener := security.NewCountingListener(l, secEng, cfg.LMTPPort, "lmtp")
+		listener := security.NewCountingListener(memorywatch.BudgetListener(l, newConnByteBudget(cfg)), secEng, cfg.LMTPPort, "lmtp")
 		err = srv.Serve(listener)
 		if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, smtp.ErrServerClosed) {
 			logger.Error("LMTP server error", "error", err)
@@ -1036,7 +1049,7 @@ func startSMTPRelayServer(
 			logger.Error("SMTP relay server error", "error", err)
 			return
 		}
-		listener := security.NewCountingListener(l, secEng, cfg.SMTPRelayPort, "smtp")
+		listener := security.NewCountingListener(memorywatch.BudgetListener(l, newConnByteBudget(cfg)), secEng, cfg.SMTPRelayPort, "smtp")
 		err = srv.Serve(listener)
 		if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, smtp.ErrServerClosed) {
 			logger.Error("SMTP relay server error", "error", err)
@@ -1315,7 +1328,7 @@ func startSubmissionServer(
 			logger.Error("submission server error", "error", err)
 			return
 		}
-		listener := security.NewCountingListener(l, secEng, cfg.SubmissionPort, "smtp")
+		listener := security.NewCountingListener(memorywatch.BudgetListener(l, newConnByteBudget(cfg)), secEng, cfg.SubmissionPort, "smtp")
 		err = srv.Serve(listener)
 		if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, smtp.ErrServerClosed) {
 			logger.Error("submission server error", "error", err)
