@@ -83,6 +83,7 @@ GET    /api/v1/admin/events/{id}
 GET    /api/v1/admin/ip-pools
 GET    /api/v1/admin/ip-reputation
 GET    /api/v1/admin/jobs
+GET    /api/v1/admin/jobs/history
 GET    /api/v1/admin/mailboxes
 GET    /api/v1/admin/mailboxes/{id}/usage
 GET    /api/v1/admin/metrics
@@ -274,6 +275,7 @@ POST   /api/v1/admin/domains/{id}/verify
 POST   /api/v1/admin/impersonate/exit
 POST   /api/v1/admin/ip-pools
 POST   /api/v1/admin/ip-pools/{poolId}/members
+POST   /api/v1/admin/jobs/{name}/trigger
 POST   /api/v1/admin/mailboxes
 POST   /api/v1/admin/mailstore/search/reindex
 POST   /api/v1/admin/oauth/providers

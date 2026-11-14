@@ -146,6 +146,10 @@ func Run(db *gorm.DB) error {
 		&models.MailAlias{},
 		&models.MailGroup{},
 		&models.MailGroupMember{},
+		// SF-99 operational controls: one cron_run_history row per completed
+		// cron job run (scheduled tick or manual trigger), written by the cron
+		// manager's wrapper. Additive table — in-place upgrade, no step needed.
+		&models.CronRunHistory{},
 		// OB-6 W3 (ADR-007 decision 7): IP pools, warm-up schedules and
 		// reputation rollups — additive tables only; every row carries
 		// workspace_id (or an explicit nil for deployment-wide pools), per

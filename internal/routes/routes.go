@@ -677,6 +677,8 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 
 	if cronManager != nil {
 		r.h.cron = handlers.NewCronHandler(cronManager)
+		// SF-99: the run-history read seam rides the same store.
+		r.h.cron.SetRunHistoryRepo(repositories.NewCronRunHistoryRepository(db))
 	}
 
 	// OAuth

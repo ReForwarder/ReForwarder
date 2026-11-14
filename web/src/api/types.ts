@@ -989,6 +989,20 @@ export interface CronJob {
   next_run_at: string | null
 }
 
+// One completed cron job run (SF-99): scheduled ticks and manual triggers
+// alike. outcome is "success" | "failed"; detail carries the error text for
+// failed runs.
+export interface CronRunHistoryEntry {
+  id: number
+  job_name: string
+  trigger: string
+  started_at: string
+  finished_at: string
+  outcome: string
+  detail?: string
+  duration_ms: number
+}
+
 // Result of the daily release check. Admin-only.
 export interface UpdateInfo {
   current_version: string

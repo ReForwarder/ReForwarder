@@ -700,7 +700,44 @@ func (r *Router) adminRoutes() []okapi.RouteDefinition {
 			Summary:     "List scheduled jobs",
 			Description: "Returns all registered cron jobs with their schedule and last execution status.",
 			Response:    &dto.Response[[]cronpkg.JobStatus]{},
-		})
+		},
+			// SF-99 operational controls: the run history (paged, newest
+			// first) and the manual trigger. Both sit behind the admin
+			// group's middleware — this tree's RBAC has admin and user
+			// roles only, and admin is the scheduler-capable role (a
+			// finer-grained scheduler role is SF-66's deferred registry
+			// territory). The trigger is asynchronous: the endpoint answers
+			// 202 once the run is claimed, the outcome lands in the history.
+			okapi.RouteDefinition{
+				Method:      http.MethodGet,
+				Path:        "/jobs/history",
+				Handler:     okapi.H(r.h.cron.ListHistory),
+				Group:       adminGroup,
+				Summary:     "Cron run history",
+				Description: "One page of completed cron job runs (scheduled ticks and manual triggers alike), newest first, optionally narrowed to one job.",
+				Request:     &handlers.CronRunHistoryRequest{},
+				Response:    &dto.PageableResponse[handlers.CronRunHistoryResponse]{},
+				Options: []okapi.RouteOption{
+					okapi.DocResponse(503, &dto.ErrorResponseBody{}),
+				},
+			},
+			okapi.RouteDefinition{
+				Method:      http.MethodPost,
+				Path:        "/jobs/{name}/trigger",
+				Handler:     okapi.H(r.h.cron.TriggerJob),
+				Group:       adminGroup,
+				Summary:     "Trigger a cron job",
+				Description: "Starts a manual run of the named job on this node (asynchronous — 202 once claimed). A mid-run job answers 409; an unknown name reads as 404. The run's outcome lands in the run history.",
+				Request:     &handlers.CronJobTriggerRequest{},
+				Response:    &dto.Response[dto.MessageData]{},
+				Options: []okapi.RouteOption{
+					okapi.DocPathParam("name", "string", "Registered cron job name"),
+					okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+					okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+					okapi.DocResponse(409, &dto.ErrorResponseBody{}),
+					okapi.DocResponse(503, &dto.ErrorResponseBody{}),
+				},
+			})
 	}
 
 	// ==================== Delivery Queues (asynq inspection) ====================

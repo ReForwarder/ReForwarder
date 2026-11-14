@@ -1,7 +1,7 @@
 import api from './client'
 import type {
   ApiResponse, PaginatedResponse, User, Event, AdminMetrics,
-  UserDetailMetrics, CronJob, AdminWorkspace, UpdateInfo,
+  UserDetailMetrics, CronJob, CronRunHistoryEntry, AdminWorkspace, UpdateInfo,
   Domain, AdminDomainRow, AdminDomainDetail, AdminDomainVerifyResult,
   AdminWorkspaceRow, AdminWorkspaceDetail,
   SecurityOverview, SecurityBan, SecurityBanInput, SecurityBanSuppressed,
@@ -123,6 +123,15 @@ export const adminApi = {
   },
   listJobs() {
     return api.get<ApiResponse<CronJob[]>>('/admin/jobs')
+  },
+  // ---- SF-99: cron run history + manual trigger ----
+  listJobHistory(page = 0, size = 10, jobName?: string) {
+    const params: Record<string, any> = { page, size }
+    if (jobName) params.job_name = jobName
+    return api.get<PaginatedResponse<CronRunHistoryEntry>>('/admin/jobs/history', { params })
+  },
+  triggerJob(name: string) {
+    return api.post<ApiResponse<{ message: string }>>(`/admin/jobs/${encodeURIComponent(name)}/trigger`)
   },
   // ---- Delivery queues (asynq inspection) ----
   listQueues() {

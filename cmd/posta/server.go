@@ -1867,6 +1867,9 @@ func initCronManager(
 	settingsProvider := settings.NewProvider(repositories.NewSettingRepository(db))
 
 	manager := cronpkg.NewManager(cronClient)
+	// SF-99: one cron_run_history row per completed run — scheduled ticks and
+	// manual triggers alike — written best-effort by the manager's wrapper.
+	manager.SetRunHistory(repositories.NewCronRunHistoryRepository(db))
 	retentionJob := jobs.NewRetentionCleanupJob(
 		repositories.NewEmailRepository(db),
 		repositories.NewEventRepository(db),

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 import { adminApi } from '../../api/admin'
-import type { CronJob, QueueStats, QueueTask } from '../../api/types'
+import type { CronJob, CronRunHistoryEntry, QueueStats, QueueTask } from '../../api/types'
 import { useNotificationStore } from '../../stores/notification'
 import { useAuthStore } from '../../stores/auth'
 import { useConfirm } from '../../composables/useConfirm'
@@ -18,6 +18,17 @@ const canOperate = computed(() => authStore.isAdmin === true)
 const loading = ref(true)
 const jobs = ref<CronJob[]>([])
 let refreshTimer: ReturnType<typeof setInterval> | null = null
+
+// ---- SF-99: manual trigger + run history ----
+const triggeringJob = ref('')
+const historyOpen = ref(false)
+const historyLoading = ref(false)
+const historyJob = ref('')
+const historyEntries = ref<CronRunHistoryEntry[]>([])
+const historyPage = ref(0)
+const historyTotalPages = ref(0)
+const historyTotal = ref(0)
+const HISTORY_PAGE_SIZE = 10
 
 // ---- Queue administration (R-03) ----
 const queues = ref<QueueStats[]>([])
@@ -243,6 +254,77 @@ function scheduleName(schedule: string) {
   }
   return known[schedule] || schedule
 }
+
+// ==================== SF-99: manual trigger + run history ====================
+// The backend trigger is asynchronous: POST answers 202 once the run is
+// claimed, and the run's outcome lands in the history (and the job card's
+// status on the next refresh). A mid-run job answers 409 — surfaced as a
+// notification.
+
+async function triggerJob(job: CronJob) {
+  const ok = await confirm({
+    title: `Run ${job.name} now`,
+    message: `Start a manual run of ${job.name} on this node? The run is asynchronous — watch its outcome in the run history.`,
+    confirmText: 'Run now',
+    variant: 'info',
+  })
+  if (!ok) return
+  triggeringJob.value = job.name
+  try {
+    await adminApi.triggerJob(job.name)
+    notify.success(`${job.name} triggered`)
+    await loadJobs()
+  } catch (e: any) {
+    notify.error(e?.response?.data?.message || `Failed to trigger ${job.name}`)
+  } finally {
+    triggeringJob.value = ''
+  }
+}
+
+function toggleHistory() {
+  historyOpen.value = !historyOpen.value
+}
+
+function selectHistoryJob(name: string) {
+  historyJob.value = name
+  loadHistory(0)
+}
+
+async function loadHistory(page = 0) {
+  historyLoading.value = true
+  try {
+    const res = await adminApi.listJobHistory(page, HISTORY_PAGE_SIZE, historyJob.value || undefined)
+    historyEntries.value = res.data.data || []
+    historyPage.value = res.data.pageable?.current_page ?? page
+    historyTotalPages.value = res.data.pageable?.total_pages ?? 0
+    historyTotal.value = res.data.pageable?.total_elements ?? 0
+  } catch {
+    notify.error('Failed to load run history')
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+function openHistory() {
+  if (!historyOpen.value) {
+    historyOpen.value = true
+    loadHistory(0)
+  } else {
+    historyOpen.value = false
+  }
+}
+
+function outcomeBadge(outcome: string) {
+  return outcome === 'success' ? 'badge badge-success' : 'badge badge-error'
+}
+
+function fmtDuration(ms: number) {
+  if (ms < 1000) return `${ms}ms`
+  const s = ms / 1000
+  if (s < 60) return `${s.toFixed(1)}s`
+  const m = Math.floor(s / 60)
+  return `${m}m ${Math.round(s % 60)}s`
+}
 </script>
 
 <template>
@@ -452,6 +534,76 @@ function scheduleName(schedule: string) {
                 <span class="error-label">Last error</span>
                 <code class="error-message">{{ job.last_error }}</code>
               </div>
+
+              <!-- SF-99: manual trigger (admin-gated; asynchronous — the run
+                   lands in the history, the card status flips on refresh). -->
+              <div v-if="canOperate" class="job-actions">
+                <button class="btn btn-secondary btn-sm" :disabled="job.running || triggeringJob !== ''"
+                  :title="job.running ? 'The job is mid-run' : `Start a manual run of ${job.name}`"
+                  @click="triggerJob(job)">
+                  {{ triggeringJob === job.name ? 'Triggering…' : 'Run now' }}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SF-99: the run history — every completed run, scheduled and manual
+             alike, newest first, filterable by job. -->
+        <div class="card history-card">
+          <div class="card-header">
+            <h2>Run history</h2>
+            <button type="button" class="history-toggle" :aria-expanded="historyOpen" @click="openHistory">
+              <span class="chevron" :class="{ open: historyOpen }">▸</span>
+              <span>{{ historyOpen ? 'Hide' : 'Show' }}</span>
+            </button>
+          </div>
+          <div v-show="historyOpen" class="card-body">
+            <div class="history-controls">
+              <select :value="historyJob" class="form-input history-key-select" aria-label="Job filter"
+                @change="selectHistoryJob(($event.target as HTMLSelectElement).value)">
+                <option value="">All jobs</option>
+                <option v-for="job in jobs" :key="job.name" :value="job.name">{{ job.name }}</option>
+              </select>
+              <button type="button" class="history-load-btn" :disabled="historyLoading" @click="loadHistory(0)">
+                {{ historyLoading ? 'Loading…' : 'Refresh' }}
+              </button>
+            </div>
+
+            <table v-if="historyEntries.length" class="history-table">
+              <thead>
+                <tr>
+                  <th>Job</th>
+                  <th>Trigger</th>
+                  <th>Started</th>
+                  <th>Duration</th>
+                  <th>Outcome</th>
+                  <th>Detail</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="entry in historyEntries" :key="entry.id">
+                  <td class="history-time">{{ entry.job_name }}</td>
+                  <td>
+                    <span class="badge" :class="entry.trigger === 'manual' ? 'badge-warning' : 'badge-neutral'">
+                      {{ entry.trigger }}
+                    </span>
+                  </td>
+                  <td class="history-time">{{ formatDate(entry.started_at) }}</td>
+                  <td>{{ fmtDuration(entry.duration_ms) }}</td>
+                  <td><span :class="outcomeBadge(entry.outcome)">{{ entry.outcome }}</span></td>
+                  <td class="history-detail"><code>{{ entry.detail || '—' }}</code></td>
+                </tr>
+              </tbody>
+            </table>
+            <div v-else-if="!historyLoading" class="history-empty">
+              No recorded runs yet — rows appear after jobs complete.
+            </div>
+
+            <div v-if="historyTotalPages > 1" class="history-pager">
+              <button type="button" :disabled="historyPage <= 0 || historyLoading" @click="loadHistory(historyPage - 1)">Previous</button>
+              <span>Page {{ historyPage + 1 }} of {{ historyTotalPages }} ({{ historyTotal }} runs)</span>
+              <button type="button" :disabled="historyPage >= historyTotalPages - 1 || historyLoading" @click="loadHistory(historyPage + 1)">Next</button>
             </div>
           </div>
         </div>
@@ -825,5 +977,111 @@ function scheduleName(schedule: string) {
   color: var(--danger-text);
   border-radius: var(--radius-sm, 4px);
   word-break: break-word;
+}
+
+/* ==================== SF-99: trigger + run history ==================== */
+.job-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+}
+
+.history-card {
+  margin-top: 24px;
+}
+
+.history-card .card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.history-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+.history-toggle:hover { color: var(--text-primary); }
+.history-toggle .chevron { transition: transform 0.15s ease; font-size: 11px; }
+.history-toggle .chevron.open { transform: rotate(90deg); }
+
+.history-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.history-key-select {
+  width: 280px;
+}
+
+.history-load-btn {
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border-primary);
+  background: var(--primary-600);
+  color: white;
+  font-size: 13px;
+  cursor: pointer;
+}
+.history-load-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.history-table {
+  width: 100%;
+  font-size: 13px;
+  border-collapse: collapse;
+}
+.history-table th,
+.history-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-primary);
+  text-align: left;
+}
+.history-table th {
+  font-weight: 500;
+  color: var(--text-muted);
+}
+.history-time { white-space: nowrap; color: var(--text-muted); }
+.history-detail code {
+  font-size: 12px;
+  word-break: break-word;
+}
+
+.history-empty {
+  padding: 16px 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.history-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-top: 12px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.history-pager button {
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-primary);
+  background: transparent;
+  cursor: pointer;
+  font-size: 12.5px;
+}
+.history-pager button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>
