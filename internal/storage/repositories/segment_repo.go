@@ -21,6 +21,7 @@ package repositories
 
 import (
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/conditions"
 	"gorm.io/gorm"
 )
 
@@ -71,14 +72,14 @@ func (r *SegmentRepository) Delete(id uint) error {
 }
 
 // CountByCondition counts the subscribers in scope matching the condition.
-// Evaluated live (same convention as dynamic subscriber lists).
+// Evaluated live (same convention as dynamic subscriber lists). SF-103: the
+// Segment currency rides the unified evaluator.
 func (r *SegmentRepository) CountByCondition(scope ResourceScope, cond models.SegmentCondition) (int64, error) {
-	expr, args, err := BuildSegmentConditionSQL(cond)
+	var count int64
+	q, err := conditions.NewSegmentEvaluator(cond).WhereSQL(ApplyScope(r.db.Model(&models.Subscriber{}), scope))
 	if err != nil {
 		return 0, err
 	}
-	var count int64
-	q := ApplyScope(r.db.Model(&models.Subscriber{}), scope).Where(expr, args...)
 	if err := q.Count(&count).Error; err != nil {
 		return 0, err
 	}
@@ -87,19 +88,25 @@ func (r *SegmentRepository) CountByCondition(scope ResourceScope, cond models.Se
 
 // FindSubscribersByCondition resolves the audience of a condition: count plus
 // a paged sample, newest subscribers first. A negative limit means all rows
-// (campaign send-time resolution passes -1, 0).
+// (campaign send-time resolution passes -1, 0). SF-103: the Segment currency
+// rides the unified evaluator.
 func (r *SegmentRepository) FindSubscribersByCondition(scope ResourceScope, cond models.SegmentCondition, limit, offset int) ([]models.Subscriber, int64, error) {
-	expr, args, err := BuildSegmentConditionSQL(cond)
+	ev := conditions.NewSegmentEvaluator(cond)
+	var total int64
+	countQ, err := ev.WhereSQL(ApplyScope(r.db.Model(&models.Subscriber{}), scope))
 	if err != nil {
 		return nil, 0, err
 	}
-	var total int64
-	if err := ApplyScope(r.db.Model(&models.Subscriber{}), scope).Where(expr, args...).Count(&total).Error; err != nil {
+	if err := countQ.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 
+	findQ, err := ev.WhereSQL(ApplyScope(r.db, scope))
+	if err != nil {
+		return nil, 0, err
+	}
 	var items []models.Subscriber
-	if err := ApplyScope(r.db, scope).Where(expr, args...).
+	if err := findQ.
 		Order("created_at DESC").
 		Limit(limit).Offset(offset).
 		Find(&items).Error; err != nil {

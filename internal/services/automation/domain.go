@@ -37,6 +37,7 @@ import (
 	"strings"
 
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/conditions"
 	"github.com/goposta/posta/internal/services/webhook"
 	"github.com/robfig/cron/v3"
 )
@@ -665,7 +666,7 @@ func filterRuleProblem(field, operator string, value any) string {
 		return ""
 	case "in_list":
 		// The operator is irrelevant for membership; the value must be a list id.
-		if _, ok := coerceUint(value); !ok {
+		if _, ok := conditions.CoerceUint(value); !ok {
 			return "in_list needs a numeric list id as its value"
 		}
 		return ""
@@ -673,7 +674,7 @@ func filterRuleProblem(field, operator string, value any) string {
 		// R-14: same shape as in_list, referencing a saved segment. The
 		// evaluator resolves membership live through the segment query
 		// builder; membership tracking (entry/exit events) stays deferred.
-		if _, ok := coerceUint(value); !ok {
+		if _, ok := conditions.CoerceUint(value); !ok {
 			return "in_segment needs a numeric segment id as its value"
 		}
 		return ""
@@ -728,7 +729,7 @@ func cfgUint(cfg map[string]any, key string) (uint, bool) {
 	if !ok {
 		return 0, false
 	}
-	return coerceUint(v)
+	return conditions.CoerceUint(v)
 }
 
 // cfgArray reads an array-valued key from a raw node config map.

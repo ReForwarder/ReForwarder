@@ -20,14 +20,10 @@
 package automation
 
 import (
-	"encoding/json"
-	"fmt"
-	"math"
 	"sort"
-	"strconv"
-	"strings"
 
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/conditions"
 )
 
 // NodesByType returns every node of the given type, in stored order.
@@ -278,137 +274,10 @@ func DefaultNodeConfig(nodeType string) map[string]any {
 }
 
 // EvaluateConditions reports whether a subscriber satisfies all conditions
-// (AND-combined). An empty condition set matches vacuously (a trigger with no
-// conditions fires for every matching event).
-//
-// Supported rules (anything else — unknown field or operator — never matches):
-//
-//	email / name / status   operators equals, not_equals, contains
-//	custom_fields.<key>     operators equals, not_equals, contains, exists, not_exists
-//	in_list                 value is the list id; the operator is ignored and
-//	                        listChecker decides membership
-//
-// Comparisons are string-based (custom field values and rule values are
-// coerced to strings); contains is case-insensitive, matching the ILIKE
-// behavior of the segment filters. There is no expression or code evaluation.
-// A nil subscriber, a missing custom field, or a nil listChecker never matches.
-func EvaluateConditions(conditions []models.FilterRule, sub *models.Subscriber, listChecker func(listID uint) bool) bool {
-	if len(conditions) == 0 {
-		return true
-	}
-	if sub == nil {
-		return false
-	}
-	for i := range conditions {
-		if !evaluateFilterRule(conditions[i], sub, listChecker) {
-			return false
-		}
-	}
-	return true
-}
-
-// evaluateFilterRule evaluates a single rule against the subscriber.
-func evaluateFilterRule(rule models.FilterRule, sub *models.Subscriber, listChecker func(uint) bool) bool {
-	switch rule.Field {
-	case "email":
-		return compareStringField(sub.Email, rule.Operator, rule.Value)
-	case "name":
-		return compareStringField(sub.Name, rule.Operator, rule.Value)
-	case "status":
-		return compareStringField(string(sub.Status), rule.Operator, rule.Value)
-	case "in_list":
-		id, ok := coerceUint(rule.Value)
-		if !ok || listChecker == nil {
-			return false
-		}
-		return listChecker(id)
-	}
-	if strings.HasPrefix(rule.Field, "custom_fields.") {
-		return matchCustomField(rule, sub)
-	}
-	return false // unknown field never matches
-}
-
-// compareStringField applies the direct-field operators to a string value.
-func compareStringField(fieldValue, operator string, value any) bool {
-	switch operator {
-	case "equals":
-		return fieldValue == coerceString(value)
-	case "not_equals":
-		return fieldValue != coerceString(value)
-	case "contains":
-		return strings.Contains(strings.ToLower(fieldValue), strings.ToLower(coerceString(value)))
-	default:
-		return false
-	}
-}
-
-// matchCustomField applies the custom-field operators to sub.CustomFields[key].
-// A missing key never matches (SQL NULL semantics: not_equals on a missing
-// field is also false).
-func matchCustomField(rule models.FilterRule, sub *models.Subscriber) bool {
-	key := strings.TrimPrefix(rule.Field, "custom_fields.")
-	raw, present := sub.CustomFields[key]
-	switch rule.Operator {
-	case "exists":
-		return present && raw != nil
-	case "not_exists":
-		return !present || raw == nil
-	case "equals":
-		return present && coerceString(raw) == coerceString(rule.Value)
-	case "not_equals":
-		return present && coerceString(raw) != coerceString(rule.Value)
-	case "contains":
-		return present && strings.Contains(strings.ToLower(coerceString(raw)), strings.ToLower(coerceString(rule.Value)))
-	default:
-		return false
-	}
-}
-
-// coerceString renders a JSON scalar as a string for comparisons.
-func coerceString(value any) string {
-	switch t := value.(type) {
-	case nil:
-		return ""
-	case string:
-		return t
-	case bool:
-		return strconv.FormatBool(t)
-	case float64:
-		return strconv.FormatFloat(t, 'f', -1, 64)
-	case json.Number:
-		return t.String()
-	default:
-		return fmt.Sprint(t)
-	}
-}
-
-// coerceUint converts a JSON scalar to a uint (list ids). Accepts numbers
-// (integral only) and numeric strings.
-func coerceUint(value any) (uint, bool) {
-	switch t := value.(type) {
-	case uint:
-		return t, true
-	case int:
-		if t >= 0 {
-			return uint(t), true
-		}
-	case int64:
-		if t >= 0 {
-			return uint(t), true
-		}
-	case float64:
-		if t >= 0 && t <= 1e15 && t == math.Trunc(t) {
-			return uint(t), true
-		}
-	case json.Number:
-		if f, err := t.Float64(); err == nil {
-			return coerceUint(f)
-		}
-	case string:
-		if n, err := strconv.ParseUint(strings.TrimSpace(t), 10, 64); err == nil {
-			return uint(n), true
-		}
-	}
-	return 0, false
+// (AND-combined) — the SF-103 unified-surface delegate: the implementation
+// moved verbatim to the conditions package (EvaluateFilterRules) and this
+// wrapper keeps the automation package's own name (and its tests) working
+// unchanged. See internal/services/conditions/memory.go for the contract.
+func EvaluateConditions(ruleSet []models.FilterRule, sub *models.Subscriber, listChecker func(listID uint) bool) bool {
+	return conditions.EvaluateFilterRules(ruleSet, sub, listChecker)
 }

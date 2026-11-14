@@ -20,10 +20,10 @@
 package repositories
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/conditions"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -121,10 +121,19 @@ func (r *SubscriberRepository) FindByFilterRules(scope ResourceScope, rules mode
 	var items []models.Subscriber
 	var total int64
 
-	q := r.applyFilterRules(ApplyScope(r.db.Model(&models.Subscriber{}), scope), rules)
+	// SF-103: the FilterRule currency rides the unified evaluator — the same
+	// SQL translation the delegating applyFilterRules below carries out.
+	ev := conditions.NewFilterRuleEvaluator(rules)
+	q, err := ev.WhereSQL(ApplyScope(r.db.Model(&models.Subscriber{}), scope))
+	if err != nil {
+		return nil, 0, err
+	}
 	q.Count(&total)
 
-	qFind := r.applyFilterRules(ApplyScope(r.db, scope), rules)
+	qFind, err := ev.WhereSQL(ApplyScope(r.db, scope))
+	if err != nil {
+		return nil, 0, err
+	}
 	if err := qFind.Order("created_at DESC").Limit(limit).Offset(offset).Find(&items).Error; err != nil {
 		return nil, 0, err
 	}
@@ -134,99 +143,21 @@ func (r *SubscriberRepository) FindByFilterRules(scope ResourceScope, rules mode
 // CountByFilterRules returns the count of subscribers matching filter rules.
 func (r *SubscriberRepository) CountByFilterRules(scope ResourceScope, rules models.FilterRules) (int64, error) {
 	var count int64
-	q := r.applyFilterRules(ApplyScope(r.db.Model(&models.Subscriber{}), scope), rules)
+	ev := conditions.NewFilterRuleEvaluator(rules)
+	q, err := ev.WhereSQL(ApplyScope(r.db.Model(&models.Subscriber{}), scope))
+	if err != nil {
+		return 0, err
+	}
 	if err := q.Count(&count).Error; err != nil {
 		return 0, err
 	}
 	return count, nil
 }
 
-// applyFilterRules translates FilterRules into SQL WHERE clauses.
+// applyFilterRules translates FilterRules into SQL WHERE clauses — the
+// SF-103 delegate: the implementation moved verbatim to the conditions
+// package (ApplyFilterRuleSQL); this method keeps the repository's own name
+// (and the cross-engine tests that drive it) working unchanged.
 func (r *SubscriberRepository) applyFilterRules(q *gorm.DB, rules models.FilterRules) *gorm.DB {
-	for _, rule := range rules {
-		field := rule.Field
-		op := rule.Operator
-		val := rule.Value
-
-		// Engagement-based filters — use subqueries on campaign_messages
-		if strings.HasPrefix(field, "engagement.") {
-			engagementField := strings.TrimPrefix(field, "engagement.")
-			switch engagementField {
-			case engOpenedCampaign:
-				// Subscribers who opened a specific campaign
-				q = q.Where("EXISTS (SELECT 1 FROM campaign_messages WHERE campaign_messages.subscriber_id = subscribers.id AND campaign_messages.campaign_id = ? AND campaign_messages.opened_at IS NOT NULL)", val)
-			case engClickedCampaign:
-				// Subscribers who clicked in a specific campaign
-				q = q.Where("EXISTS (SELECT 1 FROM campaign_messages WHERE campaign_messages.subscriber_id = subscribers.id AND campaign_messages.campaign_id = ? AND campaign_messages.clicked_at IS NOT NULL)", val)
-			case engNotOpenedCampaign:
-				// Subscribers who did NOT open a specific campaign
-				q = q.Where("NOT EXISTS (SELECT 1 FROM campaign_messages WHERE campaign_messages.subscriber_id = subscribers.id AND campaign_messages.campaign_id = ? AND campaign_messages.opened_at IS NOT NULL)", val)
-			case engReceivedCampaign:
-				// Subscribers who received a specific campaign (regardless of open/click)
-				q = q.Where("EXISTS (SELECT 1 FROM campaign_messages WHERE campaign_messages.subscriber_id = subscribers.id AND campaign_messages.campaign_id = ?)", val)
-			case "inactive_days":
-				// Subscribers with no opens in the last N days
-				q = q.Where("NOT EXISTS (SELECT 1 FROM campaign_messages WHERE campaign_messages.subscriber_id = subscribers.id AND campaign_messages.opened_at > NOW() - INTERVAL '1 day' * ?)", val)
-			case "active_days":
-				// Subscribers with opens in the last N days
-				q = q.Where("EXISTS (SELECT 1 FROM campaign_messages WHERE campaign_messages.subscriber_id = subscribers.id AND campaign_messages.opened_at > NOW() - INTERVAL '1 day' * ?)", val)
-			case "total_opens_gte":
-				// Subscribers with at least N total opens
-				q = q.Where("(SELECT COUNT(*) FROM campaign_messages WHERE campaign_messages.subscriber_id = subscribers.id AND campaign_messages.opened_at IS NOT NULL) >= ?", val)
-			case "total_clicks_gte":
-				// Subscribers with at least N total clicks
-				q = q.Where("(SELECT COUNT(*) FROM campaign_messages WHERE campaign_messages.subscriber_id = subscribers.id AND campaign_messages.clicked_at IS NOT NULL) >= ?", val)
-			}
-			continue
-		}
-
-		// Determine the SQL column expression
-		var column string
-		if strings.HasPrefix(field, "custom_fields.") {
-			// JSON field extraction (PostgreSQL) - sanitize key to prevent SQL injection
-			jsonKey := strings.TrimPrefix(field, "custom_fields.")
-			if !isAlphanumericUnderscore(jsonKey) || jsonKey == "" {
-				continue
-			}
-			column = fmt.Sprintf("custom_fields::jsonb->>'%s'", jsonKey)
-		} else {
-			// Direct column (sanitize: only allow known fields)
-			switch field {
-			case "email", "name", "status":
-				column = field
-			default:
-				continue // skip unknown fields
-			}
-		}
-
-		switch op {
-		case "eq":
-			q = q.Where(fmt.Sprintf("%s = ?", column), val)
-		case "neq":
-			q = q.Where(fmt.Sprintf("%s != ?", column), val)
-		case "contains":
-			q = q.Where(fmt.Sprintf("%s ILIKE ?", column), fmt.Sprintf("%%%v%%", val))
-		case "starts_with":
-			q = q.Where(fmt.Sprintf("%s ILIKE ?", column), fmt.Sprintf("%v%%", val))
-		case "ends_with":
-			q = q.Where(fmt.Sprintf("%s ILIKE ?", column), fmt.Sprintf("%%%v", val))
-		case "gt":
-			q = q.Where(fmt.Sprintf("%s > ?", column), val)
-		case "lt":
-			q = q.Where(fmt.Sprintf("%s < ?", column), val)
-		case "in":
-			q = q.Where(fmt.Sprintf("%s IN ?", column), val)
-		}
-	}
-	return q
-}
-
-// isAlphanumericUnderscore returns true if s contains only [a-zA-Z0-9_-].
-func isAlphanumericUnderscore(s string) bool {
-	for _, c := range s {
-		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' && c != '-' {
-			return false
-		}
-	}
-	return true
+	return conditions.ApplyFilterRuleSQL(q, rules)
 }

@@ -29,6 +29,7 @@ import (
 
 	"github.com/goposta/posta/internal/metrics"
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/conditions"
 	"github.com/goposta/posta/internal/services/webhook"
 	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/jkaninda/logger"
@@ -510,24 +511,13 @@ func (e *Engine) evaluateJourneyConditions(conditions []models.FilterRule, nc *n
 // evaluateConditionSet AND-combines a condition set. in_segment rules (R-14)
 // resolve through segmentChecker (nil checker ⇒ they never match, so a store
 // without segment support degrades to closed); everything else delegates to
-// the shared EvaluateConditions evaluator whose operator support
-// filterRuleProblem mirrors for save-time validation. An empty set matches.
-func evaluateConditionSet(conditions []models.FilterRule, sub *models.Subscriber, listChecker func(uint) bool, segmentChecker func(uint) bool) bool {
-	pass := make([]models.FilterRule, 0, len(conditions))
-	for _, rule := range conditions {
-		if strings.TrimSpace(rule.Field) != FieldInSegment {
-			pass = append(pass, rule)
-			continue
-		}
-		id, ok := coerceUint(rule.Value)
-		if !ok || segmentChecker == nil {
-			return false
-		}
-		if !segmentChecker(id) {
-			return false
-		}
-	}
-	return EvaluateConditions(pass, sub, listChecker)
+// the shared evaluator whose operator support filterRuleProblem mirrors for
+// save-time validation. An empty set matches. SF-103: the implementation
+// moved verbatim to the conditions package (EvaluateFilterRuleSet) and this
+// wrapper keeps the automation package's own name (and its tests) working
+// unchanged.
+func evaluateConditionSet(ruleSet []models.FilterRule, sub *models.Subscriber, listChecker func(uint) bool, segmentChecker func(uint) bool) bool {
+	return conditions.EvaluateFilterRuleSet(ruleSet, sub, listChecker, segmentChecker)
 }
 
 // segmentMemberChecker returns the in_segment predicate bound to one scope and
@@ -553,18 +543,20 @@ func (e *Engine) subscriberInSegment(scope repositories.ResourceScope, segmentID
 	if seg.Condition.IsEmpty() {
 		return false
 	}
-	expr, args, err := repositories.BuildSegmentConditionSQL(seg.Condition)
+	// SF-103: the segment currency rides the unified evaluator — the same
+	// WhereSQL application the segment repository's audience resolution uses.
+	q, err := conditions.NewSegmentEvaluator(seg.Condition).WhereSQL(
+		repositories.ApplyScope(
+			e.db.Model(&models.Subscriber{}).
+				Where("id = ?", subscriberID),
+			scope,
+		),
+	)
 	if err != nil {
 		logger.Warn("automation: in_segment references a segment with an invalid condition", "segment_id", segmentID, "error", err)
 		return false
 	}
 	var count int64
-	q := repositories.ApplyScope(
-		e.db.Model(&models.Subscriber{}).
-			Where("id = ?", subscriberID).
-			Where(expr, args...),
-		scope,
-	)
 	if err := q.Count(&count).Error; err != nil {
 		logger.Warn("automation: in_segment membership query failed", "segment_id", segmentID, "subscriber_id", subscriberID, "error", err)
 		return false
