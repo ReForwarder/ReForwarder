@@ -1280,6 +1280,13 @@ func startSubmissionServer(
 	backend.SetMemoryGuard(memWatch)
 	// SF-17: the per-domain outbound size cap rides the same domain repo.
 	backend.SetDomainPolicy(repositories.NewDomainRepository(db))
+	// SF-16 (the ADR-001/002-gated slice): the per-SMTP-stage hook emitter —
+	// hook events fire asynchronously through the webhook machinery (never
+	// delaying the SMTP response) when the gate is on and a webhook
+	// subscribes to the smtp.* event vocabulary.
+	if cfg.SMTPStageHooksEnabled {
+		backend.SetStageHooks(mta.NewStageHookEmitter(newWebhookDispatcher(db, cfg)))
+	}
 	srv, err := mta.NewSubmissionServer(backend, mta.SubmissionConfig{
 		Host:           cfg.SubmissionHost,
 		Port:           cfg.SubmissionPort,

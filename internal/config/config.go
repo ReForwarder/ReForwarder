@@ -348,6 +348,14 @@ type Config struct {
 	// reports are never sent without an explicit identity.
 	MTASTSOrgDomain string
 
+	// SMTPStageHooksEnabled gates the SF-16 per-SMTP-stage hook emitter on
+	// the first-party SMTP listeners: hook events (smtp.connect/ehlo/mail/
+	// rcpt/data) fire asynchronously through the webhook machinery at the
+	// stages of sessions whose webhooks subscribe to the smtp.* event
+	// vocabulary. Default off (the ADR-001/002-gated slice posture): the
+	// stage dispatch adds a per-stage store lookup even without subscribers.
+	SMTPStageHooksEnabled bool
+
 	// DMARCReportOrgDomain is the generator identity for outbound DMARC
 	// aggregate reports (SF-25 send side): the RFC 7489 <org_name> in the
 	// report document and the local domain of the dmarc-report@ sender
@@ -825,6 +833,10 @@ func New() *Config {
 		// DMARC aggregate reports (SF-25 send side): gated by the generator
 		// identity; see the field comment for the gate semantics.
 		DMARCReportOrgDomain: strings.ToLower(strings.TrimSpace(goutils.Env("POSTA_DMARC_REPORT_ORG", ""))),
+
+		// SF-16 per-SMTP-stage hooks: off by default (the ADR-001/002-gated
+		// slice posture); see the field comment for the gate semantics.
+		SMTPStageHooksEnabled: goutils.EnvBool("POSTA_SMTP_STAGE_HOOKS_ENABLED", false),
 
 		// Auth-failure feedback reports (SF-26 send side): gated by the
 		// generator identity; see the field comment for the gate semantics.

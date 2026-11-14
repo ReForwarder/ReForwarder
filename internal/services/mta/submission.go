@@ -148,6 +148,9 @@ type SubmissionBackend struct {
 	// domainPolicy resolves the SF-17 per-domain outbound size cap
 	// (nil = no per-domain cap; the listener-wide cap still applies).
 	domainPolicy DomainPolicy
+	// stageHooks is the SF-16 per-SMTP-stage hook emitter (nil = the
+	// pre-SF-16 behavior byte-for-byte).
+	stageHooks *StageHookEmitter
 }
 
 // NewSubmissionBackend assembles the MSA backend. All three collaborators are
@@ -279,6 +282,10 @@ type submissionSession struct {
 	// requireTLS records the RFC 8689 REQUIRETLS MAIL FROM parameter (SF-02):
 	// the message must never cross a plaintext hop on delivery.
 	requireTLS bool
+	// hookSession carries the SF-16 per-stage hook state; the hook session is
+	// per CONNECTION (created in NewSession), so the transaction's stage
+	// fires ride the connection-wide session.
+	hookSession *StageHookSession
 }
 
 // MemoryGuard is the SF-108 pressure seam; *memorywatch.Watchdog satisfies
@@ -302,6 +309,12 @@ type DomainPolicy interface {
 // SetDomainPolicy attaches the per-domain size-cap resolver (SF-17).
 func (b *SubmissionBackend) SetDomainPolicy(p DomainPolicy) { b.domainPolicy = p }
 
+// SetStageHooks attaches the SF-16 per-SMTP-stage hook emitter: hook events
+// fire at connect/ehlo/mail/rcpt/data without delaying the SMTP response
+// (async dispatch through the webhook machinery). Nil = the pre-SF-16
+// behavior byte-for-byte.
+func (b *SubmissionBackend) SetStageHooks(h *StageHookEmitter) { b.stageHooks = h }
+
 func (b *SubmissionBackend) NewSession(c *gosmtp.Conn) (gosmtp.Session, error) {
 	// SF-108: backpressure at the front door under a memory-budget breach.
 	if b.memGuard != nil && b.memGuard.UnderPressure() {
@@ -316,12 +329,27 @@ func (b *SubmissionBackend) NewSession(c *gosmtp.Conn) (gosmtp.Session, error) {
 		logger.Warn("submission: rate-limited remote", "ip", ip)
 		return nil, &gosmtp.SMTPError{Code: 421, EnhancedCode: gosmtp.EnhancedCode{4, 7, 0}, Message: "rate limit exceeded"}
 	}
+	var hookSession *StageHookSession
+	if b.stageHooks != nil {
+		// SF-16: the connect stage fires here; the ehlo stage fires when the
+		// client's EHLO name is known (go-smtp exposes it post-EHLO).
+		hookSession = NewStageHookSession(b.stageHooks, 0, nil, ip)
+		if hn := c.Hostname(); hn != "" {
+			hookSession.Ehlo(hn)
+		}
+	}
 	guard := security.NewSessionGuard(b.sec, security.ParseRemoteIP(remote), b.securityPort, "smtp-submission")
 	guard.WatchConn(c)
 	if err := guard.GuardNewSession(); err != nil {
 		return nil, err
 	}
-	return &submissionSession{backend: b, remote: remote, guard: guard}, nil
+	session := &submissionSession{backend: b, remote: remote, guard: guard, hookSession: hookSession}
+	if hookSession != nil {
+		// The hook session attributes to the authenticated tenant once known;
+		// the connect/ehlo stages fire pre-auth without tenant attribution.
+		_ = hookSession
+	}
+	return session, nil
 }
 
 func (s *submissionSession) AuthMechanisms() []string { return []string{sasl.Plain} }
@@ -343,6 +371,10 @@ func (s *submissionSession) Auth(mech string) (sasl.Server, error) {
 		}
 		s.credential = cred
 		s.ownerEmail = ownerEmail
+		// SF-16: the stage hooks attribute to the authenticated tenant from
+		// here on (the pre-auth connect/ehlo stages fire without a scope).
+		ws := cred.WorkspaceID
+		s.hookSession.SetTenant(cred.UserID, &ws, username)
 		return nil
 	}), nil
 }
@@ -353,6 +385,9 @@ func (s *submissionSession) Reset() {
 	s.to = nil
 	s.deliverBy = 0
 	s.requireTLS = false
+	if s.hookSession != nil {
+		s.hookSession.ResetTransaction()
+	}
 }
 
 func (s *submissionSession) Logout() error {
@@ -374,6 +409,9 @@ func (s *submissionSession) Mail(from string, opts *gosmtp.MailOptions) error {
 		return &gosmtp.SMTPError{Code: 553, EnhancedCode: gosmtp.EnhancedCode{5, 1, 8}, Message: "invalid sender address"}
 	}
 	s.from = addr.Address
+	if s.hookSession != nil {
+		s.hookSession.Mail(s.from)
+	}
 
 	// SF-02: the RFC 8689 REQUIRETLS parameter rides MAIL FROM — the message
 	// must never be delivered over a plaintext hop.
@@ -426,6 +464,9 @@ func (s *submissionSession) Rcpt(to string, opts *gosmtp.RcptOptions) error {
 		}
 	}
 	s.to = append(s.to, addr.Address)
+	if s.hookSession != nil {
+		s.hookSession.Rcpt(addr.Address)
+	}
 	return nil
 }
 
@@ -450,6 +491,9 @@ func (s *submissionSession) Data(r io.Reader) error {
 	}
 	if int64(len(raw)) > limit {
 		return &gosmtp.SMTPError{Code: 552, EnhancedCode: gosmtp.EnhancedCode{5, 3, 4}, Message: "message size exceeds limit"}
+	}
+	if s.hookSession != nil {
+		s.hookSession.Data(int64(len(raw)))
 	}
 
 	parsed, perr := inbound.ParseRawEmail(raw)
