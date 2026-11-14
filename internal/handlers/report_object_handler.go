@@ -20,7 +20,12 @@
 package handlers
 
 import (
+	"fmt"
+	netmail "net/mail"
+	"strings"
+
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/audit"
 	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/jkaninda/okapi"
 )
@@ -47,6 +52,7 @@ type ReportObjectHandler struct {
 	dmarcSent  *repositories.DMARCSentReportRepository
 	arf        *repositories.ARFReportRepository
 	domainRepo *repositories.DomainRepository
+	audit      *audit.Logger
 }
 
 func NewReportObjectHandler(
@@ -56,6 +62,10 @@ func NewReportObjectHandler(
 ) *ReportObjectHandler {
 	return &ReportObjectHandler{dmarcSent: dmarcSent, arf: arf, domainRepo: domainRepo}
 }
+
+// SetAuditLogger wires the audit trail (the settings-change events). Nil
+// keeps the read surfaces audit-free, like the TLS-RPT handler's default.
+func (h *ReportObjectHandler) SetAuditLogger(a *audit.Logger) { h.audit = a }
 
 // domainNamesForScope resolves the scope's own domain names (verified or
 // not — mail claiming an unverified tenant domain also draws verdicts and
@@ -165,6 +175,124 @@ func (h *ReportObjectHandler) ListDMARCSentReports(c *okapi.Context, _ *ListDMAR
 		rows = []models.DMARCSentReport{}
 	}
 	return ok(c, DMARCSentReportsResponse{Reports: rows})
+}
+
+// DomainReportSettings is the SF-63 per-domain report-settings view/patch
+// body: where the SF-25 cron sends the aggregate reports about this domain,
+// how often, and how large. Empty/zero values keep the defaults (DNS-only
+// rua discovery, the daily cadence, no size cap).
+type DomainReportSettings struct {
+	// Rua is the tenant-specified rua endpoint list (comma-separated plain
+	// addresses or mailto: URIs). Non-empty replaces the DNS discovery for
+	// this domain.
+	Rua string `json:"rua" doc:"Optional rua endpoints (comma-separated addresses or mailto: URIs) for the RFC 7489 aggregate reports sent about this domain. Non-empty replaces the DNS-discovered endpoints."`
+	// IntervalHours is the minimum hours between aggregate reports about the
+	// domain. 0 = the deployment's daily cadence.
+	IntervalHours int `json:"report_interval_hours" doc:"Minimum hours between aggregate reports about this domain. 0 = the deployment's daily cadence; at most 8760 (one year)."`
+	// MaxBytes is the size policy: a report about the domain larger than this
+	// many bytes is dropped (best-effort reporting). 0 = unbounded; at most
+	// 16 MiB.
+	MaxBytes int `json:"report_max_bytes" doc:"Size policy: a report about this domain larger than this many bytes is dropped (best-effort reporting). 0 = unbounded; at most 16777216 (16 MiB)."`
+}
+
+// DomainReportSettingsPatch is the PATCH request: the domain id param plus
+// the settings body.
+type DomainReportSettingsPatch struct {
+	ID   uint                 `param:"id"`
+	Body DomainReportSettings `json:"body"`
+}
+
+// DomainReportSettingsEnvelope wraps the GET response with the domain.
+type DomainReportSettingsEnvelope struct {
+	Domain   string               `json:"domain"`
+	Settings DomainReportSettings `json:"settings"`
+}
+
+// normalizeSettings validates the SF-63 settings surface: each rua entry must
+// resolve to a mail address, the interval is 0..8760 hours, the size policy
+// is 0 or >= 1 KiB capped at 16 MiB.
+func normalizeSettings(in DomainReportSettings) (DomainReportSettings, error) {
+	if strings.TrimSpace(in.Rua) != "" {
+		for _, a := range strings.Split(in.Rua, ",") {
+			a = strings.TrimSpace(a)
+			if a == "" {
+				continue
+			}
+			addr := a
+			if strings.HasPrefix(strings.ToLower(addr), "mailto:") {
+				addr = addr[len("mailto:"):]
+			}
+			if bang := strings.IndexByte(addr, '!'); bang >= 0 {
+				addr = addr[:bang]
+			}
+			if _, err := netmail.ParseAddress(strings.TrimSpace(addr)); err != nil {
+				return in, fmt.Errorf("invalid rua address %q", a)
+			}
+		}
+	}
+	if in.IntervalHours < 0 || in.IntervalHours > 8760 {
+		return in, fmt.Errorf("report_interval_hours is outside 0..8760")
+	}
+	if in.MaxBytes < 0 || (in.MaxBytes > 0 && in.MaxBytes < 1024) || in.MaxBytes > 16*1024*1024 {
+		return in, fmt.Errorf("report_max_bytes is outside 0 or 1024..16777216")
+	}
+	return in, nil
+}
+
+// GetReportSettings returns the domain's SF-63 report settings (the R-07
+// health display feeds from the same columns). Workspace-scoped like every
+// domain endpoint: a foreign domain answers 404.
+func (h *ReportObjectHandler) GetReportSettings(c *okapi.Context, req *DomainSentReportsRequest) error {
+	d, err := h.resolveDomain(c, req.ID)
+	if err != nil {
+		return nil // 404 already written
+	}
+	return ok(c, DomainReportSettingsEnvelope{
+		Domain: d.Domain,
+		Settings: DomainReportSettings{
+			Rua:           d.ReportRua,
+			IntervalHours: d.ReportIntervalHours,
+			MaxBytes:      d.ReportMaxBytes,
+		},
+	})
+}
+
+// SetReportSettings patches the domain's SF-63 report settings. Owner-scoped
+// (requireEdit + the ownership 404), verified-domain gated (the DNS-control
+// proof makes the tenant the authority over reports about its own domain),
+// audit-logged. Invalid settings answer 400 without touching the row.
+func (h *ReportObjectHandler) SetReportSettings(c *okapi.Context, req *DomainReportSettingsPatch) error {
+	if err := requireEdit(c); err != nil {
+		return c.AbortForbidden("insufficient workspace permissions", err)
+	}
+	settings, err := normalizeSettings(req.Body)
+	if err != nil {
+		return c.AbortBadRequest(err.Error())
+	}
+	d, derr := h.domainRepo.FindByID(req.ID)
+	if derr != nil || !ownsResource(c, d.UserID, d.WorkspaceID) {
+		return c.AbortNotFound("domain not found")
+	}
+	if !d.OwnershipVerified {
+		return c.AbortBadRequest("report settings require a verified domain")
+	}
+	changed := d.ReportRua != settings.Rua || d.ReportIntervalHours != settings.IntervalHours || d.ReportMaxBytes != settings.MaxBytes
+	if changed {
+		d.ReportRua = settings.Rua
+		d.ReportIntervalHours = settings.IntervalHours
+		d.ReportMaxBytes = settings.MaxBytes
+		if err := h.domainRepo.Update(d); err != nil {
+			return c.AbortInternalServerError("failed to update the report settings")
+		}
+		if h.audit != nil {
+			h.audit.LogCtx(c, "domain.report_settings_changed",
+				"Domain report settings changed", map[string]any{
+					"domain_id": d.ID, "domain": d.Domain,
+					"rua": settings.Rua, "interval_hours": settings.IntervalHours, "max_bytes": settings.MaxBytes,
+				})
+		}
+	}
+	return ok(c, okapi.M{"domain": d.Domain, "settings": settings, "changed": changed})
 }
 
 // AdminARFReportsResponse is the deployment-wide ARF report list.

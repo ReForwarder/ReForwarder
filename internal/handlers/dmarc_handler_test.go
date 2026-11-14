@@ -67,7 +67,10 @@ var dmrColumns = map[string][]string{
 	"domains": {"id", "user_id", "workspace_id", "domain", "ownership_verified", "spf_verified",
 		"dkim_verified", "dmarc_verified", "verification_token", "created_at",
 		"delivery_mode", "outbound_bind_ip", "max_msgs_per_connection", "hourly_budget", "pool_id",
-		"mta_sts_mode", "max_message_size"},
+		"mta_sts_mode", "max_message_size",
+		// SF-63 additive columns (domains.report_*): Save() on the model
+		// emits them in every UPDATE's SET list, like mta_sts_mode.
+		"report_rua", "report_interval_hours", "report_max_bytes"},
 	"dmarc_reports": {"id", "user_id", "workspace_id", "domain_id", "inbound_id", "domain",
 		"reporter", "reporter_email", "report_id", "source_ip", "window_start", "window_end",
 		"count", "dkim_aligned", "spf_aligned", "disposition", "header_from", "created_at"},

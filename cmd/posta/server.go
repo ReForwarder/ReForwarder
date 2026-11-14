@@ -404,13 +404,33 @@ func runServer(cli *okapicli.CLI) {
 			// mailto rua endpoints read from each reported domain's live
 			// _dmarc DNS record.
 			if res.cronManager != nil && cfg.DMARCReportOrgDomain != "" {
-				res.cronManager.Register(jobs.NewDMARCReportJob(
+				dmarcJob := jobs.NewDMARCReportJob(
 					res.db,
 					dmarc.NewAggregator(res.db),
 					newDMARCReportSender(emailSvc, cfg, repositories.NewDMARCSentReportRepository(res.db)),
 					"dmarc-report@"+cfg.DMARCReportOrgDomain,
 					cfg.DMARCReportOrgDomain,
-				))
+				)
+				// SF-63: the ownership-verified domain rows' report settings
+				// govern the dispatch (rua override, interval gate, size
+				// policy); the interval gate reads the SF-57 sent-report
+				// records.
+				dmarcJob.SetDomainSettings(func(ctx context.Context, domain string) (*dmarc.DomainSettings, error) {
+					d, err := repositories.NewDomainRepository(res.db).FindReportSettingsByName(domain)
+					if err != nil {
+						return nil, err
+					}
+					return &dmarc.DomainSettings{
+						Rua:           d.ReportRua,
+						IntervalHours: d.ReportIntervalHours,
+						MaxBytes:      d.ReportMaxBytes,
+					}, nil
+				})
+				sentReportRepo := repositories.NewDMARCSentReportRepository(res.db)
+				dmarcJob.SetLastSentAt(func(ctx context.Context, domain string) (*time.Time, error) {
+					return sentReportRepo.LatestSentAt(ctx, domain)
+				})
+				res.cronManager.Register(dmarcJob)
 			}
 
 			// SF-26 send side (2026-11-14): the daily RFC 5965/6591

@@ -77,6 +77,21 @@ type Domain struct {
 	// enforced at the assignment endpoint, not here.
 	PoolID *uint `json:"pool_id,omitempty" gorm:"index"`
 
+	// SF-63 per-domain report settings: where the SF-25 send-side cron sends
+	// the RFC 7489 aggregate reports ABOUT this domain, how often, and how
+	// large. Empty/zero values keep the pre-SF-63 behavior: rua discovered
+	// from the domain's live _dmarc DNS record, the deployment's daily
+	// cadence, no size cap. The settings are consumed only when the domain
+	// row is ownership-verified (the DNS-control proof that makes the tenant
+	// the authority over reports about its own domain).
+	ReportRua string `json:"report_rua,omitempty" gorm:"type:text;default:''"`
+	// ReportIntervalHours is the minimum hours between aggregate reports
+	// about this domain. 0 = the deployment's daily cadence.
+	ReportIntervalHours int `json:"report_interval_hours,omitempty" gorm:"default:0"`
+	// ReportMaxBytes is the size policy: a report about this domain larger
+	// than this many bytes is dropped (best-effort reporting). 0 = unbounded.
+	ReportMaxBytes int `json:"report_max_bytes,omitempty" gorm:"default:0"`
+
 	// MTASTSMode publishes the domain's MTA-STS policy mode (SF-29, OB-6 W4,
 	// ADR-007 §5): '' (default; no policy served) | 'none' | 'testing' |
 	// 'enforce'. The HTTPS policy path (mta-sts.<domain>/.well-known/

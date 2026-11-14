@@ -163,7 +163,20 @@ type HealthReport struct {
 	Reputation *reputation.DomainReport `json:"reputation,omitempty"`
 	Pool       *reputation.PoolView     `json:"pool,omitempty"`
 	Warmup     *reputation.WarmupView   `json:"warmup,omitempty"`
-	CheckedAt  time.Time                `json:"checked_at"`
+	// ReportSettings is the domain's SF-63 per-domain report-settings surface
+	// (rua/interval/size policy for the aggregate reports sent about the
+	// domain). Non-nil whenever the domain row is present — the zero value
+	// means the DNS-only defaults.
+	ReportSettings *ReportSettingsView `json:"report_settings,omitempty"`
+	CheckedAt      time.Time           `json:"checked_at"`
+}
+
+// ReportSettingsView is the R-07 display of the SF-63 per-domain report
+// settings.
+type ReportSettingsView struct {
+	Rua           string `json:"rua"`
+	IntervalHours int    `json:"interval_hours"`
+	MaxBytes      int    `json:"max_bytes"`
 }
 
 // PTR match verdicts for PTRGuidance.Match.
@@ -223,8 +236,15 @@ func (s *HealthService) report(d *models.Domain, window time.Duration, live *Ver
 		DomainID:          d.ID,
 		Domain:            d.Domain,
 		OwnershipVerified: ownership,
-		CheckedAt:         s.now(),
-		Records:           records,
+		// SF-63: the per-domain report settings ride every health report (the
+		// columns live on the domain row the caller handed in).
+		ReportSettings: &ReportSettingsView{
+			Rua:           d.ReportRua,
+			IntervalHours: d.ReportIntervalHours,
+			MaxBytes:      d.ReportMaxBytes,
+		},
+		CheckedAt: s.now(),
+		Records:   records,
 		// Guidance is attached only to a failing check: a passing one needs no
 		// instruction.
 		SPF:     checkResult(spfOK, spfRecord, spfGuidance(records.SPF)),

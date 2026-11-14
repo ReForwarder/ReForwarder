@@ -350,6 +350,139 @@ func TestDMARCReportJobInertWithoutIdentity(t *testing.T) {
 	}
 }
 
+// ---------- SF-63: the per-domain report settings consumption ----------
+
+// A reported domain that is an ownership-verified tenant domain with report
+// settings gets its reports addressed to the SETTINGS rua (replacing the DNS
+// discovery), gated by the interval (skipped while a report within the
+// interval is already on record), and dropped when the document exceeds the
+// size policy.
+func TestDMARCReportJobConsumesDomainSettings(t *testing.T) {
+	start := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+	state := newDMJobState()
+	state.seed(map[string]any{
+		"created_at": start.Add(5 * time.Hour), "client_ip": "192.0.2.10",
+		"dmarc_result": "pass", "dmarc_policy_domain": "example.com",
+		"dmarc_disposition": "none", "spf_result": "pass", "spf_domain": "mail.example.com",
+		"dkim_result": "pass", "dkim_domain": "example.com", "dkim_selector": "s1",
+	})
+	sender := &recordingDMARCSender{}
+	job := NewDMARCReportJob(dmJobGorm(t, state), dmarc.NewAggregator(dmJobGorm(t, state)), sender, "dmarc-report@reporter.example", "reporter.example")
+	// The DNS record publishes the deployment-facing rua; the domain owner's
+	// settings override it.
+	job.SetPolicyLookup((&fakeDMARCPolicy{records: map[string]*verify.DMARCPolicy{
+		"example.com": {P: "reject", ADKIM: "r", ASPF: "r", PCT: 100,
+			RUA: []string{"mailto:dns-rua@example.com"}},
+	}}).lookup)
+	job.SetDomainSettings(func(ctx context.Context, domain string) (*dmarc.DomainSettings, error) {
+		if domain == "example.com" {
+			return &dmarc.DomainSettings{Rua: "owner@example.com", IntervalHours: 0, MaxBytes: 0}, nil
+		}
+		return nil, errors.New("no settings")
+	})
+	job.SetLastSentAt(func(ctx context.Context, domain string) (*time.Time, error) {
+		return nil, nil // nothing sent yet
+	})
+	job.SetNow(func() time.Time { return start.Add(30 * time.Hour) })
+
+	if err := job.Run(context.Background(), nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	sent := sender.captured()
+	if len(sent) != 1 {
+		t.Fatalf("reports sent = %d, want 1", len(sent))
+	}
+	if sent[0].To[0] != "owner@example.com" {
+		t.Fatalf("rua = %v, want the settings override", sent[0].To)
+	}
+}
+
+// The interval gate: a sent report within the settings' interval skips the
+// domain this pass.
+func TestDMARCReportJobIntervalGateSkipsRecentDomain(t *testing.T) {
+	start := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+	state := newDMJobState()
+	state.seed(map[string]any{
+		"created_at": start.Add(5 * time.Hour), "client_ip": "192.0.2.10",
+		"dmarc_result": "pass", "dmarc_policy_domain": "example.com",
+		"dmarc_disposition": "none", "spf_result": "pass", "spf_domain": "mail.example.com",
+	})
+	sender := &recordingDMARCSender{}
+	job := NewDMARCReportJob(dmJobGorm(t, state), dmarc.NewAggregator(dmJobGorm(t, state)), sender, "dmarc-report@reporter.example", "reporter.example")
+	job.SetPolicyLookup((&fakeDMARCPolicy{records: map[string]*verify.DMARCPolicy{
+		"example.com": {P: "reject", ADKIM: "r", ASPF: "r", PCT: 100,
+			RUA: []string{"mailto:agg@example.com"}},
+	}}).lookup)
+	job.SetDomainSettings(func(ctx context.Context, domain string) (*dmarc.DomainSettings, error) {
+		return &dmarc.DomainSettings{Rua: "owner@example.com", IntervalHours: 48}, nil
+	})
+	// A report was sent 6 hours ago — inside the 48-hour interval.
+	now := start.Add(30 * time.Hour)
+	job.SetLastSentAt(func(ctx context.Context, domain string) (*time.Time, error) {
+		t6 := now.Add(-6 * time.Hour)
+		return &t6, nil
+	})
+	job.SetNow(func() time.Time { return now })
+
+	if err := job.Run(context.Background(), nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := sender.captured(); len(got) != 0 {
+		t.Fatalf("reports sent = %d, want 0 (interval not elapsed)", len(got))
+	}
+
+	// A domain WITHOUT the interval setting reports on the daily cadence.
+	job2 := NewDMARCReportJob(dmJobGorm(t, state), dmarc.NewAggregator(dmJobGorm(t, state)), sender, "dmarc-report@reporter.example", "reporter.example")
+	job2.SetPolicyLookup((&fakeDMARCPolicy{records: map[string]*verify.DMARCPolicy{
+		"example.com": {P: "reject", ADKIM: "r", ASPF: "r", PCT: 100,
+			RUA: []string{"mailto:agg@example.com"}},
+	}}).lookup)
+	job2.SetLastSentAt(func(ctx context.Context, domain string) (*time.Time, error) {
+		t6 := now.Add(-6 * time.Hour)
+		return &t6, nil
+	})
+	job2.SetNow(func() time.Time { return now })
+	if err := job2.Run(context.Background(), nil); err != nil {
+		t.Fatalf("Run (no settings): %v", err)
+	}
+	if got := sender.captured(); len(got) != 1 {
+		t.Fatalf("reports sent without settings = %d, want 1 (daily cadence)", len(got))
+	}
+}
+
+// The size policy: a report about the domain larger than the configured cap
+// is dropped (best-effort reporting; never an oversized delivery).
+func TestDMARCReportJobSizePolicyDropsOversizedReport(t *testing.T) {
+	start := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+	state := newDMJobState()
+	state.seed(map[string]any{
+		"created_at": start.Add(5 * time.Hour), "client_ip": "192.0.2.10",
+		"dmarc_result": "pass", "dmarc_policy_domain": "example.com",
+		"dmarc_disposition": "none", "spf_result": "pass", "spf_domain": "mail.example.com",
+	})
+	sender := &recordingDMARCSender{}
+	job := NewDMARCReportJob(dmJobGorm(t, state), dmarc.NewAggregator(dmJobGorm(t, state)), sender, "dmarc-report@reporter.example", "reporter.example")
+	job.SetPolicyLookup((&fakeDMARCPolicy{records: map[string]*verify.DMARCPolicy{
+		"example.com": {P: "reject", ADKIM: "r", ASPF: "r", PCT: 100,
+			RUA: []string{"mailto:agg@example.com"}},
+	}}).lookup)
+	job.SetDomainSettings(func(ctx context.Context, domain string) (*dmarc.DomainSettings, error) {
+		// A 1-byte size cap: the aggregate document (well over one byte)
+		// exceeds it, exercising the drop path directly (the settings seam
+		// carries the domain row's stored value; the API validation's 1 KiB
+		// floor applies at the handler boundary, not here).
+		return &dmarc.DomainSettings{MaxBytes: 1}, nil
+	})
+	job.SetNow(func() time.Time { return start.Add(30 * time.Hour) })
+
+	if err := job.Run(context.Background(), nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := sender.captured(); len(got) != 0 {
+		t.Fatalf("reports sent = %d, want 0 (size policy)", len(got))
+	}
+}
+
 // A send failure is logged and dropped — the pass completes without error
 // (best-effort aggregates, no retry queue).
 func TestDMARCReportJobSendFailureIsLoggedNotFatal(t *testing.T) {

@@ -160,6 +160,22 @@ func (r *DomainRepository) CountAll() (total, verified int64) {
 	return
 }
 
+// FindReportSettingsByName returns the first ownership-verified domain row
+// with the given name — the SF-63 report-settings authority. Only verified
+// rows qualify: the DNS-control proof makes the tenant the authority over
+// reports about its own domain, and an unverified claimant must never
+// redirect them.
+func (r *DomainRepository) FindReportSettingsByName(domainName string) (*models.Domain, error) {
+	var d models.Domain
+	if err := r.db.
+		Where("domain = ? AND ownership_verified = ?", strings.ToLower(strings.TrimSpace(domainName)), true).
+		Order("id ASC").
+		First(&d).Error; err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
 func (r *DomainRepository) FindVerifiedByName(domainName string) (*models.Domain, error) {
 	var d models.Domain
 	if err := r.db.Where("LOWER(domain) = LOWER(?) AND ownership_verified = ?", domainName, true).

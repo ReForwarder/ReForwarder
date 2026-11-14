@@ -21,6 +21,8 @@ package repositories
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	"github.com/goposta/posta/internal/models"
 	"gorm.io/gorm"
@@ -61,6 +63,24 @@ func (r *DMARCSentReportRepository) FindRecentByDomains(ctx context.Context, nam
 		Limit(limit).
 		Find(&rows).Error
 	return rows, err
+}
+
+// LatestSentAt returns the newest sent (or attempted) report timestamp for
+// the reported domain — the SF-63 interval gate's reader. nil = nothing sent
+// for the domain yet.
+func (r *DMARCSentReportRepository) LatestSentAt(ctx context.Context, domain string) (*time.Time, error) {
+	var row models.DMARCSentReport
+	err := r.db.WithContext(ctx).
+		Where("reported_domain = ?", domain).
+		Order("created_at DESC").
+		First(&row).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &row.CreatedAt, nil
 }
 
 // FindAll returns the newest sent reports deployment-wide (the admin

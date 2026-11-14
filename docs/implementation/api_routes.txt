@@ -179,6 +179,7 @@ GET    /api/v1/workspaces/current/domains/{id}/dmarc
 GET    /api/v1/workspaces/current/domains/{id}/dns-drift
 GET    /api/v1/workspaces/current/domains/{id}/dns-provider
 GET    /api/v1/workspaces/current/domains/{id}/health
+GET    /api/v1/workspaces/current/domains/{id}/report-settings
 GET    /api/v1/workspaces/current/domains/{id}/reputation
 GET    /api/v1/workspaces/current/domains/{id}/sent-reports
 GET    /api/v1/workspaces/current/domains/{id}/signing-keys
@@ -262,6 +263,7 @@ PATCH  /api/v1/mail/folders/{id}
 PATCH  /api/v1/workspaces/current/domains/{id}/delivery-mode
 PATCH  /api/v1/workspaces/current/domains/{id}/max-message-size
 PATCH  /api/v1/workspaces/current/domains/{id}/mta-sts
+PATCH  /api/v1/workspaces/current/domains/{id}/report-settings
 POST   /api/v1/admin/announcements
 POST   /api/v1/admin/domains/{id}/verify
 POST   /api/v1/admin/impersonate/exit

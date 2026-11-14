@@ -52,10 +52,17 @@ const TypeDMARCReport = "cron:dmarc-report"
 
 // DMARCReportJob is the daily outbound DMARC aggregate report pass.
 type DMARCReportJob struct {
-	db        *gorm.DB
-	agg       *dmarc.Aggregator
+	db           *gorm.DB
+	agg          *dmarc.Aggregator
 	policyLookup func(ctx context.Context, domain string) (string, *verify.DMARCPolicy, error)
-	sender    dmarc.Sender
+	// settingsLookup is the SF-63 per-domain report-settings seam
+	// (services/dmarc.DomainSettings read from the ownership-verified domain
+	// row). nil = no settings surface; the DNS-only discovery stands.
+	settingsLookup func(ctx context.Context, domain string) (*dmarc.DomainSettings, error)
+	// lastSentAt is the SF-63 interval-gate seam: the newest created_at of a
+	// sent aggregate for the domain. nil = the interval gate is off.
+	lastSentAt func(ctx context.Context, domain string) (*time.Time, error)
+	sender     dmarc.Sender
 	// fromAddress is the generator address (dmarc-report@<org domain>);
 	// empty disables the job (nothing is ever sent without a usable
 	// generator).
@@ -85,6 +92,24 @@ func NewDMARCReportJob(db *gorm.DB, agg *dmarc.Aggregator, sender dmarc.Sender, 
 func (j *DMARCReportJob) SetPolicyLookup(fn func(ctx context.Context, domain string) (string, *verify.DMARCPolicy, error)) {
 	if fn != nil {
 		j.policyLookup = fn
+	}
+}
+
+// SetDomainSettings wires the SF-63 per-domain settings seam. When a
+// reported domain is an ownership-verified tenant domain with settings, they
+// govern the report: the tenant's rua list replaces the DNS discovery, the
+// interval gates the send, and the size policy drops oversized documents.
+func (j *DMARCReportJob) SetDomainSettings(fn func(ctx context.Context, domain string) (*dmarc.DomainSettings, error)) {
+	if fn != nil {
+		j.settingsLookup = fn
+	}
+}
+
+// SetLastSentAt wires the interval-gate reader (the newest sent-report
+// timestamp per domain from the SF-57 admin-object table).
+func (j *DMARCReportJob) SetLastSentAt(fn func(ctx context.Context, domain string) (*time.Time, error)) {
+	if fn != nil {
+		j.lastSentAt = fn
 	}
 }
 
@@ -142,7 +167,36 @@ func (j *DMARCReportJob) Run(ctx context.Context, _ *asynq.Client) error {
 			logger.Debug("dmarc: reported domain publishes no usable DMARC policy; skipping", "domain", agg.PolicyDomain, "error", err)
 			continue
 		}
+		// SF-63: the reported domain's per-domain settings (ownership-verified
+		// tenant rows only) govern where the report lands, how often, and how
+		// large.
+		var settings *dmarc.DomainSettings
+		if j.settingsLookup != nil {
+			if s, serr := j.settingsLookup(ctx, recordDomain); serr == nil {
+				settings = s
+			}
+		}
+		// The interval gate: a domain whose settings request a slower cadence
+		// is skipped while a report within the interval is already on record.
+		if settings != nil && settings.IntervalHours > 0 && j.lastSentAt != nil {
+			if last, lerr := j.lastSentAt(ctx, recordDomain); lerr == nil && last != nil {
+				due := last.Add(time.Duration(settings.IntervalHours) * time.Hour)
+				if due.After(end) {
+					logger.Debug("dmarc: report interval not elapsed; skipping", "domain", recordDomain, "due", due.UTC().Format(time.RFC3339))
+					continue
+				}
+			}
+		}
 		ruas := dmarc.MailtoRuas(policy)
+		if settings != nil {
+			if override := settings.RuaList(); len(override) > 0 {
+				// The domain owner's explicit rua list replaces the
+				// DNS-discovered endpoints — RFC 7489's rua authority is the
+				// domain owner, and the DNS-control proof makes the tenant
+				// that owner.
+				ruas = override
+			}
+		}
 		if len(ruas) == 0 {
 			logger.Debug("dmarc: reported domain publishes no mailto rua; skipping", "domain", recordDomain)
 			continue
@@ -155,6 +209,12 @@ func (j *DMARCReportJob) Run(ctx context.Context, _ *asynq.Client) error {
 		doc, err := dmarc.BuildAggregateReport(j.orgName, j.fromAddress, start, end, reportID, recordDomain, policy, records)
 		if err != nil {
 			logger.Error("dmarc: report build failed", "domain", recordDomain, "error", err)
+			continue
+		}
+		// SF-63: the size policy — an oversized report about the domain is
+		// dropped (best-effort reporting; the rua size-directive analog).
+		if settings != nil && settings.MaxBytes > 0 && len(doc) > settings.MaxBytes {
+			logger.Warn("dmarc: report exceeds the domain's size policy; dropping", "domain", recordDomain, "size", len(doc), "max_bytes", settings.MaxBytes)
 			continue
 		}
 		req := &dmarc.OutboundReportRequest{
