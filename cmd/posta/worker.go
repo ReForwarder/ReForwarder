@@ -304,7 +304,7 @@ func runWorker() error {
 		// parse worker covers SMTP-ingested mail, the process handler covers
 		// webhook-ingested mail. One shared step instance; nil (disabled)
 		// keeps the pre-filter behavior on both.
-		inboundFilter := newInboundFilter(db, cfg, parseSvc, blobStore, newWebhookDispatcher(db, cfg))
+		inboundFilter := newInboundFilter(db, cfg, parseSvc, blobStore, newWebhookDispatcher(db, cfg), nil)
 		inboundHandler.SetFilter(inboundFilter)
 		parseHandler.SetFilter(inboundFilter)
 		mux.HandleFunc(worker.TypeInboundParse, parseHandler.ProcessTask)

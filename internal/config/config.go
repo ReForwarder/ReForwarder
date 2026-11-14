@@ -275,6 +275,22 @@ type Config struct {
 	SpamBlockedExt   string // POSTA_SPAM_ATTACHMENT_BLOCK_EXT
 	SpamBlockedHashes string // POSTA_SPAM_ATTACHMENT_BLOCK_SHA256
 
+	// SF-42 external-dependency surfaces (the ADR-006 amendment), all
+	// config-gated (empty = disabled) and fail-open:
+	//   SpamCheckURL: the distributed-checksum lookup endpoint (the Pyzor-
+	//     pattern HTTP client; JSON {"count","wl_count"}).
+	//   SpamCheckTimeoutSecs: the lookup timeout (default 3).
+	//   SpamRuleFeedURL: the external rule-feed document URL.
+	//   SpamRuleFeedSecret: the HMAC-SHA256 shared secret verifying the feed
+	//     (header X-Rule-Feed-Signature: sha256=<hex> over the raw body).
+	//   SpamRuleFeedIntervalMins: the refresh cadence (default 60; the
+	//     refresh cron).
+	SpamCheckURL           string
+	SpamCheckTimeoutSecs   int
+	SpamRuleFeedURL        string
+	SpamRuleFeedSecret     string
+	SpamRuleFeedIntervalMins int
+
 	// Web form message settings
 	MessagesEnabled           bool
 	MessagesMaxBodyBytes      int64
@@ -805,6 +821,11 @@ func New() *Config {
 		ClamAVFailMode:          goutils.Env("POSTA_CLAMAV_FAIL_MODE", "open"),
 		SpamBlockedExt:    goutils.Env("POSTA_SPAM_ATTACHMENT_BLOCK_EXT", ""),
 		SpamBlockedHashes: goutils.Env("POSTA_SPAM_ATTACHMENT_BLOCK_SHA256", ""),
+		SpamCheckURL:              goutils.Env("POSTA_SPAM_CHECK_URL", ""),
+		SpamCheckTimeoutSecs:      goutils.EnvInt("POSTA_SPAM_CHECK_TIMEOUT_SECS", 3),
+		SpamRuleFeedURL:           goutils.Env("POSTA_SPAM_RULE_FEED_URL", ""),
+		SpamRuleFeedSecret:        goutils.Env("POSTA_SPAM_RULE_FEED_SECRET", ""),
+		SpamRuleFeedIntervalMins:  goutils.EnvInt("POSTA_SPAM_RULE_FEED_INTERVAL_MINS", 60),
 
 		MessagesEnabled:           goutils.EnvBool("POSTA_MESSAGES_ENABLED", false),
 		MessagesMaxBodyBytes:      int64(goutils.EnvInt("POSTA_MESSAGES_MAX_BODY_BYTES", 65536)),

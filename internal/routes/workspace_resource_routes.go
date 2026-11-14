@@ -1202,6 +1202,54 @@ func (r *Router) workspaceResourceRoutes() []okapi.RouteDefinition {
 				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 			},
 		},
+		// SF-42 (the ADR-006 amendment): the per-domain spam-trap seeding —
+		// recipients matching a seeded trap quarantine instantly in the
+		// ingest filter.
+		{
+			Method:      http.MethodGet,
+			Path:        pathDomainByID + "/spam-traps",
+			Handler:     okapi.H(r.h.spamTraps.ListSpamTraps),
+			Group:       opsGroup,
+			Summary:     "List spam traps",
+			Description: "The domain's seeded spam-trap addresses (SF-42): recipients matching one quarantine instantly in the ingest filter.",
+			Request:     &handlers.SpamTrapListRequest{},
+			Response:    &dto.Response[handlers.SpamTrapListResponse]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Domain ID"),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodPost,
+			Path:        pathDomainByID + "/spam-traps",
+			Handler:     okapi.H(r.h.spamTraps.CreateSpamTrap),
+			Group:       opsGroup,
+			Summary:     "Seed a spam trap",
+			Description: "Seeds one trap address (local_part @ the domain) — mail addressed to it quarantines instantly on ingest.",
+			Request:     &handlers.SpamTrapCreateRequest{},
+			Response:    &dto.Response[models.SpamTrap]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Domain ID"),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodDelete,
+			Path:        pathDomainByID + "/spam-traps/{tid:int}",
+			Handler:     okapi.H(r.h.spamTraps.DeleteSpamTrap),
+			Group:       opsGroup,
+			Summary:     "Delete a spam trap",
+			Description: "Removes one of the domain's seeded traps (owner-scoped; a foreign trap reads as missing).",
+			Request:     &handlers.SpamTrapIDRequest{},
+			Response:    &dto.Response[dto.MessageData]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Domain ID"),
+				okapi.DocPathParam("tid", "integer", "Trap ID"),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
 		{
 			Method:      http.MethodGet,
 			Path:        pathDomainByID + "/sent-reports",

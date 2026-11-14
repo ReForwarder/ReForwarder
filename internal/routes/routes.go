@@ -140,6 +140,9 @@ type routerHandlers struct {
 	// transportPolicies serves the SF-50 transport-policy admin surface
 	// (the ADR-001 amendment's per-domain policy CRUD).
 	transportPolicies *handlers.TransportPolicyHandler
+	// spamTraps serves the SF-42 spam-trap admin surface (the ADR-006
+	// amendment's per-domain trap seeding).
+	spamTraps *handlers.SpamTrapHandler
 	// mtaStsPolicy serves the MTA-STS policy hosting path (SF-29, OB-6 W4).
 	mtaStsPolicy *handlers.MTASTSPolicyHandler
 	bounce               *handlers.BounceHandler
@@ -404,6 +407,7 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 			dmarc:            handlers.NewDMARCReportHandler(repositories.NewDMARCReportRepository(db), domainRepo, auditLogger),
 			reportObjects:    handlers.NewReportObjectHandler(repositories.NewDMARCSentReportRepository(db), repositories.NewARFReportRepository(db), domainRepo),
 			transportPolicies: handlers.NewTransportPolicyHandler(repositories.NewTransportPolicyRepository(db), domainRepo),
+			spamTraps:         handlers.NewSpamTrapHandler(repositories.NewSpamTrapRepository(db), domainRepo),
 			tlsrpt:           handlers.NewTLSRPTHandler(repositories.NewTLSRPTRepository(db), domainRepo, auditLogger),
 			mtaStsPolicy:     handlers.NewMTASTSPolicyHandler(domainRepo),
 			adminDomain:      handlers.NewAdminDomainHandler(db, domainRepo, auditLogger),

@@ -323,7 +323,7 @@ func runServer(cli *okapicli.CLI) {
 				if cfg.EmbeddedWorker {
 					// SF-109: keep the worker handle so shutdownServer can drain
 					// in-flight task claims before the producer/Redis close.
-					ew, ewErr := startEmbeddedWorker(res.db, cfg, res.blobStore, notifier, inboundBus)
+					ew, ewErr := startEmbeddedWorker(res.db, cfg, res.blobStore, notifier, inboundBus, res.cronManager)
 					if ewErr != nil {
 						logger.Error("failed to start embedded worker", "error", ewErr)
 					} else {
@@ -761,7 +761,7 @@ func splitList(v string) []string {
 // platform settings (spam_score_quarantine / spam_score_reject). Returns nil
 // when POSTA_SPAM_FILTER_ENABLED=false — every handler then keeps the
 // pre-filter behavior.
-func newInboundFilter(db *gorm.DB, cfg *config.Config, svc *inbound.Service, blobStore blob.Store, dispatcher *webhook.Dispatcher) *worker.InboundFilter {
+func newInboundFilter(db *gorm.DB, cfg *config.Config, svc *inbound.Service, blobStore blob.Store, dispatcher *webhook.Dispatcher, cronManager *cronpkg.Manager) *worker.InboundFilter {
 	if !cfg.SpamFilterEnabled {
 		return nil
 	}
@@ -777,7 +777,14 @@ func newInboundFilter(db *gorm.DB, cfg *config.Config, svc *inbound.Service, blo
 		Timeout:  cfg.ClamAVTimeout,
 		FailMode: spamfilter.ClamFailModeFromEnv(cfg.ClamAVFailMode),
 	})
-	return worker.NewInboundFilter(
+	// SF-42 (the ADR-006 amendment): the approved external-dependency
+	// surfaces — the distributed-checksum client and the external rule-feed
+	// snapshot ride the scorer; both config-gated and fail-open.
+	scorer.SetChecksumChecker(spamfilter.NewCheckClient(cfg.SpamCheckURL,
+		time.Duration(cfg.SpamCheckTimeoutSecs)*time.Second))
+	ruleFeed := spamfilter.NewRuleFeed(cfg.SpamRuleFeedURL, cfg.SpamRuleFeedSecret)
+	scorer.SetRuleFeed(ruleFeed)
+	filter := worker.NewInboundFilter(
 		repositories.NewInboundEmailRepository(db),
 		svc,
 		blobStore,
@@ -794,6 +801,10 @@ func newInboundFilter(db *gorm.DB, cfg *config.Config, svc *inbound.Service, blo
 			BlockedHashes:     splitList(cfg.SpamBlockedHashes),
 		},
 	)
+	// SF-42: the spam-trap gate — recipients matching a seeded trap
+	// quarantine instantly (fail-open on lookup errors).
+	filter.SetTrapChecker(repositories.NewSpamTrapRepository(db))
+	return filter
 }
 
 // newConnByteBudget arms the SF-43 per-connection aggregate byte budget from
@@ -1656,7 +1667,8 @@ func startEmbeddedWorker(db *gorm.DB,
 	cfg *config.Config,
 	blobStore blob.Store,
 	notifier *notification.Service,
-	bus *eventbus.EventBus) (*asynq.Server, error) {
+	bus *eventbus.EventBus,
+	cronManager *cronpkg.Manager) (*asynq.Server, error) {
 	dispatcher := newWebhookDispatcher(db, cfg)
 
 	handler := worker.NewEmailSendHandler(
@@ -1811,7 +1823,7 @@ func startEmbeddedWorker(db *gorm.DB,
 		// parse worker covers SMTP-ingested mail, the process handler covers
 		// webhook-ingested mail. One shared step instance; nil (disabled)
 		// keeps the pre-filter behavior on both.
-		inboundFilter := newInboundFilter(db, cfg, parseSvc, blobStore, newWebhookDispatcher(db, cfg))
+		inboundFilter := newInboundFilter(db, cfg, parseSvc, blobStore, newWebhookDispatcher(db, cfg), cronManager)
 		inboundHandler.SetFilter(inboundFilter)
 		parseHandler.SetFilter(inboundFilter)
 		mux.HandleFunc(worker.TypeInboundParse, parseHandler.ProcessTask)

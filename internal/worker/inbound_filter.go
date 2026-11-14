@@ -113,7 +113,20 @@ type InboundFilter struct {
 	// ".ext" / lowercase hex digest sets; empty maps = disabled).
 	blockExts   map[string]bool
 	blockHashes map[string]bool
+	// traps is the SF-42 spam-trap seam (the ADR-006 amendment): a matching
+	// recipient quarantines instantly. Nil = the gate disabled.
+	traps TrapChecker
 }
+
+// TrapChecker is the spam-trap seam (SF-42): reports whether one recipient
+// address (domain + local part) matches a seeded trap for the workspace.
+// The repositories.SpamTrapRepository satisfies it; nil disables the gate.
+type TrapChecker interface {
+	HasRecipient(workspaceID uint, domainName, localPart string) (bool, error)
+}
+
+// SetTrapChecker attaches the spam-trap seam (nil = the gate disabled).
+func (f *InboundFilter) SetTrapChecker(t TrapChecker) { f.traps = t }
 
 // NewInboundFilter assembles the step. filter may be nil together with
 // Enabled=false to disable the pipeline; scanner nil disables malware
@@ -185,6 +198,14 @@ func (f *InboundFilter) Run(ctx context.Context, rec *models.InboundEmail) bool 
 	// digest quarantines on sight — the cheapest check first, through the
 	// same disposition path as malware (explicit, event-backed).
 	if f.blockedAttachment(ctx, rec) {
+		return false
+	}
+
+	// 0.5 Spam traps (SF-42, the ADR-006 amendment): mail addressed to a
+	// seeded trap is unsolicited by definition — instant quarantine with the
+	// explicit reason. Fail-open: a lookup error logs and continues (the
+	// scoring pipeline still gates the message).
+	if f.trapHit(ctx, rec) {
 		return false
 	}
 
@@ -319,6 +340,50 @@ func (f *InboundFilter) blockedAttachment(ctx context.Context, rec *models.Inbou
 			f.onFlagged()
 		}
 		return true
+	}
+	return false
+}
+
+// trapHit checks the record's recipients against the workspace's seeded
+// spam traps (SF-42). A hit quarantines through the same disposition path
+// with the explicit spam_trap_hit reason and reports disposed=true.
+// Fail-open: a lookup error logs and reports disposed=false — the score
+// pipeline still gates the message.
+func (f *InboundFilter) trapHit(ctx context.Context, rec *models.InboundEmail) bool {
+	if f.traps == nil || rec.WorkspaceID == nil {
+		return false // personal/system mail has no trap surface
+	}
+	for _, rcpt := range rec.Recipients {
+		addr := strings.ToLower(strings.TrimSpace(rcpt))
+		local, domain, ok := strings.Cut(addr, "@")
+		if !ok || local == "" || domain == "" {
+			continue
+		}
+		hit, err := f.traps.HasRecipient(*rec.WorkspaceID, domain, local)
+		if err != nil {
+			logger.Warn("filter: spam-trap lookup failed; continuing to scoring",
+				"inbound_id", rec.UUID, "error", err)
+			return false
+		}
+		if hit {
+			if err := f.svc.ApplyFilterDisposition(ctx, rec, inbound.FilterDisposition{
+				Disposition: spamfilter.DispositionQuarantine,
+				Score:       0,
+				Reasons:     []string{"spam_trap_hit:" + addr},
+			}); err != nil {
+				logger.Error("filter: failed to apply the spam-trap quarantine",
+					"inbound_id", rec.UUID, "error", err)
+				// Fail toward quarantine semantics: stop the pipeline, the
+				// record stays for the operator.
+				return true
+			}
+			logger.Warn("filter: spam-trap hit; quarantined",
+				"inbound_id", rec.UUID, "recipient", addr)
+			if f.onFlagged != nil {
+				f.onFlagged()
+			}
+			return true
+		}
 	}
 	return false
 }

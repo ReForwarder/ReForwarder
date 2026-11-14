@@ -155,6 +155,10 @@ func Run(db *gorm.DB) error {
 		// gates through the unified condition evaluator's transport currency.
 		// Additive table — in-place upgrade, no step needed.
 		&models.TransportPolicy{},
+		// SF-42 spam traps (ADR-006 amendment): seeded trap addresses per
+		// hosted domain; a matching recipient quarantines instantly. Additive
+		// table — in-place upgrade, no step needed.
+		&models.SpamTrap{},
 		// OB-6 W3 (ADR-007 decision 7): IP pools, warm-up schedules and
 		// reputation rollups — additive tables only; every row carries
 		// workspace_id (or an explicit nil for deployment-wide pools), per

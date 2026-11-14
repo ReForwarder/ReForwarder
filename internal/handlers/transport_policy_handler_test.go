@@ -75,6 +75,8 @@ var tpolColumns = map[string][]string{
 	"transport_policies": {"id", "workspace_id", "domain_name", "name", "priority", "enabled",
 		"conditions", "reject", "reject_reason", "bind_ip", "msg_rate_per_min", "max_message_size",
 		"hourly_budget", "created_at", "updated_at"},
+	// SF-42: the spam-trap table (the trap admin surface's fake).
+	"spam_traps": {"id", "workspace_id", "domain_name", "local_part", "note", "created_at"},
 }
 
 type tpolState struct {
@@ -296,7 +298,7 @@ func (c *tpolConn) QueryContext(_ context.Context, query string, args []driver.N
 	defer s.mu.Unlock()
 	lower := tpolNormalize(query)
 	switch {
-	case strings.HasPrefix(lower, "insert into transport_policies"):
+	case strings.HasPrefix(lower, "insert into transport_policies"), strings.HasPrefix(lower, "insert into spam_traps"):
 		// gorm's Create uses a query when RETURNING id is requested: run the
 		// insert and answer the new id as the returned row.
 		res, err := c.execInsert(lower, args)
@@ -312,6 +314,8 @@ func (c *tpolConn) QueryContext(_ context.Context, query string, args []driver.N
 			rows: [][]driver.Value{{int64(len(s.match(table, preds, args)))}}}, nil
 	case strings.Contains(lower, "from transport_policies"):
 		return c.querySelect("transport_policies", lower, args)
+	case strings.Contains(lower, "from spam_traps"):
+		return c.querySelect("spam_traps", lower, args)
 	case strings.Contains(lower, "from domains"):
 		return c.querySelect("domains", lower, args)
 	}
@@ -373,11 +377,11 @@ func (c *tpolConn) ExecContext(_ context.Context, query string, args []driver.Na
 	defer s.mu.Unlock()
 	lower := tpolNormalize(query)
 	switch {
-	case strings.HasPrefix(lower, "insert into transport_policies"):
+	case strings.HasPrefix(lower, "insert into transport_policies"), strings.HasPrefix(lower, "insert into spam_traps"):
 		return c.execInsert(lower, args)
 	case strings.HasPrefix(lower, "update transport_policies"):
 		return c.execUpdate(lower, args)
-	case strings.HasPrefix(lower, "delete from transport_policies"):
+	case strings.HasPrefix(lower, "delete from transport_policies"), strings.HasPrefix(lower, "delete from spam_traps"):
 		return c.execDelete(lower, args)
 	}
 	return nil, fmt.Errorf("tpol fake: unsupported exec: %s", query)
@@ -395,10 +399,11 @@ func (c *tpolConn) execInsert(lower string, args []driver.NamedValue) (driver.Re
 	if len(vals) != len(cols) {
 		return nil, fmt.Errorf("tpol fake: insert arity mismatch")
 	}
-	row := make([]driver.Value, len(tpolColumns["transport_policies"]))
+	table := strings.TrimSpace(lower[len("insert into "):open])
+	row := make([]driver.Value, len(tpolColumns[table]))
 	for i, col := range cols {
 		col = strings.TrimSpace(strings.ReplaceAll(col, `"`, ""))
-		idx := s.colIndex("transport_policies", col)
+		idx := s.colIndex(table, col)
 		if idx < 0 {
 			return nil, fmt.Errorf("tpol fake: unknown insert column %q", col)
 		}
@@ -409,8 +414,8 @@ func (c *tpolConn) execInsert(lower string, args []driver.NamedValue) (driver.Re
 		}
 	}
 	s.seq++
-	row[s.colIndex("transport_policies", "id")] = s.seq
-	s.rows["transport_policies"] = append(s.rows["transport_policies"], row)
+	row[s.colIndex(table, "id")] = s.seq
+	s.rows[table] = append(s.rows[table], row)
 	return tpolResult{rows: 1, id: s.seq}, nil
 }
 
@@ -469,14 +474,15 @@ func (c *tpolConn) execUpdate(lower string, args []driver.NamedValue) (driver.Re
 
 func (c *tpolConn) execDelete(lower string, args []driver.NamedValue) (driver.Result, error) {
 	s := c.s
+	table := strings.TrimSpace(lower[len("delete from "):strings.Index(lower, " where ")])
 	where := strings.TrimSpace(lower[strings.Index(lower, " where ")+len(" where "):])
 	preds, _ := tpolParseWhere(where, 1)
-	kept := make([][]driver.Value, 0, len(s.rows["transport_policies"]))
+	kept := make([][]driver.Value, 0, len(s.rows[table]))
 	removed := int64(0)
-	for _, row := range s.rows["transport_policies"] {
+	for _, row := range s.rows[table] {
 		ok := true
 		for _, p := range preds {
-			idx := s.colIndex("transport_policies", p.col)
+			idx := s.colIndex(table, p.col)
 			cv, okc := row[idx].(int64)
 			fv, okv := tpolArg(args, p.argN).(int64)
 			if !okc || !okv || cv != fv {
@@ -490,7 +496,7 @@ func (c *tpolConn) execDelete(lower string, args []driver.NamedValue) (driver.Re
 		}
 		kept = append(kept, row)
 	}
-	s.rows["transport_policies"] = kept
+	s.rows[table] = kept
 	return tpolResult{rows: removed}, nil
 }
 
@@ -507,6 +513,7 @@ func newTpolHarness(t *testing.T) *tpolHarness {
 	state := newTpolState()
 	db := tpolGorm(t, state)
 	h := NewTransportPolicyHandler(repositories.NewTransportPolicyRepository(db), repositories.NewDomainRepository(db))
+	trapH := NewSpamTrapHandler(repositories.NewSpamTrapRepository(db), repositories.NewDomainRepository(db))
 	o := okapi.NewTestServer(t)
 	adminAuth := middlewares.JWTAdminAuth(&config.Config{JWTSecret: tpolJWTSecret})
 	g := o.Group("/api/v1/workspaces/current", adminAuth.Middleware, dmrWorkspaceBinding)
@@ -514,6 +521,9 @@ func newTpolHarness(t *testing.T) *tpolHarness {
 	g.Post("/domains/{id:int}/transport-policies", okapi.H(h.CreateTransportPolicy))
 	g.Patch("/domains/{id:int}/transport-policies/{pid:int}", okapi.H(h.PatchTransportPolicy))
 	g.Delete("/domains/{id:int}/transport-policies/{pid:int}", okapi.H(h.DeleteTransportPolicy))
+	g.Get("/domains/{id:int}/spam-traps", okapi.H(trapH.ListSpamTraps))
+	g.Post("/domains/{id:int}/spam-traps", okapi.H(trapH.CreateSpamTrap))
+	g.Delete("/domains/{id:int}/spam-traps/{tid:int}", okapi.H(trapH.DeleteSpamTrap))
 	return &tpolHarness{o: o, state: state, db: db}
 }
 

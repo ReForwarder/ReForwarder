@@ -31,11 +31,9 @@ import (
 // full-score signal). The URL-count analyzer named in the same bounded spec
 // already exists in the baseline (scoreURLs) and is NOT reimplemented here.
 //
-// Post-amendment analyzer count: 10 groups — auth verdicts, DNSBL, header
-// heuristics, URL count, sender reputation, GTUBE (the OB-2 baseline) +
-// attachment-type, Received-chain shape, subject heuristics, HTML-ratio
-// (this file) — emitting 30 bounded reason families (plus parameterized
-// per-zone/per-word values). The reference suite's remaining
+// The SF-39 slice: attachment-type, Received-chain shape, subject
+// heuristics, HTML-ratio (this file) — bringing the scorer to 12 analyzer
+// groups / 32 bounded reason families (see scorer.go for the count). The reference suite's remaining
 // surface (redirect chasing, homographs, FTRL, LLM) stays on SF-39/40/41.
 
 // Subject-heuristics constants: a subject needs enough letters to judge the

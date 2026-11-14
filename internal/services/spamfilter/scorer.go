@@ -92,6 +92,14 @@ type Weights struct {
 	HTMLRatioHigh     float64 // ratio ≥ threshold with the minimum size
 	HTMLRatioThreshold float64
 	HTMLRatioMinBytes int
+
+	// Distributed-checksum analyzer (SF-42, ADR-006 amendment): the
+	// community lookup fired (count > wl_count).
+	ChecksumSpam float64
+
+	// External rule-feed analyzer (SF-42, ADR-006 amendment): per-message
+	// cap over the feed rules' own weights.
+	FeedRuleMax float64
 }
 
 // DefaultWeights is the shipped baseline configuration (documented in
@@ -136,6 +144,9 @@ var DefaultWeights = Weights{
 	HTMLRatioHigh:      1.5,
 	HTMLRatioThreshold: 0.95,
 	HTMLRatioMinBytes:  4096,
+
+	ChecksumSpam: 3.0,
+	FeedRuleMax:  5.0,
 }
 
 // dateSkewWindow is how far a message's Date header may sit from the receive
@@ -152,13 +163,19 @@ var urlPattern = regexp.MustCompile(`(?i)https?://[^\s<>"']{4,}`)
 // DNSBL zones for the connecting IP, header heuristics, URL counts, sender
 // bounce/complaint reputation, the GTUBE marker, attachment types, the
 // Received-chain shape, subject heuristics, and the HTML ratio. Reason
-// families: 30 bounded prefixes (plus parameterized per-zone/per-word
-// values) — see analyzers.go for the SF-39 additions.
+// families: 32 bounded prefixes (plus parameterized per-zone/per-word/
+// per-count values) — see analyzers.go (SF-39) and checksum.go/rulefeed.go
+// (SF-42).
 type RulesScorer struct {
 	weights    Weights
 	thresholds ThresholdSource
 	dnsbl      *DNSBLChecker
 	reputation ReputationSource
+	// check is the SF-42 distributed-checksum client (nil = the signal
+	// disabled); feed is the SF-42 external rule-feed snapshot (nil = no
+	// feed rules). Both fail-open by contract.
+	check *CheckClient
+	feed  *RuleFeed
 }
 
 // NewRulesScorer assembles the baseline. nil dnsbl (or an empty-zone
@@ -175,10 +192,18 @@ func NewRulesScorer(thresholds ThresholdSource, dnsbl *DNSBLChecker, reputation 
 	}
 }
 
+// SetChecksumChecker attaches the SF-42 distributed-checksum client
+// (nil/empty = the signal disabled).
+func (s *RulesScorer) SetChecksumChecker(c *CheckClient) { s.check = c }
+
+// SetRuleFeed attaches the SF-42 external rule-feed snapshot (nil = no feed
+// rules).
+func (s *RulesScorer) SetRuleFeed(f *RuleFeed) { s.feed = f }
+
 // Score implements SpamFilter. It never returns an error: every signal that
 // cannot be evaluated (no verdict row yet, reputation unavailable, DNSBL
-// disabled) abstains rather than penalizes — an unavailable signal is not
-// evidence of spam.
+// disabled, checksum lookup down) abstains rather than penalizes — an
+// unavailable signal is not evidence of spam.
 func (s *RulesScorer) Score(msg *Message) (float64, []string) {
 	if s == nil || msg == nil {
 		return 0, nil
@@ -197,6 +222,10 @@ func (s *RulesScorer) Score(msg *Message) (float64, []string) {
 	score += s.scoreHeaderOrder(msg, acc)
 	score += s.scoreSubject(msg, acc)
 	score += s.scoreHTMLRatio(msg, acc)
+	// SF-42 (ADR-006 amendment): the approved external-dependency surfaces —
+	// both fail-open by contract.
+	score += s.scoreChecksum(msg, acc)
+	score += s.scoreRuleFeed(msg, acc)
 
 	if score < 0 {
 		score = 0
