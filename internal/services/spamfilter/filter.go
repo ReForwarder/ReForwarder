@@ -125,6 +125,11 @@ type Message struct {
 	Size       int64
 	ReceivedAt time.Time
 
+	// Attachments are the materialized attachment shapes (filename, declared
+	// content type, bytes) the attachment-type analyzer scores; nil (no
+	// attachments or an unavailable blob store) abstains.
+	Attachments []Attachment
+
 	// ClientIP is the connecting peer's address, taken from the persisted
 	// authentication verdict (the SMTP path's only durable record of it).
 	// Empty (webhook ingest) skips the DNSBL signal.

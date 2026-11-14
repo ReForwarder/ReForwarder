@@ -262,6 +262,9 @@ func (f *InboundFilter) score(ctx context.Context, rec *models.InboundEmail) (fl
 		ClientIP:     verdictClientIP(verdict),
 		Auth:         inbound.AuthVerdictFromRow(verdict),
 		SenderDomain: senderDomain(rec.Sender),
+		// SF-39: the attachment-type analyzer scores the materialized shapes
+		// (the same loader the blocklists and the clamd scan use).
+		Attachments: f.loadAttachments(ctx, rec),
 	}
 	score, reasons := f.filter.Score(msg)
 	logger.Debug("filter scored inbound message",

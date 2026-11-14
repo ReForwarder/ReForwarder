@@ -106,6 +106,10 @@ func cleanHeaders() map[string]string {
 	return map[string]string{
 		"Message-Id": "<x@y>",
 		"Date":       time.Now().UTC().Format(time.RFC1123Z),
+		// SMTP-path mail carries a Received hop; without it the SF-39
+		// Received-chain analyzer would add its own (legitimate) signal and
+		// break the per-signal assertions below.
+		"Received": "from mx.example by posta.test; " + time.Now().UTC().Format(time.RFC1123Z),
 	}
 }
 

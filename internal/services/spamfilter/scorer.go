@@ -69,6 +69,29 @@ type Weights struct {
 	ModerateBounceRate    float64 // ≥ 10%
 	HighComplaintRate     float64 // ≥ 2%
 	ModerateComplaintRate float64 // ≥ 0.5%
+
+	// Attachment-type analyzer (SF-39, ADR-006 amendment). Complements the
+	// SF-42 exact-match blocklists (which hard-block; this pressures score).
+	AttachmentDoubleExtension float64 // invoice.pdf.exe-style cloaking
+	AttachmentExecutable      float64 // executable shape (extension or MIME)
+	AttachmentMax             float64 // per-message cap
+
+	// Received-chain shape analyzer (the header-order slice; SF-39). SMTP-
+	// path mail with no Received header at all (presence — the parsed map
+	// dedupes headers, so hop counts are unknowable and not invented).
+	ReceivedMissing float64
+
+	// Subject heuristics analyzer (SF-39).
+	SubjectAllCaps              float64 // ≥ SubjectAllCapsMinLetters letters, ≥ ratio uppercase
+	SubjectExcessivePunctuation float64 // !!!/???-style terminal runs
+	SubjectSpamKeyword          float64 // first bounded-keyword hit
+	SubjectSpamKeywordMax       float64 // the keyword contribution's cap
+
+	// HTML-ratio analyzer (SF-39): HTML-only / HTML-dominated bodies.
+	HTMLTextMissing   float64 // HTML ≥ min bytes with no text part
+	HTMLRatioHigh     float64 // ratio ≥ threshold with the minimum size
+	HTMLRatioThreshold float64
+	HTMLRatioMinBytes int
 }
 
 // DefaultWeights is the shipped baseline configuration (documented in
@@ -94,9 +117,25 @@ var DefaultWeights = Weights{
 	URLHeavy:              2.0,
 	GTUBE:                 1000.0,
 	HighBounceRate:        2.0,
-	ModerateBounceRate:    1.0,
-	HighComplaintRate:     2.0,
 	ModerateComplaintRate: 1.0,
+	HighComplaintRate:     2.0,
+	ModerateBounceRate:    1.0,
+
+	AttachmentDoubleExtension: 3.0,
+	AttachmentExecutable:      2.5,
+	AttachmentMax:             5.0,
+
+	ReceivedMissing: 2.0,
+
+	SubjectAllCaps:              1.5,
+	SubjectExcessivePunctuation: 1.0,
+	SubjectSpamKeyword:          1.0,
+	SubjectSpamKeywordMax:       2.0,
+
+	HTMLTextMissing:    2.0,
+	HTMLRatioHigh:      1.5,
+	HTMLRatioThreshold: 0.95,
+	HTMLRatioMinBytes:  4096,
 }
 
 // dateSkewWindow is how far a message's Date header may sit from the receive
@@ -107,10 +146,14 @@ const dateSkewWindow = 24 * time.Hour
 // urlPattern counts http(s) links across the text and HTML bodies.
 var urlPattern = regexp.MustCompile(`(?i)https?://[^\s<>"']{4,}`)
 
-// RulesScorer is the ADR-006 rules-based baseline SpamFilter. Signals:
-// SPF/DKIM/DMARC verdicts (from the persisted auth-results row), config-gated
-// allowlisted DNSBL zones for the connecting IP, header heuristics, URL
-// counts, the GTUBE marker, and the sender's bounce/complaint reputation.
+// RulesScorer is the ADR-006 rules-based SpamFilter. Analyzer groups (10 —
+// the OB-2 baseline six + the SF-39 amendment's four): SPF/DKIM/DMARC
+// verdicts (from the persisted auth-results row), config-gated allowlisted
+// DNSBL zones for the connecting IP, header heuristics, URL counts, sender
+// bounce/complaint reputation, the GTUBE marker, attachment types, the
+// Received-chain shape, subject heuristics, and the HTML ratio. Reason
+// families: 30 bounded prefixes (plus parameterized per-zone/per-word
+// values) — see analyzers.go for the SF-39 additions.
 type RulesScorer struct {
 	weights    Weights
 	thresholds ThresholdSource
@@ -149,6 +192,11 @@ func (s *RulesScorer) Score(msg *Message) (float64, []string) {
 	score += s.scoreURLs(msg, acc)
 	score += s.scoreReputation(msg, acc)
 	score += s.scoreGTUBE(msg, acc)
+	// SF-39 (ADR-006 amendment): the four additional analyzer groups.
+	score += s.scoreAttachments(msg, acc)
+	score += s.scoreHeaderOrder(msg, acc)
+	score += s.scoreSubject(msg, acc)
+	score += s.scoreHTMLRatio(msg, acc)
 
 	if score < 0 {
 		score = 0
