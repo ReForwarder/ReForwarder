@@ -59,6 +59,11 @@ type MailHandler struct {
 	groups  *repositories.MailGroupRepository
 }
 
+// Store exposes the backing mailstore service for sibling handlers that
+// need mailbox-ownership validation on the same surface (the SF-14 filter
+// scripts).
+func (h *MailHandler) Store() *mailstore.Service { return h.store }
+
 // NewMailHandler wires the webmail REST surface onto the mailstore service.
 // The SF-65 alias/group repositories may be nil (the deployment posture
 // above); the alias/group endpoints answer 503 until they are wired.

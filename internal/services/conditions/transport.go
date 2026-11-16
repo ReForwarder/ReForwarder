@@ -68,27 +68,7 @@ var transportStringFields = map[string]bool{
 // Address-like facts are compared case-insensitively; callers normalize
 // before handing facts over (the resolver owns the normalization).
 func EvaluateTransportRules(rules []models.FilterRule, facts map[string]string) (bool, error) {
-	for _, r := range rules {
-		field := strings.TrimSpace(r.Field)
-		if field == "" {
-			return false, fmt.Errorf("transport policy: empty condition field")
-		}
-		if !transportStringFields[field] {
-			return false, fmt.Errorf("transport policy: unknown condition field %q", field)
-		}
-		fact, ok := facts[field]
-		if !ok {
-			return false, fmt.Errorf("transport policy: fact %q missing from the evaluation subject", field)
-		}
-		match, err := transportRuleMatch(field, fact, r.Operator, r.Value)
-		if err != nil {
-			return false, err
-		}
-		if !match {
-			return false, nil
-		}
-	}
-	return true, nil
+	return EvaluateTransportRulesMapped(rules, facts, transportStringFields, "transport policy")
 }
 
 // transportRuleMatch evaluates one rule. Unknown operators and non-parsable

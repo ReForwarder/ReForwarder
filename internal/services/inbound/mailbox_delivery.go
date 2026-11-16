@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/services/filterengine"
 	"github.com/goposta/posta/internal/services/mailstore"
 	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/jkaninda/logger"
@@ -108,6 +109,13 @@ type MailboxDelivery struct {
 	// aliases is the SF-65 alias/group expansion seam; nil (the default until
 	// wired) keeps the exact pre-SF-65 behavior: direct resolution only.
 	aliases AliasGroupResolver
+	// scripts is the SF-14 per-mailbox filter-script seam (the ADR-006
+	// amendment); nil = the engine disabled — the pre-SF-14 behavior
+	// byte-for-byte.
+	scripts ScriptRunner
+	// forwards is the SF-14 redirect seam: matching redirect actions hand the
+	// message to the existing forwarding pipeline. Nil = redirects disabled.
+	forwards RedirectEnqueuer
 }
 
 // NewMailboxDelivery builds the seam over a mailstore service and the domain
@@ -138,6 +146,27 @@ type AliasGroupResolver interface {
 
 // SetAliasGroups attaches the SF-65 alias/group expansion seam (nil = none).
 func (d *MailboxDelivery) SetAliasGroups(r AliasGroupResolver) { d.aliases = r }
+
+// ScriptRunner is the SF-14 filter-script seam: returns the mailbox owner's
+// ENABLED scripts in evaluation order. The repositories.FilterScriptRepository
+// satisfies it; nil disables the engine (the pre-SF-14 behavior).
+type ScriptRunner interface {
+	ListEnabledForMailbox(mailboxID uint) ([]models.FilterScript, error)
+}
+
+// SetScriptRunner attaches the filter-script seam (nil = disabled).
+func (d *MailboxDelivery) SetScriptRunner(r ScriptRunner) { d.scripts = r }
+
+// RedirectEnqueuer is the SF-14 redirect seam: enqueues a forward task for
+// the redirect target through the existing forwarding pipeline (loop
+// protection + return-path handling inherited). The forward task store
+// satisfies it; nil disables redirects.
+type RedirectEnqueuer interface {
+	Enqueue(task *models.InboundForwardTask) error
+}
+
+// SetRedirectEnqueuer attaches the redirect seam (nil = redirects disabled).
+func (d *MailboxDelivery) SetRedirectEnqueuer(e RedirectEnqueuer) { d.forwards = e }
 
 // maxGroupExpansionDepth bounds list-of-lists expansion: groups may include
 // other groups' anchor mailboxes, and the recursion stops at this depth even
@@ -310,7 +339,46 @@ func (st *expansionState) append(ctx context.Context, d *MailboxDelivery, rec *m
 		return
 	}
 	st.delivered[mailboxID] = true
-	if _, err := d.appendToInbox(ctx, rec.UserID, mb, raw); err != nil {
+
+	// SF-14 (the ADR-006 amendment): the per-mailbox filter scripts —
+	// evaluated after the spam disposition (this seam runs in the route-action
+	// executor, post-disposition) and before final folder placement. The
+	// decision's folder replaces INBOX; discard skips the append; redirects
+	// hand the message to the forwarding pipeline (loop-safe). Fail-open: an
+	// engine error logs and the default filing proceeds — an engine outage
+	// must not hold mail.
+	folder := ""
+	if d.scripts != nil {
+		scripts, serr := d.scripts.ListEnabledForMailbox(mailboxID)
+		if serr != nil {
+			logger.Warn("filter scripts unavailable; default filing proceeds",
+				"inbound_id", rec.UUID, "mailbox_id", mailboxID, "error", serr)
+		} else if len(scripts) > 0 {
+			decision, derr := filterengine.Evaluate(scripts, filterengine.ScriptFacts{
+				Subject:     rec.Subject,
+				From:        rec.Sender,
+				TextBody:    rec.TextBody,
+				HTMLBody:    rec.HTMLBody,
+				Recipients:  strings.Join(rec.Recipients, ", "),
+				MessageSize: rec.Size,
+			})
+			if derr != nil {
+				logger.Warn("filter script evaluation failed; default filing proceeds",
+					"inbound_id", rec.UUID, "mailbox_id", mailboxID, "error", derr)
+			} else {
+				folder = decision.Folder
+				if decision.SkipAppend {
+					logger.Info("filter script discarded the copy for this mailbox",
+						"inbound_id", rec.UUID, "mailbox_id", mailboxID)
+					st.res.Mailboxes = append(st.res.Mailboxes, mb.Name)
+					return
+				}
+				d.enqueueRedirects(ctx, rec, decision.Redirects, mailboxID)
+			}
+		}
+	}
+
+	if _, err := d.appendToInbox(ctx, rec.UserID, mb, raw, folder); err != nil {
 		if errors.Is(err, mailstore.ErrQuotaExceeded) {
 			// Wrap keeps errors.As/Is working for the executor while naming
 			// the refusing mailbox in the chain.
@@ -364,10 +432,22 @@ func (d *MailboxDelivery) resolveOrProvision(userID uint, workspaceID *uint, add
 // system path scopes by user (workspace 0): the mailbox was resolved through
 // the owner's (user_id, name) identity, and the mailstore's workspace check
 // only narrows when both sides are non-zero.
-func (d *MailboxDelivery) appendToInbox(ctx context.Context, userID uint, mb *models.Mailbox, raw []byte) (*mailstore.AppendResult, error) {
-	inbox, err := d.store.GetFolderByPath(mb.ID, userID, 0, "INBOX")
+func (d *MailboxDelivery) appendToInbox(ctx context.Context, userID uint, mb *models.Mailbox, raw []byte, folder string) (*mailstore.AppendResult, error) {
+	path := "INBOX"
+	// SF-14: a fileinto decision files into the named folder when it exists;
+	// an unknown folder falls back to INBOX (folder creation stays manual,
+	// matching the webmail folder surface).
+	if folder != "" {
+		if _, err := d.store.GetFolderByPath(mb.ID, userID, 0, folder); err != nil {
+			logger.Warn("filter script folder missing; filing to INBOX",
+				"mailbox_id", mb.ID, "folder", folder)
+		} else {
+			path = folder
+		}
+	}
+	inbox, err := d.store.GetFolderByPath(mb.ID, userID, 0, path)
 	if err != nil {
-		return nil, fmt.Errorf("resolve INBOX of mailbox %d: %w", mb.ID, err)
+		return nil, fmt.Errorf("resolve folder %q of mailbox %d: %w", path, mb.ID, err)
 	}
 	return d.store.Append(ctx, userID, 0, mailstore.AppendIn{
 		MailboxID: mb.ID,
@@ -376,4 +456,45 @@ func (d *MailboxDelivery) appendToInbox(ctx context.Context, userID uint, mb *mo
 		// No flags preset: inbound delivery arrives unread (\Recent only),
 		// like any IMAP LDA.
 	})
+}
+
+// enqueueRedirects hands a filter-script redirect to the existing forwarding
+// pipeline: the forward task enqueue (loop protection via the forwarded-for
+// chain, VERP/SRS return-path handling, retry semantics inherited). A
+// redirect target already on the message's forwarded-for chain is dropped —
+// the loop safety. The forward pipeline's target-confirmation gate stays
+// authoritative (an unconfirmed target fails the task like any forward).
+func (d *MailboxDelivery) enqueueRedirects(ctx context.Context, rec *models.InboundEmail, targets []string, mailboxID uint) {
+	if d.forwards == nil || len(targets) == 0 {
+		return
+	}
+	seen := map[string]bool{strings.ToLower(strings.TrimSpace(rec.Sender)): true}
+	for _, r := range rec.Recipients {
+		seen[strings.ToLower(strings.TrimSpace(r))] = true
+	}
+	for _, target := range targets {
+		tt := strings.ToLower(strings.TrimSpace(target))
+		if tt == "" || seen[tt] {
+			logger.Warn("filter redirect dropped: the target is already on the message path",
+				"inbound_id", rec.UUID, "target", tt)
+			continue
+		}
+		seen[tt] = true
+		task := &models.InboundForwardTask{
+			InboundEmailID: rec.ID,
+			UserID:         rec.UserID,
+			WorkspaceID:    rec.WorkspaceID,
+			DomainID:       rec.DomainID,
+			Target:         target,
+			Status:         models.InboundForwardTaskPending,
+			Attempts:       0,
+		}
+		if err := d.forwards.Enqueue(task); err != nil {
+			logger.Warn("filter redirect enqueue failed",
+				"inbound_id", rec.UUID, "target", tt, "error", err)
+			continue
+		}
+		logger.Info("filter script redirected the message",
+			"inbound_id", rec.UUID, "mailbox_id", mailboxID, "target", tt)
+	}
 }

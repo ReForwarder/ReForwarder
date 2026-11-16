@@ -143,6 +143,9 @@ type routerHandlers struct {
 	// spamTraps serves the SF-42 spam-trap admin surface (the ADR-006
 	// amendment's per-domain trap seeding).
 	spamTraps *handlers.SpamTrapHandler
+	// filterScripts serves the SF-14 per-mailbox filter-script management
+	// (the ADR-006 amendment's bounded engine).
+	filterScripts *handlers.FilterScriptHandler
 	// mtaStsPolicy serves the MTA-STS policy hosting path (SF-29, OB-6 W4).
 	mtaStsPolicy *handlers.MTASTSPolicyHandler
 	bounce               *handlers.BounceHandler
@@ -578,6 +581,14 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 		// every endpoint instead of the route table dereferencing a nil
 		// handler (same pattern as the disabled-passkeys webauthn handler).
 		r.h.mail = handlers.NewMailHandler(nil, nil, nil)
+	}
+
+	// SF-14 (the ADR-006 amendment): the per-mailbox filter-script
+	// management rides the same mailstore — the endpoints answer 503 only
+	// when the whole mail surface is unavailable.
+	if r.h.mail != nil {
+		r.h.filterScripts = handlers.NewFilterScriptHandler(
+			repositories.NewFilterScriptRepository(db), r.h.mail.Store())
 	}
 
 	// Passkeys (R-19). The WebAuthn Relying Party identity is derived from the

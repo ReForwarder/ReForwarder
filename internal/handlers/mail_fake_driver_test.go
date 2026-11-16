@@ -65,6 +65,9 @@ var mhColumns = map[string][]string{
 		"body_size", "attachments_json", "created_at", "updated_at",
 	},
 	"mail_blob_refs": {"id", "blob_hash", "size", "ref_count", "last_referenced", "created_at"},
+	// SF-14: the per-mailbox filter-script table (the script surface's fake).
+	"filter_scripts": {"id", "user_id", "mailbox_id", "name", "priority", "enabled",
+		"conditions", "actions_json", "created_at", "updated_at"},
 	// SF-65 alias/group tables: the MailAliasRepository/MailGroupRepository
 	// statements route through the same generic select/insert/delete machinery.
 	"mail_aliases":       {"id", "user_id", "workspace_id", "mailbox_id", "address", "created_at"},
@@ -420,6 +423,8 @@ func (c *mhConn) QueryContext(_ context.Context, query string, args []driver.Nam
 		return c.querySelect("mailboxes", lower, args)
 	case strings.Contains(lower, "from mail_blob_refs"):
 		return c.querySelect("mail_blob_refs", lower, args)
+	case strings.Contains(lower, "from filter_scripts"):
+		return c.querySelect("filter_scripts", lower, args)
 	}
 	return nil, fmt.Errorf("mh fake: cannot route query: %s", query)
 }

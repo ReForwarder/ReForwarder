@@ -94,6 +94,11 @@ func TestMailRoutes_RegisteredOncePerMethodAndGated(t *testing.T) {
 		http.MethodPost + " /groups",
 		http.MethodPatch + " /groups/{id:int}",
 		http.MethodDelete + " /groups/{id:int}",
+		// SF-14 per-mailbox filter scripts.
+		http.MethodGet + " /filter-scripts",
+		http.MethodPost + " /filter-scripts",
+		http.MethodPatch + " /filter-scripts/{id:int}",
+		http.MethodDelete + " /filter-scripts/{id:int}",
 	}
 	if len(defs) != len(want) {
 		t.Fatalf("mailRoutes registered %d routes, want %d", len(defs), len(want))

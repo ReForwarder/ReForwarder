@@ -24,6 +24,7 @@ import (
 
 	"github.com/goposta/posta/internal/dto"
 	"github.com/goposta/posta/internal/handlers"
+	"github.com/goposta/posta/internal/models"
 	"github.com/jkaninda/okapi"
 )
 
@@ -337,6 +338,64 @@ func (r *Router) mailRoutes() []okapi.RouteDefinition {
 			Options: []okapi.RouteOption{
 				okapi.DocPathParam("id", "integer", "Group ID"),
 				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodGet,
+			Path:        "/filter-scripts",
+			Handler:     okapi.H(r.h.filterScripts.ListFilterScripts),
+			Group:       group,
+			Summary:     "List filter scripts",
+			Description: "The session user's per-mailbox filter scripts (SF-14) for one mailbox, in evaluation order.",
+			Request:     &handlers.FilterScriptListRequest{},
+			Response:    &dto.Response[handlers.FilterScriptListResponse]{},
+			Options: []okapi.RouteOption{
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodPost,
+			Path:        "/filter-scripts",
+			Handler:     okapi.H(r.h.filterScripts.CreateFilterScript),
+			Group:       group,
+			Summary:     "Create a filter script",
+			Description: "Adds a per-mailbox filter script (SF-14): conditions from the unified evaluator's fact grammar + the bounded operations (fileinto/redirect/discard/keep). Conditions are validated through the same strict evaluator the engine runs.",
+			Request:     &handlers.FilterScriptCreateRequest{},
+			Response:    &dto.Response[models.FilterScript]{},
+			Options: []okapi.RouteOption{
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodPatch,
+			Path:        "/filter-scripts/{id:int}",
+			Handler:     okapi.H(r.h.filterScripts.PatchFilterScript),
+			Group:       group,
+			Summary:     "Update a filter script",
+			Description: "Patches one of the session user's filter scripts (a foreign script reads as missing).",
+			Request:     &handlers.FilterScriptPatchRequest{},
+			Response:    &dto.Response[models.FilterScript]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Script ID"),
+				okapi.DocResponse(400, &dto.ErrorResponseBody{}),
+				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
+			},
+		},
+		{
+			Method:      http.MethodDelete,
+			Path:        "/filter-scripts/{id:int}",
+			Handler:     okapi.H(r.h.filterScripts.DeleteFilterScript),
+			Group:       group,
+			Summary:     "Delete a filter script",
+			Description: "Removes one of the session user's filter scripts (a foreign script reads as missing).",
+			Request:     &handlers.FilterScriptIDRequest{},
+			Response:    &dto.Response[dto.MessageData]{},
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "Script ID"),
 				okapi.DocResponse(404, &dto.ErrorResponseBody{}),
 				okapi.DocResponse(503, &dto.ErrorResponseBody{}),
 			},

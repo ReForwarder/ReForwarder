@@ -62,6 +62,7 @@ const routes = [
       { path: 'mail/message/:folderId/:uid', name: 'mail-message', component: () => import('../views/mail/MessageView.vue'), meta: { title: 'Message' } },
       { path: 'mail/compose', name: 'mail-compose', component: () => import('../views/mail/Compose.vue'), meta: { title: 'Compose' } },
       { path: 'mail/settings', name: 'mail-settings', component: () => import('../views/mail/MailSettings.vue'), meta: { title: 'Mail Settings' } },
+      { path: 'mail/filters', name: 'mail-filters', component: () => import('../views/mail/FilterScripts.vue'), meta: { title: 'Mail Filters' } },
       { path: 'api-keys', name: 'api-keys', component: () => import('../views/apikeys/ApiKeys.vue'), meta: { title: 'API Keys' } },
       { path: 'api-keys/:id', name: 'api-key-detail', component: () => import('../views/apikeys/ApiKeyDetail.vue'), meta: { title: 'API Key' } },
       { path: 'smtp-relay', name: 'smtp-relay', component: () => import('../views/smtp-relay/SmtpCredentials.vue'), meta: { title: 'SMTP Relay' } },

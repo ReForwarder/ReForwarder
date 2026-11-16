@@ -159,6 +159,10 @@ func Run(db *gorm.DB) error {
 		// hosted domain; a matching recipient quarantines instantly. Additive
 		// table — in-place upgrade, no step needed.
 		&models.SpamTrap{},
+		// SF-14 per-mailbox filter scripts (ADR-006 amendment): the bounded
+		// filter-script engine's per-mailbox scripts. Additive table —
+		// in-place upgrade, no step needed.
+		&models.FilterScript{},
 		// OB-6 W3 (ADR-007 decision 7): IP pools, warm-up schedules and
 		// reputation rollups — additive tables only; every row carries
 		// workspace_id (or an explicit nil for deployment-wide pools), per

@@ -31,6 +31,7 @@ import (
 	"github.com/goposta/posta/internal/config"
 	"github.com/goposta/posta/internal/middlewares"
 	"github.com/goposta/posta/internal/models"
+	"github.com/goposta/posta/internal/storage/repositories"
 	"github.com/jkaninda/okapi"
 )
 
@@ -45,8 +46,9 @@ import (
 // under the production gating (jwtOnly; personal scope) over the mail fake
 // fixture.
 type agHarness struct {
-	f     *mhFixture
-	o     *okapi.TestServer
+	f  *mhFixture
+	fs *FilterScriptHandler
+	o  *okapi.TestServer
 	alice *mhUser
 	bob   *mhUser
 }
@@ -56,7 +58,12 @@ func newAGHarness(t *testing.T) *agHarness {
 	f := newMHFixture(t)
 	o := okapi.NewTestServer(t)
 	jwtAuth := middlewares.JWTAuth(&config.Config{JWTSecret: mhTestSecret})
+	fs := NewFilterScriptHandler(repositories.NewFilterScriptRepository(f.db), f.svc)
 	g := o.Group("/api/v1/mail", jwtAuth.Middleware)
+	g.Get("/filter-scripts", okapi.H(fs.ListFilterScripts))
+	g.Post("/filter-scripts", okapi.H(fs.CreateFilterScript))
+	g.Patch("/filter-scripts/{id:int}", okapi.H(fs.PatchFilterScript))
+	g.Delete("/filter-scripts/{id:int}", okapi.H(fs.DeleteFilterScript))
 	g.Get("/aliases", okapi.H(f.h.ListAliases))
 	g.Post("/aliases", okapi.H(f.h.CreateAlias))
 	g.Delete("/aliases/{id:int}", okapi.H(f.h.DeleteAlias))
