@@ -118,8 +118,11 @@ func TestPoolSelectionIsolatesDomains(t *testing.T) {
 func TestDeliverWarmupCapDefersWithoutMX(t *testing.T) {
 	f := newDeliverFixture(t)
 	// A schedule capped at 1 message/day: the hourly cap is 1, so the second
-	// delivery within the hour defers.
-	s := &WarmupSchedule{StartVolume: 1, DailyMultiplier: 1, Days: 5, StartedAt: rampDay0()}
+	// delivery within the hour defers. The ramp starts NOW: day 0 is anchored
+	// to StartedAt, so an absolute date would silently complete the ramp (and
+	// lift the cap) once the wall clock advanced past it — the test would then
+	// pass two deliveries and fail.
+	s := &WarmupSchedule{StartVolume: 1, DailyMultiplier: 1, Days: 5, StartedAt: time.Now()}
 
 	spec := testSpec()
 	spec.Warmup = s
