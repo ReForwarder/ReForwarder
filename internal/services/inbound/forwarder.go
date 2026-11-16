@@ -211,6 +211,12 @@ type Forwarder struct {
 	// the original inbound message's identity. Nil = the feature off (the
 	// pre-SF-12 behavior: the VERP/From-only path).
 	srs *Verp
+	// arHeaders is the SF-49 Authentication-Results injection seam (the
+	// archive-integrity resolution): the persisted verdict header is injected
+	// into the FORWARD copy's composition only — never into the stored
+	// original's content-addressed blob. Nil = the injection disabled (the
+	// pre-SF-49 behavior byte-for-byte).
+	arHeaders ARHeaderSource
 	// now overrides the clock (tests).
 	now func() time.Time
 	// jitter returns the random component added to a backoff slot (tests pin it).
@@ -258,6 +264,10 @@ func (f *Forwarder) SetEventBus(b *eventbus.EventBus) { f.bus = b }
 // SetSRS attaches the sender-rewrite codec (SF-12, the ADR-001 amendment;
 // nil = the feature off).
 func (f *Forwarder) SetSRS(v *Verp) { f.srs = v }
+
+// SetARHeaderSource attaches the SF-49 Authentication-Results injection seam
+// (nil = the injection disabled).
+func (f *Forwarder) SetARHeaderSource(s ARHeaderSource) { f.arHeaders = s }
 
 func (f *Forwarder) SetBatchLimit(n int) {
 	if n > 0 {
@@ -471,6 +481,19 @@ func (f *Forwarder) deliver(ctx context.Context, task *models.InboundForwardTask
 		// Replies to a forwarded copy go to the original sender, not back
 		// into this system (auto-reply loop safety).
 		headers["Reply-To"] = rec.Sender
+	}
+
+	// SF-49 (the archive-integrity resolution): the persisted
+	// Authentication-Results header is injected into the FORWARD copy's
+	// composition only — the copy is a fresh message, so no stored
+	// content-addressed blob is rewritten and the dedup keying is untouched.
+	// An upstream A-R header on the original is never overwritten
+	// (append-only semantics). Fail-open: a missing verdict or a source
+	// error simply skips the injection.
+	if f.arHeaders != nil {
+		if ar := f.arHeaders.StoredARHeader(rec.ID); ar != "" {
+			headers = withInjectedARHeader(headers, ar)
+		}
 	}
 
 	atts, err := forwardAttachments(rec)

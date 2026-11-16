@@ -909,6 +909,11 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 			domainRepo,
 			systemMailer,
 		)
+		// SF-49 (the archive-integrity resolution): the persisted
+		// Authentication-Results header is injected into the FORWARD copy's
+		// composition only — never into the stored original's
+		// content-addressed blob.
+		forwarder.SetARHeaderSource(inbound.NewAuthResultHeaderSource(db))
 		forwarder.SetTargetStore(forwardTargetRepo)
 		if redisClient != nil {
 			forwarder.SetTargetLimiter(inbound.NewRedisTargetLimiter(redisClient,
