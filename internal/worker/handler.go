@@ -220,6 +220,14 @@ func (h *EmailSendHandler) envelopeSender(em *models.Email) string {
 	if models.IsSystemNotification(em.Provenance) {
 		return ""
 	}
+	// SF-12 (the ADR-001 amendment): a forwarded copy's persisted SRS return
+	// path IS its MAIL FROM — the encoded address on the forwarder domain
+	// carrying the original inbound message's identity, so bounces decode
+	// back to the forwarding chain. VERP keeps handling tenant-originated
+	// mail unchanged.
+	if em.SRSReturnPath != "" {
+		return em.SRSReturnPath
+	}
 	if h.verp != nil {
 		if addr, ok := h.verp.EnvelopeFrom(em.UUID, em.Sender); ok {
 			return addr

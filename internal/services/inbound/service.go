@@ -603,6 +603,23 @@ func (s *Service) resolveBounceRecipient(recipients []string) (*models.Domain, s
 	}
 	for _, r := range recipients {
 		addr := strings.ToLower(strings.TrimSpace(r))
+		// SF-12 (the ADR-001 amendment): the SRS branch first — a forwarded
+		// copy's envelope sender is the srs0+ address on the forwarder's own
+		// domain; a validly signed one resolves to that domain directly. An
+		// srs0+-shaped address that fails the signature falls through to
+		// ordinary recipient handling, which refuses it when the forwarder
+		// domain is not a mailbox domain (the VERP forged fall-through
+		// posture, preserved for SRS).
+		if s.verp.LooksLikeForwardedBounce(addr) {
+			if _, ok := s.verp.DecodeForwarded(addr); ok {
+				if _, host, ok2 := splitAddress(addr); ok2 {
+					if d, err := s.domainRepo.FindVerifiedByName(host); err == nil {
+						return d, addr, true
+					}
+				}
+			}
+			continue
+		}
 		if !s.verp.LooksLikeBounce(addr) {
 			continue
 		}

@@ -1075,7 +1075,12 @@ type SystemForwardRequest struct {
 	// (ADR-001 path). Never a client-supplied authority: the executor derives
 	// it from the durable inbound record.
 	From string
-	To   []string
+	// ReturnPath is the SF-12 sender-rewrite envelope sender (the ADR-001
+	// amendment): the SRS-encoded address on the forwarder domain, persisted
+	// on the copy's email row and preferred as MAIL FROM at delivery. Empty =
+	// the feature off (the VERP/From-only path).
+	ReturnPath string
+	To         []string
 	// Subject/Text/HTML carry the copy's content. Headers are system headers
 	// (Message-ID threading, X-Posta-Forwarded-For loop evidence) — never
 	// accepted from external input.
@@ -1145,6 +1150,10 @@ func (s *Service) SendSystemForward(ctx context.Context, req *SystemForwardReque
 		TextBody:        req.Text,
 		AttachmentsJSON: attachmentsJSON,
 		HeadersJSON:     headersJSON,
+		// SF-12: the sender-rewrite envelope sender rides the copy's row —
+		// the delivery seam prefers it as MAIL FROM for forwarded mail (the
+		// ADR-001 amendment).
+		SRSReturnPath: req.ReturnPath,
 		// OB-2 provenance stamp: the re-send copy a forwarding executor
 		// enqueued — the mark operators and queries distinguish forwarded
 		// mail from tenant/API-originated sends.

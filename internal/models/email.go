@@ -126,6 +126,15 @@ type Email struct {
 	// mode-differentiated success notifications are not implemented.
 	DeliverBySeconds int `json:"deliver_by_seconds,omitempty" gorm:"default:0;not null"`
 
+	// SRSReturnPath is the SF-12 sender-rewrite envelope sender (the ADR-001
+	// amendment, additive column): the SRS-encoded MAIL FROM for a forwarded
+	// copy — the address on the forwarder domain carrying the original
+	// inbound message's identity, HMAC-signed with the bounce secret. The
+	// delivery seam prefers it over the VERP computation for forwarded mail;
+	// the bounce ingestion decodes it for the RFC 3464 match-back. Empty on
+	// every non-forwarded row.
+	SRSReturnPath string `json:"srs_return_path,omitempty" gorm:"size:255;index"`
+
 	// RequireTLS is the RFC 8689 REQUIRETLS requirement (SF-02, additive
 	// column): set at the MSA when the submitting client carried the
 	// REQUIRETLS MAIL FROM parameter. A REQUIRETLS-marked message is never

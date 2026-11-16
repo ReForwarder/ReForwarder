@@ -146,7 +146,12 @@ type ForwardSendRequest struct {
 	// (ADR-001 path). Never a client-supplied authority: the executor derives
 	// it from the durable inbound record.
 	From string
-	To   []string
+	// ReturnPath is the SF-12 sender-rewrite envelope sender (the ADR-001
+	// amendment): the SRS-encoded address on the forwarder domain carrying
+	// the original inbound message's identity, persisted on the copy's email
+	// row and preferred as MAIL FROM at delivery. Empty = the feature off.
+	ReturnPath string
+	To         []string
 	// Subject/Text/HTML carry the copy's content. Headers are system headers
 	// (Message-ID threading, X-Posta-Forwarded-For loop evidence) — never
 	// accepted from external input.
@@ -201,6 +206,11 @@ type Forwarder struct {
 	limiter    TargetRateLimiter
 	bus        *eventbus.EventBus
 	batchLimit int
+	// srs is the SF-12 sender-rewrite codec (the ADR-001 amendment): a
+	// forwarded copy's envelope sender is the SRS-encoded address carrying
+	// the original inbound message's identity. Nil = the feature off (the
+	// pre-SF-12 behavior: the VERP/From-only path).
+	srs *Verp
 	// now overrides the clock (tests).
 	now func() time.Time
 	// jitter returns the random component added to a backoff slot (tests pin it).
@@ -245,6 +255,10 @@ func (f *Forwarder) SetTargetLimiter(l TargetRateLimiter) { f.limiter = l }
 func (f *Forwarder) SetEventBus(b *eventbus.EventBus) { f.bus = b }
 
 // SetBatchLimit overrides the per-sweep task cap (tests).
+// SetSRS attaches the sender-rewrite codec (SF-12, the ADR-001 amendment;
+// nil = the feature off).
+func (f *Forwarder) SetSRS(v *Verp) { f.srs = v }
+
 func (f *Forwarder) SetBatchLimit(n int) {
 	if n > 0 {
 		f.batchLimit = n
@@ -416,6 +430,19 @@ func (f *Forwarder) deliver(ctx context.Context, task *models.InboundForwardTask
 		return nil, err
 	}
 
+	// SF-12 (the ADR-001 amendment): the sender-rewrite envelope — the
+	// forwarded copy's MAIL FROM is the SRS-encoded address on the forwarder
+	// domain carrying the original inbound message's identity, so bounces at
+	// the next hop decode back to this forwarding chain. The feature is off
+	// until the SRS codec is wired (SetSRS); then the encoded return path is
+	// stamped onto the request and persisted on the copy's email row.
+	returnPath := ""
+	if f.srs != nil && f.srs.Enabled() {
+		if rp, ok := f.srs.EncodeForwarded(rec.UUID, domainOf(from)); ok {
+			returnPath = rp
+		}
+	}
+
 	subject := rec.Subject
 	if subject == "" {
 		subject = "(no subject)"
@@ -455,6 +482,7 @@ func (f *Forwarder) deliver(ctx context.Context, task *models.InboundForwardTask
 		UserID:      task.UserID,
 		WorkspaceID: task.WorkspaceID,
 		From:        from,
+		ReturnPath:  returnPath,
 		To:          []string{target},
 		Subject:     subject,
 		Text:        rec.TextBody,

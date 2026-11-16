@@ -101,6 +101,13 @@ func (m *dsnMatcher) matchBack(ctx context.Context, rec *models.InboundEmail, ra
 	}
 	emailUUID, ok := verp.Decode(bounceAddress)
 	if !ok {
+		// SF-12 (the ADR-001 amendment): the SRS branch — a forwarded copy's
+		// envelope sender decodes to the original inbound message's UUID; the
+		// copy's email row is resolved through its persisted SRS return path
+		// and the DSN truth lands on the forwarded copy.
+		if inboundUUID, sok := verp.DecodeForwarded(bounceAddress); sok {
+			return m.matchForwardedBounce(ctx, rec, raw, bounceAddress, inboundUUID)
+		}
 		// Defense in depth: the allowlist validated this address at RCPT and
 		// at ingest; a decode failure here means configuration changed
 		// between those points.
@@ -120,6 +127,27 @@ func (m *dsnMatcher) matchBack(ctx context.Context, rec *models.InboundEmail, ra
 		return err
 	}
 
+	for _, record := range dsn.Records {
+		m.applyRecord(ctx, em, rec, record, dsn.ReportingMTA)
+	}
+	return nil
+}
+
+// matchForwardedBounce resolves the forwarded copy through its persisted SRS
+// return path (SF-12, the ADR-001 amendment) and applies the DSN records to
+// it — the same truth the VERP match-back writes to tenant-originated mail.
+// A copy that does not carry the address is logged and dropped (the inbound
+// bounce record remains regardless).
+func (m *dsnMatcher) matchForwardedBounce(ctx context.Context, rec *models.InboundEmail, raw []byte, bounceAddress, inboundUUID string) error {
+	em, err := m.emailRepo.FindBySRSReturnPath(bounceAddress)
+	if err != nil || em == nil {
+		logger.Debug("srs: no forwarded copy for the decoded bounce", "inbound_uuid", inboundUUID)
+		return nil
+	}
+	dsn, err := ParseDSN(raw)
+	if err != nil {
+		return err
+	}
 	for _, record := range dsn.Records {
 		m.applyRecord(ctx, em, rec, record, dsn.ReportingMTA)
 	}

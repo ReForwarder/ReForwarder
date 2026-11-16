@@ -113,13 +113,22 @@ func TestPoolSelectionIsolatesDomains(t *testing.T) {
 	}
 }
 
+// activeRampStart anchors an active ramp relative to the wall clock: day 1
+// of the schedule, so the cap is live regardless of the real date (the fixed
+// rampDay0 anchor is for the pure DayIndex arithmetic tests).
+func activeRampStart() time.Time {
+	return time.Now().UTC().AddDate(0, 0, -1)
+}
+
 // An active warm-up ramp defers deliveries once its hourly cap is exhausted —
 // without contacting the MX — and the attempt row names the warm-up cap.
 func TestDeliverWarmupCapDefersWithoutMX(t *testing.T) {
 	f := newDeliverFixture(t)
 	// A schedule capped at 1 message/day: the hourly cap is 1, so the second
-	// delivery within the hour defers.
-	s := &WarmupSchedule{StartVolume: 1, DailyMultiplier: 1, Days: 5, StartedAt: rampDay0()}
+	// delivery within the hour defers. The ramp anchor is relative to now —
+	// a fixed 2026 date would silently complete the 5-day ramp (day index >=
+	// Days → no cap) once the wall clock passed it.
+	s := &WarmupSchedule{StartVolume: 1, DailyMultiplier: 1, Days: 5, StartedAt: activeRampStart()}
 
 	spec := testSpec()
 	spec.Warmup = s

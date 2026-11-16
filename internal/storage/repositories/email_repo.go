@@ -96,6 +96,17 @@ func (r *EmailRepository) FindByID(id uint) (*models.Email, error) {
 	return &email, nil
 }
 
+// FindBySRSReturnPath resolves a forwarded copy through its persisted SRS
+// return path (SF-12, the ADR-001 amendment) — the bounce match-back's exact
+// address lookup on the additive email column.
+func (r *EmailRepository) FindBySRSReturnPath(returnPath string) (*models.Email, error) {
+	var em models.Email
+	if err := r.db.Where("srs_return_path = ?", returnPath).First(&em).Error; err != nil {
+		return nil, err
+	}
+	return &em, nil
+}
+
 func (r *EmailRepository) FindByUUID(uuid string) (*models.Email, error) {
 	var email models.Email
 	if err := r.db.Where("uuid = ?", uuid).First(&email).Error; err != nil {

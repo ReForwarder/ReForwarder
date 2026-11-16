@@ -877,6 +877,7 @@ func InitRoutes(app *okapi.Okapi, db *gorm.DB, redisClient *redis.Client, cfg *c
 				UserID:      req.UserID,
 				WorkspaceID: req.WorkspaceID,
 				From:        req.From,
+				ReturnPath:  req.ReturnPath,
 				To:          req.To,
 				Subject:     req.Subject,
 				Text:        req.Text,
