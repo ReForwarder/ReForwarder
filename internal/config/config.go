@@ -448,6 +448,15 @@ type Config struct {
 	IMAP MailProtocolConfig
 	POP3 MailProtocolConfig
 
+	// ManageSieve is the RFC 5804 script-management listener (SF-86, the
+	// ADR-004 amendment): the bounded command set over the per-mailbox
+	// filter scripts (SF-14), authenticated with app passwords only. OFF by
+	// default (POSTA_MANAGESIEVE_ENABLED); the same ADR-004 posture applies —
+	// TLS on any non-loopback bind, per-user and per-IP connection caps, a
+	// per-session command-rate budget. Ports: 4190 (STARTTLS) + 4191
+	// (implicit TLS).
+	ManageSieve MailProtocolConfig
+
 	// ACME certificate lifecycle (SF-34, ADR-007 decision 3, OB-6 wave W2):
 	// per-domain SNI certificates for the IMAP(993)/POP3(995) implicit-TLS
 	// listeners, the submission(587) STARTTLS handshake and the webmail
@@ -901,7 +910,11 @@ func New() *Config {
 		// the limits are required when on (validate()).
 		IMAP: newMailProtocolConfig("IMAP", 143, 993),
 		POP3: newMailProtocolConfig("POP3", 110, 995),
-		ACME: newAcmeConfig(),
+		// ManageSieve (SF-86, the ADR-004 amendment): the script-management
+		// listener pair, 4190 (STARTTLS) + 4191 (implicit TLS), off by
+		// default.
+		ManageSieve: newMailProtocolConfig("MANAGESIEVE", 4190, 4191),
+		ACME:        newAcmeConfig(),
 
 		ProviderSESSecret:      goutils.Env("POSTA_PROVIDER_SES_SECRET", ""),
 		ProviderSendGridKey:    goutils.Env("POSTA_PROVIDER_SENDGRID_KEY", ""),
@@ -1022,7 +1035,7 @@ func isLoopbackHost(host string) bool {
 // connection and command limits are on, and the four ports do not collide
 // with each other or with the other listeners this process may open.
 func (c *Config) validateMailProtocols() error {
-	for name, m := range map[string]MailProtocolConfig{"POSTA_IMAP": c.IMAP, "POSTA_POP3": c.POP3} {
+	for name, m := range map[string]MailProtocolConfig{"POSTA_IMAP": c.IMAP, "POSTA_POP3": c.POP3, "POSTA_MANAGESIEVE": c.ManageSieve} {
 		if !m.Enabled {
 			continue
 		}
@@ -1071,6 +1084,27 @@ func (c *Config) validateMailProtocols() error {
 		}
 	}
 
+	// The ManageSieve listener pair (SF-86) must not collide with the IMAP or
+	// POP3 listeners in either direction.
+	if c.ManageSieve.Enabled {
+		for name, m := range map[string]MailProtocolConfig{"POSTA_IMAP": c.IMAP, "POSTA_POP3": c.POP3} {
+			if !m.Enabled {
+				continue
+			}
+			if c.ManageSieve.Port != 0 && c.ManageSieve.Port == m.Port {
+				return fmt.Errorf("POSTA_MANAGESIEVE_PORT=%d and %s_PORT=%d collide; one process cannot listen on the same port twice", c.ManageSieve.Port, name, m.Port)
+			}
+			if c.ManageSieve.TLSPort != 0 && c.ManageSieve.TLSPort == m.TLSPort {
+				return fmt.Errorf("POSTA_MANAGESIEVE_TLS_PORT=%d and %s_TLS_PORT=%d collide; one process cannot listen on the same port twice", c.ManageSieve.TLSPort, name, m.TLSPort)
+			}
+			for _, pair := range [][2]int{{c.ManageSieve.Port, m.TLSPort}, {c.ManageSieve.TLSPort, m.Port}} {
+				if pair[0] != 0 && pair[0] == pair[1] {
+					return fmt.Errorf("POSTA_MANAGESIEVE/%s port %d is configured twice; one process cannot listen on the same port twice", name, pair[0])
+				}
+			}
+		}
+	}
+
 	// Same-process listeners the mail ports must not collide with. The HTTP
 	// port is always taken; the SMTP listeners only when their feature is on.
 	// (The worker's health/metrics port is a different process and not
@@ -1110,6 +1144,14 @@ func (c *Config) validateMailProtocols() error {
 			return err
 		}
 		if err := check("POSTA_POP3_TLS_PORT", c.POP3.TLSPort); err != nil {
+			return err
+		}
+	}
+	if c.ManageSieve.Enabled {
+		if err := check("POSTA_MANAGESIEVE_PORT", c.ManageSieve.Port); err != nil {
+			return err
+		}
+		if err := check("POSTA_MANAGESIEVE_TLS_PORT", c.ManageSieve.TLSPort); err != nil {
 			return err
 		}
 	}

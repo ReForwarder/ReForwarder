@@ -58,6 +58,7 @@ import (
 	"github.com/goposta/posta/internal/services/inbound"
 	"github.com/goposta/posta/internal/services/mailauth"
 	"github.com/goposta/posta/internal/services/mailstore"
+	"github.com/goposta/posta/internal/services/managesieve"
 	"github.com/goposta/posta/internal/services/meticalert"
 	"github.com/goposta/posta/internal/services/messages"
 	"github.com/goposta/posta/internal/services/mta"
@@ -108,6 +109,10 @@ type serverResources struct {
 	// imap is the OB-4 W2 IMAP4rev1 server (ADR-004 decision 1); nil unless
 	// POSTA_IMAP_ENABLED=true and the listener started.
 	imap *imap.Server
+	// managesieve is the SF-86 RFC 5804 script-management server (the
+	// ADR-004 amendment); nil unless POSTA_MANAGESIEVE_ENABLED=true and the
+	// listener started.
+	managesieve *managesieve.Server
 	// logSinks releases the SF-94 file sink (nil when stdout-only).
 	logSinks io.Closer
 	// certMgr is the ACME/SNI certificate manager (OB-6 W2, SF-34, ADR-007
@@ -514,6 +519,20 @@ func runServer(cli *okapicli.CLI) {
 						res.imap = srv
 					}
 				}
+
+			// ManageSieve server (SF-86, the ADR-004 amendment): the RFC
+			// 5804 script-management surface over the per-mailbox filter
+			// scripts (SF-14), app-password-only auth, TLS enforced per
+			// the ADR-004 listener pattern (STARTTLS on 4190; implicit TLS
+			// on 4191 when POSTA_MANAGESIEVE_TLS_PORT is served). Off by
+			// default (POSTA_MANAGESIEVE_ENABLED).
+			if cfg.ManageSieve.Enabled && !cfg.DevMode {
+				if srv, err := startManageSieveServer(res.db, cfg, res.blobStore, secEng, res.certMgr); err != nil {
+					logger.Error("failed to start ManageSieve server", "error", err)
+				} else {
+					res.managesieve = srv
+				}
+			}
 
 			if res.cronManager != nil {
 				res.cronManager.Start(context.Background())
@@ -1499,6 +1518,147 @@ func startPOP3Server(
 	return srv, nil
 }
 
+// startManageSieveServer configures and launches the ManageSieve server
+// (SF-86, the ADR-004 amendment): the RFC 5804 command set over the
+// per-mailbox filter scripts (SF-14), authenticated with app passwords only
+// via the W1 mailauth seam (the primary account password is structurally
+// never consulted). The plaintext listener (POSTA_MANAGESIEVE_PORT, default
+// 4190) serves STARTTLS when a certificate is configured and refuses
+// authentication before the upgrade; the implicit-TLS listener
+// (POSTA_MANAGESIEVE_TLS_PORT, default 4191) always runs TLS and is served
+// only with a certificate. The listener shares the POP3 TLS wiring (static
+// pair, or the ACME SNI map when the manager is present). Returns the server
+// so shutdown can release it.
+func startManageSieveServer(
+	db *gorm.DB,
+	cfg *config.Config,
+	blobStore blob.Store,
+	secEng *security.Engine,
+	certMgr *certmanager.Manager,
+) (*managesieve.Server, error) {
+	mcfg := cfg.ManageSieve
+	// The adapter resolves the scripts' primary mailbox through the
+	// mailstore; the mailstore refuses construction without the blob store
+	// and the at-rest key (ADR-003) — refuse to start rather than serve a
+	// listener that cannot resolve any mailbox.
+	if blobStore == nil || cfg.EncryptionKey == "" {
+		return nil, errors.New("ManageSieve requires the blob store and POSTA_ENCRYPTION_KEY (script mailboxes resolve through the mailstore)")
+	}
+	msSvc, err := mailstore.New(db, mailstore.ZstdBlobCodec{}, blobStore, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	auth := mailauth.NewAuthenticator(
+		repositories.NewUserRepository(db),
+		repositories.NewUserAppPasswordRepository(db),
+	)
+	if auth == nil {
+		return nil, errors.New("ManageSieve authenticator could not be built (nil mailauth dependency)")
+	}
+
+	// Audit events land in the events substrate (the ADR-004 decision-6
+	// posture).
+	auditSink := managesieve.NewEventAuditLogger(eventbus.New(repositories.NewEventRepository(db)))
+
+	scriptRepo := repositories.NewFilterScriptRepository(db)
+	store, err := managesieve.NewFilterScriptStore(scriptRepo, msSvc)
+	if err != nil {
+		return nil, err
+	}
+
+	srv, err := managesieve.NewServer(managesieve.Config{
+		Hostname:           mcfg.Hostname,
+		MaxSessionsPerUser: mcfg.MaxSessionsPerUser,
+		MaxConnsPerIP:      mcfg.MaxConnsPerIP,
+		CommandRateLimit:   mcfg.CommandRateLimit,
+		CommandRateWindow:  time.Duration(mcfg.CommandRateWindow) * time.Second,
+		// Cleartext authentication is allowed only when the plaintext
+		// listener serves no TLS at all — the same posture as POP3 (a
+		// configuration validate() confines it to loopback binds; the server
+		// additionally checks the peer address at runtime). With a
+		// certificate present, credentials are accepted only after STARTTLS
+		// (or on the implicit-TLS port).
+		AllowCleartextAuth: mcfg.TLSCertFile == "" || mcfg.TLSKeyFile == "",
+	}, store, auth)
+	if err != nil {
+		return nil, err
+	}
+	srv.SetAudit(auditSink)
+	srv.SetSecurity(secEng)
+
+	// TLS wiring: identical posture to POP3 — the static pair first, the
+	// ACME SNI map when the manager is present, ACME-only when no static
+	// pair is configured.
+	var tlsCfg *tls.Config
+	switch {
+	case mcfg.TLSCertFile != "" && mcfg.TLSKeyFile != "":
+		base, certErr := tls.LoadX509KeyPair(mcfg.TLSCertFile, mcfg.TLSKeyFile)
+		if certErr != nil {
+			return nil, fmt.Errorf("load ManageSieve TLS cert: %w", certErr)
+		}
+		baseCert := base
+		if certMgr != nil {
+			parsed, parseErr := certmanager.StaticCertFromFiles(mcfg.TLSCertFile, mcfg.TLSKeyFile)
+			if parseErr != nil {
+				return nil, fmt.Errorf("load ManageSieve TLS cert: %w", parseErr)
+			}
+			baseCert = *parsed
+			tlsCfg = certMgr.MailListenerTLSConfig(parsed)
+		} else {
+			tlsCfg = &tls.Config{
+				Certificates: []tls.Certificate{baseCert},
+				ServerName:   mcfg.Hostname,
+				MinVersion:   tls.VersionTLS12,
+			}
+		}
+		srv.SetTLSConfig(tlsCfg)
+	case certMgr != nil && mcfg.TLSPort > 0:
+		// ACME-only implicit-TLS listener: every certificate comes from the
+		// SNI map; unknown SNI fails the handshake (fail-closed).
+		tlsCfg = certMgr.MailListenerTLSConfig(nil)
+		srv.SetTLSConfig(tlsCfg)
+	case mcfg.TLSPort > 0:
+		return nil, errors.New("ManageSieve TLS port configured without POSTA_MANAGESIEVE_TLS_CERT_FILE/POSTA_MANAGESIEVE_TLS_KEY_FILE (implicit TLS serves no cleartext)")
+	}
+
+	// Plaintext/STARTTLS listener: banned peers are dropped at accept by the
+	// CountingListener; STARTTLS upgrades happen in-session.
+	if mcfg.Port > 0 {
+		l, err := net.Listen("tcp", net.JoinHostPort(mcfg.Host, strconv.Itoa(mcfg.Port)))
+		if err != nil {
+			return nil, err
+		}
+		listener := security.NewCountingListener(l, secEng, mcfg.Port, "managesieve")
+		go func() {
+			logger.Info("ManageSieve server listening", "addr", listener.Addr().String(),
+				"tls", map[bool]string{true: "starttls", false: "none"}[tlsCfg != nil])
+			if err := srv.Serve(listener); err != nil && !errors.Is(err, net.ErrClosed) {
+				logger.Error("ManageSieve server error", "error", err)
+			}
+		}()
+	}
+
+	// Implicit-TLS listener (4191): the eager-handshake TLSServerListener
+	// hands over established *tls.Conn sessions (the POP3 stack).
+	if mcfg.TLSPort > 0 && tlsCfg != nil {
+		l, err := net.Listen("tcp", net.JoinHostPort(mcfg.Host, strconv.Itoa(mcfg.TLSPort)))
+		if err != nil {
+			return nil, err
+		}
+		listener := security.NewCountingListener(l, secEng, mcfg.TLSPort, "managesieve")
+		tlsListener := security.TLSServerListener(listener, tlsCfg, secEng, mcfg.TLSPort)
+		go func() {
+			logger.Info("ManageSieve implicit-TLS server listening", "addr", listener.Addr().String())
+			if err := srv.Serve(tlsListener); err != nil && !errors.Is(err, net.ErrClosed) {
+				logger.Error("ManageSieve implicit-TLS server error", "error", err)
+			}
+		}()
+	}
+
+	return srv, nil
+}
+
 // startIMAPServer configures and launches the IMAP4rev1 server (OB-4 W2,
 // ADR-004 decision 1): the ADR-004 command subset over the mailstore, with
 // the W1 ChangeNotifier wired for IDLE and the Postgres FTS searcher wired
@@ -2146,6 +2306,11 @@ func shutdownServer(res *serverResources) {
 		// Close terminates listeners and live conns, releasing the
 		// per-user/per-IP slots with them.
 		res.imap.Close()
+	}
+	if res.managesieve != nil {
+		// ManageSieve sessions own no long-lived worker state; closing the
+		// listeners and live conns releases their per-user/per-IP slots.
+		res.managesieve.Close()
 	}
 	if res.certCancel != nil {
 		// Stop the SF-110 host-allowlist hot-reload loop (OB-6 W2/SF-34).

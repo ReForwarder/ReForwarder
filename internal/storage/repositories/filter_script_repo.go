@@ -20,6 +20,9 @@
 package repositories
 
 import (
+	"errors"
+	"time"
+
 	"github.com/goposta/posta/internal/models"
 	"gorm.io/gorm"
 )
@@ -82,4 +85,94 @@ func (r *FilterScriptRepository) ListEnabledForMailbox(mailboxID uint) ([]models
 func (r *FilterScriptRepository) DeleteForUser(id, userID uint) (int64, error) {
 	res := r.db.Where("id = ? AND user_id = ?", id, userID).Delete(&models.FilterScript{})
 	return res.RowsAffected, res.Error
+}
+
+// FindByNameForUser returns one of the user's scripts by name within one
+// mailbox (the ManageSieve name-addressed surface), or
+// gorm.ErrRecordNotFound (a missing name reads as missing — isolation).
+func (r *FilterScriptRepository) FindByNameForUser(userID, mailboxID uint, name string) (*models.FilterScript, error) {
+	var script models.FilterScript
+	if err := r.db.Where("user_id = ? AND mailbox_id = ? AND name = ?", userID, mailboxID, name).
+		First(&script).Error; err != nil {
+		return nil, err
+	}
+	return &script, nil
+}
+
+// DeleteByNameForUser removes the named script within one mailbox (scoped;
+// returns the affected-row count).
+func (r *FilterScriptRepository) DeleteByNameForUser(userID, mailboxID uint, name string) (int64, error) {
+	res := r.db.Where("user_id = ? AND mailbox_id = ? AND name = ?", userID, mailboxID, name).
+		Delete(&models.FilterScript{})
+	return res.RowsAffected, res.Error
+}
+
+// UpsertForUser stores (or replaces by name within the mailbox) one script
+// document — the ManageSieve PUTSCRIPT path. A re-put name replaces the
+// stored document and keeps the existing enabled flag (PUTSCRIPT never
+// changes activation); the find-then-write runs in one transaction to narrow
+// the concurrent-put race.
+func (r *FilterScriptRepository) UpsertForUser(script *models.FilterScript) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		var existing models.FilterScript
+		err := tx.Where("user_id = ? AND mailbox_id = ? AND name = ?", script.UserID, script.MailboxID, script.Name).
+			First(&existing).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// Map-based create: the Enabled column carries a server default
+			// (`default:true` on the model), and gorm substitutes that
+			// default for a zero-valued field on struct inserts — which
+			// would silently flip PUTSCRIPT's INACTIVE to active. A map
+			// insert writes every key as-is, Enabled false included.
+			return tx.Model(&models.FilterScript{}).Create(map[string]any{
+				"user_id":      script.UserID,
+				"mailbox_id":   script.MailboxID,
+				"name":         script.Name,
+				"priority":     script.Priority,
+				"enabled":      script.Enabled,
+				"conditions":   script.Conditions, // driver.Valuer → JSON text
+				"actions_json": script.ActionsJSON,
+				"created_at":   time.Now(),
+				"updated_at":   time.Now(),
+			}).Error
+		}
+		if err != nil {
+			return err
+		}
+		existing.Conditions = script.Conditions
+		existing.ActionsJSON = script.ActionsJSON
+		return tx.Save(&existing).Error
+	})
+}
+
+// DeactivateAllForMailbox disables every enabled script of the mailbox —
+// the SETACTIVE "" deactivation.
+func (r *FilterScriptRepository) DeactivateAllForMailbox(userID, mailboxID uint) error {
+	return r.db.Model(&models.FilterScript{}).
+		Where("user_id = ? AND mailbox_id = ? AND enabled = ?", userID, mailboxID, true).
+		Update("enabled", false).Error
+}
+
+// SetActiveForMailbox enables the named script and disables every other
+// script of the mailbox in one transaction — exactly one active script per
+// mailbox (the ManageSieve activation semantics; the filter engine evaluates
+// enabled scripts, first match wins). An unknown name yields
+// gorm.ErrRecordNotFound.
+func (r *FilterScriptRepository) SetActiveForMailbox(userID, mailboxID uint, name string) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.FilterScript{}).
+			Where("user_id = ? AND mailbox_id = ? AND enabled = ?", userID, mailboxID, true).
+			Update("enabled", false).Error; err != nil {
+			return err
+		}
+		res := tx.Model(&models.FilterScript{}).
+			Where("user_id = ? AND mailbox_id = ? AND name = ?", userID, mailboxID, name).
+			Update("enabled", true)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		return nil
+	})
 }

@@ -82,6 +82,12 @@ func TestMailProtocolsDisabledByDefault(t *testing.T) {
 	if cfg.POP3.Port != 110 || cfg.POP3.TLSPort != 995 {
 		t.Fatalf("POP3 ports = %d/%d, want 110/995", cfg.POP3.Port, cfg.POP3.TLSPort)
 	}
+	if cfg.ManageSieve.Enabled {
+		t.Fatalf("ManageSieve must be disabled by default")
+	}
+	if cfg.ManageSieve.Port != 4190 || cfg.ManageSieve.TLSPort != 4191 {
+		t.Fatalf("ManageSieve ports = %d/%d, want 4190/4191", cfg.ManageSieve.Port, cfg.ManageSieve.TLSPort)
+	}
 	if err := cfg.validate(); err != nil {
 		t.Fatalf("default config must validate: %v", err)
 	}
@@ -240,6 +246,49 @@ func TestMailProtocolsValidationMatrix(t *testing.T) {
 				m["POSTA_IMAP_COMMAND_RATE_LIMIT"] = "0"
 				return m
 			}(),
+		},
+		{
+			// SF-86: the ManageSieve listener pair obeys the same posture.
+			name: "ManageSieve enabled with certs on public bind is accepted",
+			overlay: map[string]string{
+				"POSTA_MANAGESIEVE_ENABLED":       "true",
+				"POSTA_MANAGESIEVE_TLS_PORT":      "0",
+				"POSTA_MANAGESIEVE_TLS_CERT_FILE": "/certs/sieve.pem",
+				"POSTA_MANAGESIEVE_TLS_KEY_FILE":  "/certs/sieve.key",
+			},
+		},
+		{
+			name: "ManageSieve cleartext-only listener on public bind is refused",
+			overlay: map[string]string{
+				"POSTA_MANAGESIEVE_ENABLED":  "true",
+				"POSTA_MANAGESIEVE_TLS_PORT": "0",
+			},
+			wantErr: "POSTA_MANAGESIEVE_PORT=4190 without POSTA_MANAGESIEVE_TLS_CERT_FILE",
+		},
+		{
+			name: "ManageSieve plain port colliding with POP3 is refused",
+			overlay: func() map[string]string {
+				m := baseMailEnv()
+				m["POSTA_MANAGESIEVE_ENABLED"] = "true"
+				m["POSTA_MANAGESIEVE_HOST"] = "127.0.0.1"
+				m["POSTA_MANAGESIEVE_TLS_PORT"] = "0"
+				m["POSTA_MANAGESIEVE_PORT"] = "110"
+				return m
+			}(),
+			wantErr: "POSTA_MANAGESIEVE_PORT=110 and POSTA_POP3_PORT=110 collide",
+		},
+		{
+			name: "ManageSieve TLS port colliding with the HTTP port is refused",
+			overlay: func() map[string]string {
+				m := baseMailEnv()
+				m["POSTA_MANAGESIEVE_ENABLED"] = "true"
+				m["POSTA_MANAGESIEVE_TLS_CERT_FILE"] = "/certs/sieve.pem"
+				m["POSTA_MANAGESIEVE_TLS_KEY_FILE"] = "/certs/sieve.key"
+				m["POSTA_PORT"] = "9000"
+				m["POSTA_MANAGESIEVE_TLS_PORT"] = "9000"
+				return m
+			}(),
+			wantErr: "collides with POSTA_PORT=9000",
 		},
 	}
 	for _, tc := range cases {
