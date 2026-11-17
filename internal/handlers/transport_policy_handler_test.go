@@ -527,6 +527,7 @@ func newTpolHarness(t *testing.T) *tpolHarness {
 	return &tpolHarness{o: o, state: state, db: db}
 }
 
+
 func (h *tpolHarness) do(t *testing.T, role string, ws int, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	var req *http.Request
