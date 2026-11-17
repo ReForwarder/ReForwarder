@@ -109,6 +109,7 @@ GET    /api/v1/admin/settings/history
 GET    /api/v1/admin/update
 GET    /api/v1/admin/users
 GET    /api/v1/admin/users/{id}/metrics
+GET    /api/v1/admin/users/{id}/oauth
 GET    /api/v1/admin/users/{id}/plan
 GET    /api/v1/admin/users/{id}/workspaces
 GET    /api/v1/admin/workspaces
@@ -358,6 +359,7 @@ POST   /api/v1/users/me/notifications/dismiss
 POST   /api/v1/users/me/notifications/dismiss-all
 POST   /api/v1/users/me/notifications/read
 POST   /api/v1/users/me/notifications/read-all
+POST   /api/v1/users/me/oauth/link
 POST   /api/v1/users/me/push/subscriptions
 POST   /api/v1/users/me/sessions/logout
 POST   /api/v1/users/me/sessions/revoke-others

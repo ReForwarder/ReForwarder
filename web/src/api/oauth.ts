@@ -25,6 +25,19 @@ export const oauthApi = {
   unlink(providerID: number) {
     return api.delete<ApiResponse<{ message: string }>>(`/users/me/oauth/${providerID}`)
   },
+  // startLink begins the link-intent flow (SF-68): the backend stores the
+  // link state bound to the current session and answers the provider's
+  // authorize URL; the browser navigates to it, and the provider's callback
+  // binds the identity to the current session's account instead of running
+  // login semantics.
+  async startLink(providerSlug: string): Promise<string> {
+    const res = await api.post<ApiResponse<{ authorize_url: string }>>('/users/me/oauth/link', { provider: providerSlug })
+    return res.data.data.authorize_url
+  },
+  // Admin: one user's linked OAuth identities (SF-68 admin visibility).
+  adminUserLinkedAccounts(userID: number) {
+    return api.get<ApiResponse<{ user_email: string; accounts: OAuthLinkedAccount[] }>>(`/admin/users/${userID}/oauth`)
+  },
 
   // Admin: provider management
   adminList() {

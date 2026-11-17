@@ -92,6 +92,16 @@ func (r *Router) oauthRoutes() []okapi.RouteDefinition {
 
 	routes = append(routes, []okapi.RouteDefinition{
 		{
+			Method:      http.MethodPost,
+			Path:        "/link",
+			Handler:     okapi.H(r.h.oauth.LinkProvider),
+			Group:       oauthUser,
+			Summary:     "Link an OAuth identity to the current account",
+			Description: "Starts the OAuth authorization flow with link intent for the authenticated session user (SF-68): the response carries the provider's authorize URL; the provider's callback binds the identity to this account instead of running login semantics",
+			Request:     &handlers.LinkProviderRequest{},
+			Response:    &dto.Response[okapi.M]{},
+		},
+		{
 			Method:   http.MethodGet,
 			Path:     "",
 			Handler:  r.h.oauth.ListLinkedAccounts,
@@ -109,6 +119,35 @@ func (r *Router) oauthRoutes() []okapi.RouteDefinition {
 				okapi.DocPathParam("provider_id", "integer", "Provider ID"),
 			},
 			Response: &dto.Response[okapi.M]{},
+		},
+	}...)
+
+	// Admin visibility of users' linked OAuth identities (SF-68): the linked
+	// identities an account carries, read by the platform admin.
+	oauthUserAdmin := r.v1.Group("/admin/users", r.mw.jwtAdminAuth.Middleware).WithTagInfo(
+		okapi.GroupTag{
+			Name:        tagAdmin,
+			Description: descAdmin,
+		},
+		okapi.GroupTag{
+			Name:        tagOAuth,
+			Description: descOAuth,
+		},
+	)
+	oauthUserAdmin.WithBearerAuth()
+
+	routes = append(routes, []okapi.RouteDefinition{
+		{
+			Method:      http.MethodGet,
+			Path:        "/{id:int}/oauth",
+			Handler:     okapi.H(r.h.oauth.AdminListUserLinkedAccounts),
+			Group:       oauthUserAdmin,
+			Summary:     "List a user's linked OAuth identities (admin)",
+			Description: "The OAuth identities linked to one account: provider, linked email, link time. Admin-gated; the response never carries the stored provider tokens.",
+			Options: []okapi.RouteOption{
+				okapi.DocPathParam("id", "integer", "User ID"),
+			},
+			Response: &dto.Response[handlers.AdminUserLinkedAccountsResponse]{},
 		},
 	}...)
 

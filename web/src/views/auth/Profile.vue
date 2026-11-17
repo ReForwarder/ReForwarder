@@ -89,6 +89,20 @@ onMounted(async () => {
     oauthProviders.value = providersRes.data.data?.providers || []
   } catch { /* ignore */ }
   finally { oauthLoading.value = false }
+
+  // SF-68: the link flow's callback redirects back here with ?oauth=
+  // (linked | already_linked) or ?oauth_error= — surface the outcome once
+  // and strip the parameters so a refresh does not replay it.
+  if (route.query.oauth || route.query.oauth_error) {
+    const outcome = String(route.query.oauth || '')
+    const error = String(route.query.oauth_error || '')
+    await router.replace({ query: { ...route.query, oauth: undefined, oauth_error: undefined } })
+    if (outcome === 'linked') notify.success('Account linked. You can now sign in with it.')
+    else if (outcome === 'already_linked') notify.info('That identity was already linked to your account.')
+    else if (error === 'identity_in_use') notify.error('That identity is already linked to another account.')
+    else if (error === 'link_requires_session') notify.error('Your session expired — sign in again and retry the link.')
+    else if (error) notify.error(`Account linking failed (${error}).`)
+  }
 })
 
 async function handleProfileUpdate() {
@@ -134,8 +148,18 @@ async function unlinkOAuthAccount(account: OAuthLinkedAccount) {
   }
 }
 
-function linkOAuthProvider(slug: string) {
-  window.location.href = `/api/v1/auth/oauth/${slug}/authorize`
+async function linkOAuthProvider(slug: string) {
+  // SF-68: the link-intent flow — the backend stores the link state bound to
+  // this session; navigating to the answered authorize URL makes the provider's
+  // callback bind the identity to THIS account instead of running login
+  // semantics (which would switch the session if the provider identity belongs
+  // to a different user).
+  try {
+    window.location.href = await oauthApi.startLink(slug)
+  } catch (e: any) {
+    const message = e?.response?.data?.error?.message || 'Failed to start account linking'
+    notify.error(message)
+  }
 }
 
 // Password

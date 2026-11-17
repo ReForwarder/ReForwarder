@@ -3,9 +3,10 @@ import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { adminApi } from '../../api/admin'
 import { plansApi } from '../../api/plans'
+import { oauthApi } from '../../api/oauth'
 import { useNotificationStore } from '../../stores/notification'
 import { useConfirm } from '../../composables/useConfirm'
-import type { UserDetailMetrics, AdminWorkspace, Plan } from '../../api/types'
+import type { UserDetailMetrics, AdminWorkspace, Plan, OAuthLinkedAccount } from '../../api/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -23,6 +24,9 @@ const workspaces = ref<AdminWorkspace[]>([])
 const plans = ref<Plan[]>([])
 const changingPlan = ref<number | null>(null)
 const changingUserPlan = ref(false)
+// SF-68 admin visibility: the OAuth identities linked to this account.
+const linkedIdentities = ref<OAuthLinkedAccount[]>([])
+const linkedIdentitiesEmail = ref('')
 
 onMounted(async () => {
   try {
@@ -40,7 +44,20 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
+
+  // SF-68: the linked-identity list is advisory (best-effort) — a read error
+  // must not block the rest of the admin page.
+  try {
+    const res = await oauthApi.adminUserLinkedAccounts(Number(route.params.id))
+    linkedIdentities.value = res.data.data.accounts || []
+    linkedIdentitiesEmail.value = res.data.data.user_email
+  } catch { /* advisory */ }
 })
+
+function formatLinkedAt(iso: string): string {
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString()
+}
 
 async function handleDisable2FA() {
   if (!metrics.value) return
@@ -456,6 +473,33 @@ function formatDate(date: string) {
                 {{ plan.name }}{{ !plan.is_active ? ' (inactive)' : '' }}{{ plan.is_default ? ' (default)' : '' }}
               </option>
             </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- Linked OAuth Identities (SF-68 admin visibility) -->
+      <div class="card" style="margin-top: 24px;">
+        <div class="card-header">
+          <h2>Linked OAuth Identities</h2>
+        </div>
+        <div class="card-body">
+          <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 12px;">
+            The external OAuth identities this account can sign in with. The user manages
+            these links from their profile; this view is read-only.
+          </p>
+          <div v-if="linkedIdentities.length === 0" class="empty-state" style="padding: 16px 0;">
+            <p>No OAuth identities linked{{ linkedIdentitiesEmail ? ` to ${linkedIdentitiesEmail}` : '' }}.</p>
+          </div>
+          <div v-else class="session-list">
+            <div v-for="link in linkedIdentities" :key="link.id" class="session-item">
+              <div class="session-info">
+                <div class="session-browser">
+                  {{ link.provider_name }}
+                  <span class="badge badge-neutral" style="margin-left: 6px">{{ link.provider_type }}</span>
+                </div>
+                <div class="session-meta">{{ link.email }} · linked {{ formatLinkedAt(link.created_at) }}</div>
+              </div>
+            </div>
           </div>
         </div>
       </div>

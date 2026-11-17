@@ -83,6 +83,24 @@ var mhColumns = map[string][]string{
 		"created_at", "delivery_mode", "outbound_bind_ip", "max_msgs_per_connection",
 		"hourly_budget", "pool_id", "mta_sts_mode", "max_message_size",
 		"report_rua", "report_interval_hours", "report_max_bytes"},
+	// SF-68: the users/o_auth_providers/o_auth_accounts tables (gorm names the — the OAuth
+	// link/unlink lifecycle's fake (the UserRepository's FindByID/Update, the
+	// OAuthProviderRepository's FindBySlug, the OAuthAccountRepository's
+	// Create/FindByProviderAndExternalID/FindByUserID/FindByUserAndProvider/
+	// Delete route through the same generic machinery; the column sets are the
+	// OAuth model tables o_auth_* — the models carry no TableName override).
+	"users": {"id", "name", "email", "password_hash", "role", "two_factor_secret",
+		"two_factor_enabled", "active", "require_verified_domain", "auth_method",
+		"avatar_url", "plan_id", "scheduled_deletion_at", "email_verified_at",
+		"created_at", "last_login_at", "default_workspace_id", "migrated_at",
+		"migration_error"},
+	"o_auth_providers": {"id", "workspace_id", "name", "slug", "type", "client_id",
+		"client_secret", "issuer", "auth_url", "token_url", "user_info_url",
+		"scopes", "enabled", "hidden", "auto_register", "allowed_domains",
+		"created_at", "updated_at"},
+	"o_auth_accounts": {"id", "user_id", "provider_id", "provider_user_id",
+		"email", "name", "avatar_url", "access_token", "refresh_token",
+		"token_expires_at", "created_at", "updated_at"},
 }
 
 type mhTable struct {
@@ -171,6 +189,9 @@ type mhPredicate struct {
 	op     string
 	argN   int
 	inVals []driver.Value
+	// litVal carries a literal right-hand side (op "lit=" — e.g. the
+	// repositories' `enabled = true` filters; bindvar predicates use argN).
+	litVal driver.Value
 }
 
 // mhParseWhere parses the WHERE subset the mailstore service emits for the
@@ -222,7 +243,14 @@ func mhParseWhere(s *mhState, where string, args []driver.NamedValue) ([]mhPredi
 			preds = append(preds, mhPredicate{col: mhStripQual(strings.TrimSpace(pieces[0])), op: "<", argN: mhBindNum(pieces[1])})
 		case strings.Contains(part, "="):
 			pieces := strings.SplitN(part, "=", 2)
-			preds = append(preds, mhPredicate{col: mhStripQual(strings.TrimSpace(pieces[0])), op: "=", argN: mhBindNum(pieces[1])})
+			rhs := strings.TrimSpace(pieces[1])
+			if rhs == "true" || rhs == "false" {
+				// A literal boolean filter (e.g. `enabled = true`) — not a
+				// bindvar; match against the literal.
+				preds = append(preds, mhPredicate{col: mhStripQual(strings.TrimSpace(pieces[0])), op: "lit=", litVal: rhs == "true"})
+			} else {
+				preds = append(preds, mhPredicate{col: mhStripQual(strings.TrimSpace(pieces[0])), op: "=", argN: mhBindNum(pieces[1])})
+			}
 		default:
 			return nil, fmt.Errorf("mh fake: unsupported predicate %q", part)
 		}
@@ -248,6 +276,8 @@ func (p mhPredicate) match(s *mhState, table string, row []driver.Value, args []
 	switch p.op {
 	case "=":
 		return mhEqual(cell, mhArg(args, p.argN))
+	case "lit=":
+		return mhEqual(cell, p.litVal)
 	case "<":
 		return mhCompare(cell, mhArg(args, p.argN)) < 0
 	case ">":
@@ -436,6 +466,12 @@ func (c *mhConn) QueryContext(_ context.Context, query string, args []driver.Nam
 		return c.querySelect("filter_scripts", lower, args)
 	case strings.Contains(lower, "from domains"):
 		return c.querySelect("domains", lower, args)
+	case strings.Contains(lower, "from o_auth_providers"):
+		return c.querySelect("o_auth_providers", lower, args)
+	case strings.Contains(lower, "from o_auth_accounts"):
+		return c.querySelect("o_auth_accounts", lower, args)
+	case strings.Contains(lower, "from users"):
+		return c.querySelect("users", lower, args)
 	}
 	return nil, fmt.Errorf("mh fake: cannot route query: %s", query)
 }
