@@ -74,6 +74,15 @@ var mhColumns = map[string][]string{
 	"mail_groups":        {"id", "user_id", "workspace_id", "mailbox_id", "address", "created_at"},
 	"mail_group_members": {"id", "group_id", "mailbox_id", "created_at"},
 	"workspaces":         {"id", "mail_quota_bytes"},
+	// SF-60: the domains table — the DomainHandler CRUD surface's fake (the
+	// DomainRepository's Create/FindByID/FindByScope/Delete route through the
+	// same generic select/insert/count/delete machinery; the column set is the
+	// models.Domain shape, matching the dmarc_handler_test.go fake's list).
+	"domains": {"id", "user_id", "workspace_id", "domain", "ownership_verified",
+		"spf_verified", "dkim_verified", "dmarc_verified", "verification_token",
+		"created_at", "delivery_mode", "outbound_bind_ip", "max_msgs_per_connection",
+		"hourly_budget", "pool_id", "mta_sts_mode", "max_message_size",
+		"report_rua", "report_interval_hours", "report_max_bytes"},
 }
 
 type mhTable struct {
@@ -425,6 +434,8 @@ func (c *mhConn) QueryContext(_ context.Context, query string, args []driver.Nam
 		return c.querySelect("mail_blob_refs", lower, args)
 	case strings.Contains(lower, "from filter_scripts"):
 		return c.querySelect("filter_scripts", lower, args)
+	case strings.Contains(lower, "from domains"):
+		return c.querySelect("domains", lower, args)
 	}
 	return nil, fmt.Errorf("mh fake: cannot route query: %s", query)
 }
