@@ -93,6 +93,7 @@ func (s *Service) Append(ctx context.Context, userID, workspaceID uint, in Appen
 		return nil, err
 	}
 	bodyText, snippet := deriveSearchText(parsed)
+	attachmentsText := extractAttachmentsText(parsed.Attachments)
 	flags := in.Flags &^ models.FlagDeleted // ingest never pre-deletes
 
 	// Phase A: encode every content item.
@@ -220,6 +221,7 @@ func (s *Service) Append(ctx context.Context, userID, workspaceID uint, in Appen
 			BodyText:        bodyText,
 			BodySize:        bodyRef.Size,
 			AttachmentsJSON: string(attachmentsJSON),
+			AttachmentsText: attachmentsText,
 		}
 		if err := tx.Create(msg).Error; err != nil {
 			return fmt.Errorf("insert message: %w", err)

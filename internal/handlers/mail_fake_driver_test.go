@@ -62,7 +62,7 @@ var mhColumns = map[string][]string{
 	"mail_messages": {
 		"id", "folder_id", "uid", "message_id", "subject", "from_addr", "to_addr", "cc",
 		"date", "size", "flags", "mod_seq", "snippet", "body_blob_ref", "body_text",
-		"body_size", "attachments_json", "created_at", "updated_at",
+		"body_size", "attachments_json", "attachments_text", "created_at", "updated_at",
 	},
 	"mail_blob_refs": {"id", "blob_hash", "size", "ref_count", "last_referenced", "created_at"},
 	// SF-14: the per-mailbox filter-script table (the script surface's fake).

@@ -36,7 +36,8 @@ const mailstoreTSVDefinition = `ALTER TABLE mail_messages ADD COLUMN search_tsv 
 			setweight(to_tsvector('english', coalesce(subject, '')), 'A') ||
 			setweight(to_tsvector('english', coalesce(from_addr, '')), 'B') ||
 			setweight(to_tsvector('english', coalesce(to_addr, '') || ' ' || coalesce(cc, '')), 'B') ||
-			setweight(to_tsvector('english', coalesce(body_text, '')), 'C')
+			setweight(to_tsvector('english', coalesce(body_text, '')), 'C') ||
+			setweight(to_tsvector('english', coalesce(attachments_text, '')), 'D')
 		) STORED`
 
 // mailstoreEnsureSQL idempotently creates the mail_messages.search_tsv
@@ -62,6 +63,20 @@ BEGIN
 		  AND a.attname = 'search_tsv'
 		  AND NOT a.attisdropped
 		  AND a.attgenerated = ''
+	) THEN
+		EXECUTE 'ALTER TABLE mail_messages DROP COLUMN search_tsv';
+		EXECUTE $tsv$` + mailstoreTSVDefinition + `$tsv$;
+	ELSIF EXISTS (
+		-- SF-112: a generated column from the pre-attachments_text definition
+		-- (its expression does not reference the new column) is rebuilt with
+		-- the current one — the column is derived data only, so the rebuild is
+		-- safe (the same posture the plain-column branch above records).
+		SELECT 1 FROM pg_attribute a
+		JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+		WHERE a.attrelid = 'mail_messages'::regclass
+		  AND a.attname = 'search_tsv'
+		  AND a.attgenerated <> ''
+		  AND pg_get_expr(d.adbin, d.adrelid) NOT LIKE '%attachments_text%'
 	) THEN
 		EXECUTE 'ALTER TABLE mail_messages DROP COLUMN search_tsv';
 		EXECUTE $tsv$` + mailstoreTSVDefinition + `$tsv$;

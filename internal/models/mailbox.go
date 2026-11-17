@@ -153,6 +153,13 @@ type MailMessage struct {
 	// JSON-in-text convention, as InboundEmail.AttachmentsJSON); the mailstore
 	// service marshals/unmarshals it.
 	AttachmentsJSON string `json:"attachments_json,omitempty" gorm:"type:text"`
+	// AttachmentsText is the bounded search-extraction of the message's
+	// attachments (SF-112, the extraction-for-search slice): per-attachment
+	// marker sections ([attachment: name]) with the extracted text (plain,
+	// HTML-stripped, PDF via the pure-Go parser), weighted into search_tsv
+	// with the 'D' class so attachment hits surface distinctly. Additive
+	// column; the extraction bounds live in mailstore/extract.go.
+	AttachmentsText string `json:"-" gorm:"type:text"`
 	// SearchTSV is the tsvector generated column created by raw SQL
 	// (internal/storage/migration + the upgrade step); GORM must never
 	// reference it in writes. See mailstore.Searcher (OB-3 search wave).

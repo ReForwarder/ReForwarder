@@ -81,7 +81,12 @@ const searchFolderClause = ` AND m.folder_id = ?`
 // round-trip. Ordering: relevance first (ts_rank reads the setweight weights
 // from search_tsv, so a subject hit outranks the same token in from/to and in
 // body), then newest-first, then id for a stable tiebreak.
+// SF-112: attachment_hit reports whether the match also lands in the
+// message's extracted attachment text (the 'D' weight class of search_tsv) —
+// the search surface can flag "this hit is in an attachment". The expression
+// is a bound-parameter tsquery like the rest; no input is concatenated.
 const searchPageSQL = `SELECT m.id AS message_id, m.folder_id AS folder_id,
+	(to_tsvector('english', coalesce(m.attachments_text, '')) @@ websearch_to_tsquery('english', ?)) AS attachment_hit,
 	ts_rank(m.search_tsv, websearch_to_tsquery('english', ?)) AS rank_score,
 	COUNT(*) OVER () AS total_count `
 
@@ -113,10 +118,11 @@ func NewPostgresSearcher(db *gorm.DB) (*PostgresSearcher, error) {
 
 // searchRow mirrors one result row of searchPageSQL.
 type searchRow struct {
-	MessageID uint    `gorm:"column:message_id"`
-	FolderID  uint    `gorm:"column:folder_id"`
-	RankScore float64 `gorm:"column:rank_score"`
-	Total     int64   `gorm:"column:total_count"`
+	MessageID     uint    `gorm:"column:message_id"`
+	FolderID      uint    `gorm:"column:folder_id"`
+	AttachmentHit bool    `gorm:"column:attachment_hit"`
+	RankScore     float64 `gorm:"column:rank_score"`
+	Total         int64   `gorm:"column:total_count"`
 }
 
 // normalizeSearchQuery applies the guards shared by every entry point: blank
@@ -185,7 +191,10 @@ func (s *PostgresSearcher) Search(ctx context.Context, scope SearchScope, q Sear
 		coreArgs = append(coreArgs, q.FolderID)
 	}
 
-	pageArgs := append([]any{text}, coreArgs...)
+	// Arg order (statement order): the SELECT carries the attachment-hit
+	// tsquery and the rank tsquery (both the query text), then the WHERE
+	// core, then paging.
+	pageArgs := append([]any{text, text}, coreArgs...)
 	pageArgs = append(pageArgs, limit, offset)
 	var rows []searchRow
 	if err := s.db.WithContext(ctx).Raw(searchPageSQL+core+searchPageOrder, pageArgs...).Scan(&rows).Error; err != nil {
@@ -196,7 +205,12 @@ func (s *PostgresSearcher) Search(ctx context.Context, scope SearchScope, q Sear
 	var total int64
 	for _, r := range rows {
 		total = r.Total
-		hits = append(hits, SearchHit{MessageID: r.MessageID, FolderID: r.FolderID, Rank: r.RankScore})
+		hits = append(hits, SearchHit{
+			MessageID:     r.MessageID,
+			FolderID:      r.FolderID,
+			Rank:          r.RankScore,
+			AttachmentHit: r.AttachmentHit,
+		})
 	}
 	if total == 0 {
 		// Empty page: either genuinely no matches, or the offset lies past the

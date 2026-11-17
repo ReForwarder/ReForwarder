@@ -161,6 +161,11 @@ type SearchHit struct {
 	MessageID uint
 	FolderID  uint
 	Rank      float64
+	// AttachmentHit is true when the match also lands in the message's
+	// extracted attachment text (SF-112: the search surface can flag "this
+	// hit is in an attachment"). The subject/from/body classes stay the
+	// ranking source; this flag is annotation, not a filter.
+	AttachmentHit bool
 }
 
 // SearcherStub reports ErrSearchUnavailable until the search wave installs the
