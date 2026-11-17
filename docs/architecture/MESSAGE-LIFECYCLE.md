@@ -1,5 +1,8 @@
 # Message Lifecycle — the 14 Flows
 
+> **📄 Status (2026-11-14):** 📌 **Current reference** (Accepted) — the 14 message flows F1–F14 with invariants.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 **Status:** Accepted (2026-11-07) · Companion to [OPTION-B-ARCHITECTURE.md](OPTION-B-ARCHITECTURE.md). Each flow names its trigger, path, durable artifacts, and truth events. Non-negotiable #3 (delivered = remote 2xx / provider truth only) and #4 (durable path before any action) hold in every flow.
 
 ## Outbound flows

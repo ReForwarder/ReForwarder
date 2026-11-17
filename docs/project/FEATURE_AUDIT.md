@@ -1,5 +1,8 @@
 # FEATURE_AUDIT.md — ReForwarder feature audit: date & evidence record
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical audit record** (2026-11-06, HEAD `0f52636`) — the run that minted the RF-F registry; its §8 risk table rows are stale (several risks since closed).
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 **Audit date:** 2026-11-06.
 
 **Producer:** the *audit & backlog sync* workflow run persisted at

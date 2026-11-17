@@ -1,5 +1,8 @@
 # V-B2 — Verification verdicts: the reference platform parity audit Category B (SF-34..SF-45)
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical verification-wave evidence** (2026-11-07) — statuses recorded here are superseded by the live ledger `../FEATURE_PARITY_AUDIT.md`; retained as the evidence layer cited by register records.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../../README.md)
+
 Auditor: V-B2 · Date: 2026-11-07 · Scope: `docs/audits/REFERENCE-PLATFORM_FEATURE_PARITY_AUDIT.md` Category B records SF-34..SF-45 (pre-seed statuses included) · Requirements: `docs/research/reference-platform-feature-inventory.md` §B · Ledger: `docs/research/reference-platform-feature-gap-analysis.md` §4a.
 
 **Method and limits.** Read-only code verification at HEAD `482d10b` (tree carries uncommitted changes not touched by this audit; `git status` shows `?? docs/audits/` untracked). **No Go toolchain available — no builds, no tests, no docker were run.** Every test named below was located by reading its source (`file:line`), not executed; "Tests: Verified" means the test source exists, is substantive, and targets the verified behavior — not that a run passed. Frontend verified by reading sources/specs, not by running a browser. Absence claims rest on exhaustive greps over `internal/` + `cmd/` (`*.go`, tests excluded unless cited) for: `acme|autocert|letsencrypt`, `sieve`, `spam` (all hits inspected and scoped), `pyzor|gtube|ftrl|spamtrap`, `oauthbearer|xoauth2|oauth2`, `app.password|app_password|apppassword`, `anthropic|openai|gemini|ollama`, `blocklist|blocked_extension|spam_rules|rule feed`, `greylist`, `dnsbl`, `memory|BufferPool|maxBuffer` (security/inbound/cmd). Only this file was written.

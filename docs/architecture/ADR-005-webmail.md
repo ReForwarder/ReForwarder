@@ -1,5 +1,8 @@
 # ADR-005 — Webmail & Mailbox Administration
 
+> **📄 Status (2026-11-14):** 📌 **Accepted ADR** (2026-11-07) — binding decision record. Landed as Option B Phase 5 (OB-5); the campaign/transactional compose surface remains an open product decision.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 - **Status:** Accepted (2026-11-07 — Option B programme authorization)
 - **Phase:** Option B Phase 5 · **Covers (parity register):** SF-84 (JMAP revisit deferred), CA-01 (compose UI), plus mailbox administration (SF-65/72/80 surfaces)
 

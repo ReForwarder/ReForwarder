@@ -1,5 +1,8 @@
 # 03 — ReForwarder Existing-Feature Audit: Current State of the Product
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical repo audit** (2026-11-05, HEAD `a6f1681`) — every verdict here is superseded by `docs/project/FEATURE_INVENTORY.md` and `docs/audits/FEATURE_PARITY_AUDIT.md`; its §2.10 in-flight items have since landed.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 > **Doc 3 of 7** in the ReForwarder product-roadmap documentation suite. This document records the **actual current state of ReForwarder**: every registry feature mapped to its implementation (or absence) with exact file paths, endpoints, models, and tests. IDs are permanent registry IDs — see **`01-oss-feature-inventory.md`** (§ "ID scheme") for the ID scheme and project codes; gap analysis consumes this document's PARTIAL/MISSING verdicts in **`04-feature-gap-analysis.md`**; deep architecture prose lives in **`06-architecture-impact.md`**.
 
 - **Audit date:** 2026-11-05.

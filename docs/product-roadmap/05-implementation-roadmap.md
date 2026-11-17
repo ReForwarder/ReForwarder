@@ -1,5 +1,8 @@
 # 05 — Implementation Roadmap: Prioritized Plan and Sequence
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical execution plan** (2026-11-05) — most of its phase sequence was executed or overtaken by the Option B programme; do not start work from this document. Live queue: `docs/implementation/PARTIAL_FEATURE_COMPLETION_TRACKER.md` + `docs/project/BACKLOG.md`.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 > **Doc 5 of 7** in the ReForwarder product-roadmap documentation suite. This document turns the gap register (`04-feature-gap-analysis.md`) into the prioritized, scored, and phase-ordered plan that future implementation phases execute from. Gap evidence, file-level proof, and competitor matrices live in doc 04 and `02-competitor-comparison.md`; architecture consequences live in `06-architecture-impact.md`.
 
 - **Date:** 2026-11-05.

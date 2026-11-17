@@ -1,5 +1,8 @@
 # Report B — Port-Scanner Detection in the reference platform: What Exists, What Doesn't, and What ReForwarder Should Learn
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical clean-room analysis** (Report B, 2026-11-01) — its design-fresh recommendation was implemented on 2026-11-02 (port-scan detection + IP blocking engine).
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 | | |
 |---|---|
 | **Subject repository** | the reference platform Mail Server (`reference-platformlabs/reference-platform`), clone at `C:\Users\Ibrahim\.zcode\tmp\reference-platform-analysis\reference-platform` |

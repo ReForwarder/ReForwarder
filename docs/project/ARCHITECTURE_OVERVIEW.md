@@ -1,5 +1,8 @@
 # ReForwarder — Architecture Overview (current system + Option B direction)
 
+> **📄 Status (2026-11-14):** 📌 **Current overview** — one-page architecture summary. Caveat: its "known gaps" list predates 2026-11-11 (GAP-03/RF-F123 since closed) and §3 predates the direct-to-MX MTA; verify against the registry before relying on it.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 > Summary level only. Full diagrams and per-engine detail live in the source docs; this file links to them rather than reproducing them:
 > - `README.md` §Architecture — deployment-level flow diagram (server/worker/shared state) and stack.
 > - `docs/product-roadmap/06-architecture-impact.md` §2 — AS-IS system context, engine map, delivery-pipeline detail; §4 — recommended relay-plane target; §10 — security defense-in-depth.

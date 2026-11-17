@@ -1,5 +1,8 @@
 # 01 — OSS Feature Inventory: 12 Self-Hostable Email Platforms
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical research baseline** (2026-11-05, HEAD `a6f1681`) — the 199-ID registry and its ReForwarder status columns are a frozen snapshot; the live registry is `docs/project/FEATURE_INVENTORY.md` (RF-F) and `docs/audits/FEATURE_PARITY_AUDIT.md` (SF).
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 > **Doc 1 of 7** in the ReForwarder product-roadmap documentation suite. Feeds `02-competitor-comparison.md` and all later docs (gap analysis, roadmap prioritization). This document is the **normalized, registry-ID-keyed inventory**; cross-project matrices and ReForwarder verdicts live in later docs — see `02-competitor-comparison.md`.
 
 - **Research date:** 2026-11-05 (all facts, releases, and repo states are as-of that date; see §5 caveats).

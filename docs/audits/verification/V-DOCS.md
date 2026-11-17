@@ -1,5 +1,8 @@
 # V-DOCS — Documentation structure verification evidence
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical verification-wave evidence** (2026-11-07) — statuses recorded here are superseded by the live ledger `../FEATURE_PARITY_AUDIT.md`; retained as the evidence layer cited by register records.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../../README.md)
+
 **Auditor:** coordinator · **Date:** 2026-11-07 · **Baseline HEAD:** `482d10b`
 
 ## Docusaurus production build (baseline)

@@ -1,5 +1,8 @@
 # ADR-008 — Data & Event Ownership (Tenancy, Quotas, Event Substrate)
 
+> **📄 Status (2026-11-14):** 📌 **Accepted ADR** (2026-11-07) — binding cross-cutting decision record; its tenancy gate is closed by TENANCY-DECISION.md (same folder).
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 - **Status:** Accepted (2026-11-07 — Option B programme authorization)
 - **Phase:** Cross-cutting (binding on Phases 1–6; tenant objects/SCIM revisited at Phase 6) · **Covers (parity register):** SF-19, SF-71, SF-72, SF-66 (tenancy/roles), SF-80 (quotas), SF-81 (retention ownership), the event substrate (gap-analysis §7 architecture requirement)
 

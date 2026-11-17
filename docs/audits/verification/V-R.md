@@ -1,5 +1,8 @@
 # V-R — Verification verdicts: R-01..R-28 roadmap delivery evidence
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical verification-wave evidence** (2026-11-07) — statuses recorded here are superseded by the live ledger `../FEATURE_PARITY_AUDIT.md`; retained as the evidence layer cited by register records.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../../README.md)
+
 Auditor: Wave-R · Date: 2026-11-07 · Scope: confirmation re-check of the R-01..R-28 delivery evidence at HEAD `50e7f86`, claims sourced from `docs/implementation/ROADMAP_IMPLEMENTATION.md` (per-item notes + "Acceptance audit (2026-11-07)" entry). The 2026-11-07 acceptance audit (commit `27c418a`) verified all 27 active R-IDs; this is a CONFIRMATION pass (R-16 tombstoned), not a re-implementation audit.
 
 **Method and limits.** Read-only code verification at HEAD `50e7f86`. No Go toolchain — no builds, tests, or docker were run; every test named below was located by reading its source, not executed. For each of the 27 active R-IDs: (1) the tracker's cited test files exist and contain the cited test functions (line numbers compared against the tracker's citations); (2) the core implementation file still carries the mechanism. Working tree at check time carried other waves' outputs (`docs/audits/verification/V-*.md` untracked, `docs/audits/REFERENCE-PLATFORM_FEATURE_PARITY_AUDIT.md` modified) — none touch R-item code. Only this file was written.

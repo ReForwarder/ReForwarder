@@ -1,5 +1,8 @@
 # ReForwarder — Project Overview
 
+> **📄 Status (2026-11-14):** 🗄️ **Stale snapshot** (2026-11-06 registry generation: 74/9/22 @105) — predates the entire mail-infrastructure programme (MTA, IMAP/POP3, webmail, mailstore). Current counts: `FEATURE_INVENTORY.md` (99/13/15 @127).
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 > Companion documents: [`FEATURE_INVENTORY.md`](FEATURE_INVENTORY.md) (the 105-entry feature registry — *what exists*) and [`ARCHITECTURE_OVERVIEW.md`](ARCHITECTURE_OVERVIEW.md) (system architecture — *how it fits together*).
 
 ## Title & description

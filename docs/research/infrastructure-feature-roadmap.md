@@ -1,5 +1,8 @@
 # ReForwarder — the reference platform-Inspired Implementation Roadmap (P0–P4)
 
+> **📄 Status (2026-11-14):** ✅ **Fully executed — historical roadmap** (2026-11-05) — all R-01..R-28 items are complete or explicitly tombstoned (`docs/implementation/ROADMAP_IMPLEMENTATION.md`); its "DO NOT IMPLEMENT" list was superseded by the Option B programme (ADRs 001–009).
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 > Derived from `reference-platform-feature-inventory.md` (the reference platform v1.0.3 @ `8b326865`) and `reforwarder-capability-audit.md` (ReForwarder @ `7a84e46`). This roadmap follows the governing distinction: **email-infrastructure management capabilities in; mail-server capabilities out.** ReForwarder sends through trusted relays by design — the roadmap hardens and observes that model rather than replacing it with an MTA.
 >
 > Priorities: **P0** critical gap (broken/essential) · **P1** very high · **P2** high · **P3** medium · **P4** low. Complexity: XS/S/M/L/XL. Risk: Low/Medium/High. "the reference platform ref" cites the `SF-nn` feature that inspired the item.

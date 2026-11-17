@@ -1,5 +1,8 @@
 # PROJECT_MAINTENANCE — synchronization operating procedure
 
+> **📄 Status (2026-11-14):** 📌 **Current procedure** — the ledger/board synchronization operating manual (surfaces, update flow, GitHub Projects CLI procedure, safety rules).
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 How the repo's tracking surfaces stay in sync. Produced by run `dwfrun-84c797c2-39b6-49df-9612-c3dc664a20e7` (2026-11-06). Every claim below marked **verified** was executed in that run's session; everything else is the documented procedure to follow.
 
 > **Migration note (2026-11-06):** an audit run created 92 GitHub issues as the individual specs; the user directed their removal the same day — the issues were deleted, never closed, and must not reappear. The backlog moved to **Project #1 draft items** (the board notes described in §1); GitHub issues are no longer used for backlog tracking anywhere in this procedure. The deleted issues' full bodies are archived at `.zcode/tmp/issues-backup-2026-11-06.json` — an archive, not a tracking surface.

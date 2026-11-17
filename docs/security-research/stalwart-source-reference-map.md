@@ -1,5 +1,8 @@
 # Report E — the reference platform Source Reference Map
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical navigation aid** (Report E, 2026-11-01) — file:line index into the analyzed reference platform's source; makes no implementation claims.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 Structured source-code reference index for the the reference platform security investigation series (Reports A–D, F–G).
 
 | Field | Value |

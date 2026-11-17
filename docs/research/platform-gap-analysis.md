@@ -1,5 +1,8 @@
 # ReForwarder — the reference platform Feature Gap Analysis (main report)
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical analysis** (2026-11-05) — its "should-not-add" list was superseded by the Option B decision (direct-to-MX, IMAP/POP3, ACME, DNS automation and IP warm-up stacks now exist); its 21 recommendations were executed as R-01..R-28, all complete (see `docs/implementation/ROADMAP_IMPLEMENTATION.md`).
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 > **the reference platform inspected:** `main` @ `8b326865` = **v1.0.3** (clone refreshed 2026-11-05; the 2026-11-02 security deep-dive used `23b69755` = v1.0.1 — two patch releases behind, no feature divergence). **ReForwarder inspected:** `main` @ `7a84e46` (2026-11-04). **Licenses:** the reference platform core AGPL-3.0-only (+ SEL enterprise components); ReForwarder AGPL-3.0-or-later.
 > **Companion documents:** `reference-platform-feature-inventory.md` (115 catalogued the reference platform features `SF-01…SF-115`, source evidence + coverage checklist) · `reforwarder-capability-audit.md` (backend + frontend + infrastructure audit) · `reforwarder-reference-platform-roadmap.md` (28 recommendations `R-01…R-29`, R-16 tombstoned, dependencies, acceptance criteria).
 

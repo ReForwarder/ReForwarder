@@ -1,5 +1,8 @@
 # Component Matrix — Option B
 
+> **📄 Status (2026-11-14):** 📌 **Current reference** (Accepted) — component → package/phase/ADR/storage map; §2's preserved contracts still hold.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 **Status:** Accepted (2026-11-07) · Companion to [OPTION-B-ARCHITECTURE.md](OPTION-B-ARCHITECTURE.md). Maps every new/extended component to its ADR, phase, package, storage, and the parity-register features it delivers.
 
 ## 1. Components

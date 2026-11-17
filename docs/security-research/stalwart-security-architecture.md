@@ -1,5 +1,8 @@
 # Report A — the reference platform Mail Server Security Architecture
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical clean-room analysis** (Report A, 2026-11-01) — analysis of a third-party reference platform's abuse-prevention architecture; clean-room discipline applies (no code copied). The Go adoption it informs shipped as the 2026-11-02 security engine.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 | | |
 |---|---|
 | **Subject** | the reference platform Mail Server (github.com/reference-platformlabs/reference-platform) |

@@ -1,5 +1,8 @@
 # the reference segmentation product Segments — Source Analysis & ReForwarder Adaptation Decisions
 
+> **📄 Status (2026-11-14):** ✅ **Delivered — historical design record** — the Segments adaptation it planned shipped (segment SQL builder, preview, campaign targeting — registry RF-F062), and its deferred half (segment-membership automation conditions) landed later in the automation engine.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 > Research basis for the ReForwarder Segments feature. the reference segmentation product was studied at **source level** from the
 > [usereference-segmentation/reference-segmentation](https://github.com/usereference-segmentation/reference-segmentation) repository, **`next` branch** (the default branch — the `main`
 > branch is a legacy codebase whose Prisma schema has **no Segment model at all**). Every claim below was verified

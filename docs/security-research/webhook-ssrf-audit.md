@@ -1,5 +1,8 @@
 # Independent Security Audit — Webhook SSRF Remediation (commit `5c2678a`)
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical audit — latest recorded SSRF audit state** (2026-11-04): PASS WITH LIMITATIONS; the automation-client egress and proxy-mode rebinding limitations it records remain the most recent documented SSRF follow-ups.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 > **Date:** 2026-11-04 · **Auditors:** three independent review agents (cold review, no implementation-brief contamination) · **Reference:** upstream goposta/posta#282
 >
 > **Scope:** every change in `5c2678a` (block SSRF through webhook URLs) + callers, workers, retry paths, config; proxy-mode assessment; automation-subsystem assessment (read-only). Adversarial tests were added and executed independently.

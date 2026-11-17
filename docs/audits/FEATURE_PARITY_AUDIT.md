@@ -481,9 +481,9 @@
 | Field | Value |
 |---|---|
 | Source | inventory §C SF-47 · ledger N/A |
-| Status fields | Backend: Missing · others: — |
-| Final status | **PLANNED (ADR-004 accepted · OB-4)** |
-| Evidence | VERIFIED (read-only code audit) — full verdict: docs/audits/verification/V-CD.md. |
+| Status fields | Backend: Verified · Frontend: — · Database: Verified (script store) · API: Verified (RFC 5804 wire) · Security: Verified (app-password auth, TLS, limits, audit) · Tests: Verified (command-matrix + store tests) · Docs: Partial (operator page pending) |
+| Final status | **COMPLETE (2026-11-17 — landed with the SF-14 filter-script engine; the RFC 5804 management protocol over the per-recipient script store)** |
+| Evidence | `internal/services/managesieve/` (server.go, session.go, wire.go, store.go, limits.go, audit.go + 2 test files); wired `cmd/posta/server.go:530` (startManageSieveServer) and `:1521` (constructor); gated `POSTA_MANAGESIEVE_ENABLED` (`internal/config/config.go:451-458,1098`); store persistence `storage/repositories/filter_script_repo.go`. Re-word applied 2026-11-18 per the final reconciliation's pending item 9 — the landing was recorded under the SF-86 wave; this dedicated RFC 5804 record now cites it. |
 
 ### SF-48 — Per-account Sieve at final delivery
 | Field | Value |

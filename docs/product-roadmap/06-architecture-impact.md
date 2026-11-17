@@ -1,5 +1,8 @@
 # 06 — Architecture Impact: Existing System, Target Architecture, and Migration Consequences
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical architecture impact** (2026-11-05) — its "do NOT build an MTA / mail server" guidance was superseded by the Option B decision (ADRs 001–009; direct-to-MX, IMAP/POP3 and the mailbox stack shipped 2026-11-07..12).
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 > **Doc 6 of 7** in the ReForwarder product-roadmap documentation suite. This document translates the roadmap (doc 05, built on `04-feature-gap-analysis.md` ← `03-existing-feature-audit.md`) into architecture terms: what the system looks like today, what the roadmap changes, what it deliberately does not change, and what each change costs in migration and compatibility terms.
 
 - **Date:** 2026-11-05.

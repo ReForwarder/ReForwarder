@@ -1,5 +1,8 @@
 # the reference platform Source Register
 
+> **📄 Status (2026-11-14):** 📌 **Current reference register** (2026-11-07 baseline) — catalogs every document feeding the parity programme; the authoritative ledgers it points to are `FEATURE_PARITY_AUDIT.md` and `FINAL_STALWART_FEATURE_VERIFICATION.md` (same folder).
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 **Audit:** the reference platform 115-feature parity programme (2026-11-07) · **Baseline HEAD:** `482d10b` ·
 **Ledger of record:** [REFERENCE-PLATFORM_FEATURE_PARITY_AUDIT.md](REFERENCE-PLATFORM_FEATURE_PARITY_AUDIT.md) ·
 **Status vocabulary:** COMPLETE / PARTIAL / MISSING / BROKEN / BLOCKED BY ADR / PLANNED / IN PROGRESS (no silent N/A or DEFERRED — every non-COMPLETE record carries a written technical justification and, where applicable, the governing ADR and Option B phase).

@@ -1,5 +1,8 @@
 # Option B Architecture — Complete Email Infrastructure
 
+> **📄 Status (2026-11-14):** 📌 **Current governance** (Accepted) — the binding architecture thesis and its four non-negotiables; the programme it describes executed as OB-1..OB-6.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 **Status:** Accepted (2026-11-07) · **Programme:** `todo.md` Track A · **Decision record:** `docs/product-roadmap/upcomming-convo.md` §7 · **ADRs:** [ADR-001](ADR-001-outbound-mta.md) … [ADR-009](ADR-009-deployment-topology.md) · **Feature ledger:** `docs/audits/REFERENCE-PLATFORM_FEATURE_PARITY_AUDIT.md`
 
 ## 1. Thesis

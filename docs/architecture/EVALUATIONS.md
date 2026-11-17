@@ -1,5 +1,8 @@
 # Evaluations — JMAP (RF-B126 / SF-84) & Groupware (SF-111 / SF-112)
 
+> **📄 Status (2026-11-14):** 📌 **Current decisions** (2026-11-11) — JMAP / groupware / FileNode all "Not now" with recorded demand evidence and revisit triggers; these are evaluations, not commitments.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 - **Status:** Evaluations only (2026-11-11 — OB-6 convergence wave). **These are
   not commitments.** No feature on this page is scheduled, claimed, or ledgered
   as landed; each records the honest state of effort, dependencies, and demand

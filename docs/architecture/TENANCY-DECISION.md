@@ -1,5 +1,8 @@
 # Decision — Tenancy, Roles, SCIM (SF-66 / SF-71 / SF-72) at the OB-6 Revisit
 
+> **📄 Status (2026-11-14):** 📌 **Current decision** (2026-11-11) — nothing ships without the recorded prerequisites; gates SF-66/71/72.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 - **Status:** Decided (2026-11-11 — OB-6 convergence wave, per ADR-008 §6's Phase 6 revisit)
 - **Decision in one line:** **Nothing ships now.** No tenant objects, no SCIM, no granular-permission registry — each is deferred until a named, reviewed migration plan exists *and* a real consumer demands it. This document is the decision record ADR-008 §6 required; it implements no half-tenantancy.
 - **Supersedes:** the residual ambiguity between `todo.md:599` (SCIM listed "Still dead") and ADR-008 §6 / `docs/audits/FEATURE_PARITY_AUDIT.md` (SF-71 "PLANNED under ADR-008 (OB-6 revisit)") — the ADR governs: these are **deferral-with-prerequisites decisions, not rejections**.

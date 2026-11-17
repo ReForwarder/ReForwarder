@@ -1,5 +1,8 @@
 # ADR-007 — DNS Automation & Deliverability (Providers, Certificates, MTA-STS/TLS-RPT/DANE)
 
+> **📄 Status (2026-11-14):** 📌 **Accepted ADR** (2026-11-07) — binding decision record. Landed as Option B Phase 6 (OB-6): DNS automation, ACME/SNI, MTA-STS/TLS-RPT, pools/warm-up; DNS-01 via the reserved CertSolver seam remains open.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 - **Status:** Accepted (2026-11-07 — Option B programme authorization)
 - **Phase:** Option B Phase 6 (with Phase 1 PTR-guidance slice) · **Covers (parity register):** SF-28 (DKIM2), SF-29 (MTA-STS), SF-31 (TLS-RPT), SF-34 (ACME), SF-61 (DNS auto-publication), SF-32 completion, GAP-08 residual
 

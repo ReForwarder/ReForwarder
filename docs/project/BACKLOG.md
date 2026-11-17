@@ -1,5 +1,8 @@
 # ReForwarder — Operational Backlog
 
+> **📄 Status (2026-11-14):** 📌 **Current operational task ledger** — 91 tasks: 47 To-do · 17 In Progress · 27 Done (row statuses are current; the header count line saying "In Progress × 12" is stale).
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 > Generated **2026-11-06** from `todo.md` (master todo, Track A/B), the `docs/product-roadmap/` suite (research dated 2026-11-05), and `upcomming-convo.md` (Option B decision). Workflow statuses reconciled against HEAD `0f52636` ("Fix WebAuthn nil-user abort path and duplicate impersonation stop audit"). Test gate: the audit run's `go test ./... -count=1` PASS was captured on a working tree between `f5f0e92` and `0f52636` (`docs/project/FEATURE_AUDIT.md` §9) — the gate has **not** been re-run at `0f52636` itself (deferred to the next sync run per `STATUS_HISTORY.md`). Every open item from todo.md Track B (GAP-01…53, residuals and opens) and the Track A near-term programme (Phase 0 re-audit, ADR-001…009, the `docs/architecture/` deliverables, Phase 1–6 milestones) appears **exactly once** below.
 
 ## Conventions
@@ -571,7 +574,7 @@ Wave W2 evidence addendum (2026-11-08, the IMAP wave's own scripted-client matri
 
 - **Priority:** P1
 - **Category:** marketing-automation
-- **Workflow status:** Done (2026-11-14; uncommitted — pending the programme's independent verification + commit, the SF-26 unit posture)
+- **Workflow status:** Done (2026-11-14; commit `5fb5e66`, pushed to origin/main)
 - **Refs:** RF-F075 · GAP-25 · CON-004 · complexity L (2.95) · `05-implementation-roadmap.md` §4 · unblocks RF-F074 (signup forms) and RF-F073 (preference center)
 - **Description:** Per-list double opt-in. `pending` lives at the membership level (`subscriber_list_members.status`), not on the global subscriber status, so a pending member on one list never suppresses the contact elsewhere; a per-list `double_opt_in` column governs it. Confirmation tokens are kind-prefixed (`doi:`) HMACs with the expiry in the signed payload (the web-view token shape), redeemed on the hosted `/t/confirm/{token}` page (GET renders the consent form, POST confirms — prefetch-safe, one-time semantics from the membership row itself: a removed/opted-out row is indistinguishable from an expired token, so withdrawn consent can never be resurrected). The confirmation email rides the `system_doi` provenance (no suppression/quota/consent layers — the forwarding posture); `list.subscribed` fires at confirmation, not subscribe. Imports gained optional list targeting (`list_id`) honoring the list's DOI policy. Exemplars studied: Listmonk per-list DOI toggle; Keila editable DOI + welcome emails (audit).
 - **Acceptance criteria:**

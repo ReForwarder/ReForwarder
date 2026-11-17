@@ -1,5 +1,8 @@
 # Report D — The Complete Catalog of Abnormal-Behavior Detection Mechanisms in the reference platform: Every Detector, Every Trigger, Every Default
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical clean-room analysis** (Report D, 2026-11-01) — the detector catalog whose adopted P0/P1 set shipped as RF-F088/RF-F089 (2026-11-02).
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 | | |
 |---|---|
 | **Subject repository** | the reference platform Mail Server (`reference-platformlabs/reference-platform`), clone at `C:\Users\Ibrahim\.zcode\tmp\reference-platform-analysis\reference-platform` |

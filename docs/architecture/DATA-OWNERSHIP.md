@@ -1,5 +1,8 @@
 # Data Ownership Map — Option B
 
+> **📄 Status (2026-11-14):** 📌 **Current normative reference** (Accepted; normative source ADR-008) — ownership rules bind every new table.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 **Status:** Accepted (2026-11-07) · Normative source: [ADR-008](ADR-008-data-event-ownership.md). This doc is the generated ownership map every Phase 1–6 migration is checked against.
 
 ## 1. Ownership rules (binding)

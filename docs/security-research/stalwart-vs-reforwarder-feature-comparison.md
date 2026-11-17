@@ -1,5 +1,8 @@
 # Report G — the reference platform vs. ReForwarder: Security Feature Comparison
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical comparison** (Report G, 2026-11-01) — its "nothing exists" rows predate the 2026-11-02 security engine, which delivered the ban/blocklist/fail2ban capabilities it recommended.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 | | |
 |---|---|
 | **Subject (upstream)** | the reference platform Mail Server — https://github.com/reference-platformlabs/reference-platform |

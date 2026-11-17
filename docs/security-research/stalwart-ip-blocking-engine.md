@@ -1,5 +1,8 @@
 # Report C — The the reference platform IP Blocking Engine: How IPs Are Tracked, Banned, Enforced, and Unblocked
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical clean-room analysis** (Report C, 2026-11-01) — the blocklist/allowlist behavior it models is delivered as the ban service (registry RF-F088).
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 | | |
 |---|---|
 | **Subject repository** | the reference platform Mail Server (`reference-platformlabs/reference-platform`), clone at `C:\Users\Ibrahim\.zcode\tmp\reference-platform-analysis\reference-platform` |

@@ -1,5 +1,8 @@
 # 02 — Competitor Comparison: 12 OSS Email Platforms
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical comparison** (2026-11-05) — cross-project matrices frozen at the research baseline; maintenance snapshots inside will have drifted.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 - **Purpose:** cross-project comparison of the 12 audited OSS email platforms across every capability domain (feature matrices, infrastructure, licensing, architecture, strengths/limitations, best use cases) and a relevance verdict for ReForwarder.
 - **Research date:** 2026-11-05. All verdicts are transcribed from `registry.md` (Canonical Feature-ID Registry v1.0.0, frozen 2026-11-05) and the 12 evidence dossiers (`dossier-01-listmonk.md` … `dossier-12-hyvorpost.md`, in `C:\Users\Ibrahim\.zcode\tmp\oss-audit-2026-11\`). **No verdict was re-researched or changed for this document.**
 - **ID scheme:** feature IDs (`INF-001`, `CAM-008`, …) are permanent registry IDs. Per-project detail lives in **`01-oss-feature-inventory.md`** — this document compares; it does not re-profile.

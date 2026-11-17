@@ -1,5 +1,8 @@
 # V-B1 — Verification verdicts: the reference platform parity audit Category B (SF-22..SF-33)
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical verification-wave evidence** (2026-11-07) — statuses recorded here are superseded by the live ledger `../FEATURE_PARITY_AUDIT.md`; retained as the evidence layer cited by register records.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../../README.md)
+
 Auditor: V-B1 · Date: 2026-11-07 · Scope: `docs/audits/REFERENCE-PLATFORM_FEATURE_PARITY_AUDIT.md` Category B records SF-22..SF-33 (pre-seed statuses included) · Requirements: `docs/research/reference-platform-feature-inventory.md` §B · Ledger: `docs/research/reference-platform-feature-gap-analysis.md` §4a.
 
 **Method and limits.** Read-only code verification at HEAD `482d10b` (tree carries uncommitted changes not touched by this audit). **No Go toolchain available — no builds, no tests, no docker were run.** Every test named below was located by reading its source (`file:line`), not executed; "Tests: Verified" means the test source exists, is substantive, and targets the verified behavior — not that a run passed. Frontend verified by reading sources/specs, not by running a browser. Absence claims rest on exhaustive greps over `internal/` + `cmd/` (`*.go`, tests excluded) for: `spf`, `dkim.Verify`, `msgauth`, `Received-SPF`, `Authentication-Results`, `mta-sts|mtasts`, `tlsa|dane`, `tls-rpt|tlsrpt`, `arc`, `iprev`, `LookupAddr`, `arf|5965|6591`, `dkim2`, `GetCertificate|sni|acme|autocert`, `aggregate|rua`. Only this file was written.

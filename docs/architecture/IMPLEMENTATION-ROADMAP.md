@@ -1,5 +1,8 @@
 # Implementation Roadmap — Option B Execution Plan
 
+> **📄 Status (2026-11-14):** 📌 **Plan document** — §0 (ADR gate) COMPLETE 2026-11-07; phase execution status is tracked externally (root `todo.md` Track A + `docs/audits/FEATURE_PARITY_AUDIT.md`), all phases closed with named residuals.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 **Status:** Accepted (2026-11-07) · Tracker of record: `todo.md` Track A + `docs/audits/REFERENCE-PLATFORM_FEATURE_PARITY_AUDIT.md` (feature ledger) · This doc sequences the work and names each phase's exit gate.
 
 ## 0 — ADR gate (COMPLETE 2026-11-07)

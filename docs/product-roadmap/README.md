@@ -1,5 +1,7 @@
 # ReForwarder Product-Roadmap Suite — Index & Executive Overview
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical research baseline** (2026-11-05, HEAD `a6f1681`) — the whole suite is a frozen snapshot; every verdict in it is superseded by the live ledgers: `docs/project/FEATURE_INVENTORY.md` (RF-F registry), `docs/audits/FEATURE_PARITY_AUDIT.md` (SF parity), and `docs/project/BACKLOG.md` (tasks). Its "not-recommended" exclusions were superseded by the Option B decision (ADRs 001–009, landed 2026-11-07..12). Start from [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md), not from this suite.
+
 > **Doc 1 of 7** in the ReForwarder product-roadmap documentation suite. This README is the central index and executive overview; it adds no new feature IDs, scores, or claims beyond the six sibling documents — where any sibling disagrees with this summary, the sibling governs.
 
 ## 1. Purpose

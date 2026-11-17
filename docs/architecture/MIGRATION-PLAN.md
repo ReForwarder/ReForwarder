@@ -1,5 +1,8 @@
 # Migration Plan — Option B
 
+> **📄 Status (2026-11-14):** 📌 **Current policy** (Accepted) — additive-migrations-only rule; schema-level rollback unsupported by design.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 **Status:** Accepted (2026-11-07) · Discipline: **additive migrations only** (`internal/storage/migration` + `upgrade`), AutoMigrate-registered per existing convention; deployed instances upgrade in place; no drops or rewrites (AGENTS.md §7).
 
 ## 1. Migration sequence by phase

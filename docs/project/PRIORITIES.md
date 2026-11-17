@@ -1,5 +1,8 @@
 # PRIORITIES — priority tiers and current ordering
 
+> **📄 Status (2026-11-14):** 🗄️ **Stale ordering** (2026-11-06) — §3 still lists ~9 items as top work that are now Done; re-derive priorities from `FEATURE_INVENTORY.md` + `BACKLOG.md` instead.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 Priority ordering of the top work, produced by run `dwfrun-84c797c2-39b6-49df-9612-c3dc664a20e7` from the audit gap view at HEAD `f5f0e921455de901370b5f37b7112b634f6c2066`. P0 first, always. Re-ordering happens by a new producing run appending to `STATUS_HISTORY.md` and replacing §3 below — not by ad-hoc edits.
 
 ## 1. Priority definitions

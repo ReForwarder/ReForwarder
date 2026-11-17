@@ -1,5 +1,8 @@
 # V-EF — Verification of SF-60..SF-74 (Categories E & F, the reference platform parity audit)
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical verification-wave evidence** (2026-11-07) — statuses recorded here are superseded by the live ledger `../FEATURE_PARITY_AUDIT.md`; retained as the evidence layer cited by register records.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../../README.md)
+
 - **Auditor:** V-EF (verification pass, 2026-11-07)
 - **Scope:** `docs/audits/REFERENCE-PLATFORM_FEATURE_PARITY_AUDIT.md` Category E (SF-60..SF-64) and Category F (SF-65..SF-74), including pre-seed statuses.
 - **Method:** read-only code verification at HEAD (no toolchain — no builds, tests, or docker were run; all test citations are **named functions at file:line**, never executions). Requirements from `docs/research/reference-platform-feature-inventory.md` §E/§F; statuses cross-checked against `docs/research/reference-platform-feature-gap-analysis.md` §4a.

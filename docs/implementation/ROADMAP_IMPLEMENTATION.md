@@ -1,5 +1,8 @@
 # ROADMAP IMPLEMENTATION TRACKER
 
+> **📄 Status (2026-11-14):** ✅ **Completed historical tracker** — all R-01..R-28 items done or explicitly tombstoned (acceptance audit 2026-11-07). The live work queue is `PARTIAL_FEATURE_COMPLETION_TRACKER.md` in this folder.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 > Implements `docs/research/reforwarder-reference-platform-roadmap.md` (28 recommendations, R-16 tombstoned \u2014 session management already exists).
 > **Baseline:** `main` @ `7a84e46`, working tree clean except `DEVELOPMENT_HISTORY.md` + `compose.override.yml` (pre-existing untracked).
 > **Policy:** tracker-driven, phase-ordered, per-phase verification battery (build + `go test -race ./...` + lint + `vue-tsc` where frontend changed + targeted E2E/visual) then per-phase commit + push. R-16 is NOT re-implemented.

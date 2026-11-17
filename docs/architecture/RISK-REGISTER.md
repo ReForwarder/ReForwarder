@@ -1,5 +1,8 @@
 # Risk Register — Option B Programme
 
+> **📄 Status (2026-11-14):** 📌 **Living document** (Accepted) — reviewed at every phase gate; RSK-1..RSK-15.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 **Status:** Accepted (2026-11-07) · Living doc; reviewed at every phase gate. Severity = impact × likelihood (H/M/L). Every risk names its mitigation and its detection signal.
 
 | ID | Risk | Sev | Mitigation | Detection |

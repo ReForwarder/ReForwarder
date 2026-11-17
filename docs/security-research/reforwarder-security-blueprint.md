@@ -1,5 +1,8 @@
 # Report F — The ReForwarder Implementation Blueprint: Adopting the reference platform's Abuse-Prevention Design in Go
 
+> **📄 Status (2026-11-14):** ✅ **Delivered** — this design blueprint was implemented as the 2026-11-02 security engine (`internal/services/security/`; ban service RF-F088, fail2ban detectors RF-F089, security admin surface RF-F090). The "DESIGN ONLY" notice below describes the state at writing, not today.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 | | |
 |---|---|
 | **Subject repository** | ReForwarder (`github.com/goposta/posta`, Posta fork rebranded ReForwarder), working tree at `C:\Users\Ibrahim\Desktop\ReForwarder` |

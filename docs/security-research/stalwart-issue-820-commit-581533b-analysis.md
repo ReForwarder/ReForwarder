@@ -1,5 +1,8 @@
 # the reference platform Issue #820 & Commit 581533b — Source-Verified Analysis for the ReForwarder Security Engine
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical source analysis** (2026-11-02) — the mandated research deliverable that gated ReForwarder's own port-scan-detection implementation, delivered the same day.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 | | |
 |---|---|
 | **Series** | Companion to Reports A–G (`docs/security-research/`) — this report satisfies the "Mandatory the reference platform Source-Code Reference Research" deliverable that gates the ReForwarder port-scan-detection implementation. |

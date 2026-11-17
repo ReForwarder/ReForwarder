@@ -1,5 +1,8 @@
 # ReForwarder — Feature Gap Analysis
 
+> **📄 Status (2026-11-14):** 🟡 **Gap register frozen at 2026-11-06** — ~12 of its 76 gaps have since closed (GAP-03, GAP-12, GAP-13, GAP-47, GAP-49, GAP-51, GAP-52, RF-F102, and the storage/IMAP/webmail programme items). Per-gap live status: `FEATURE_INVENTORY.md` (same folder). Check it before working any gap.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 > **Date:** 2026-11-06. **Scope:** every open gap from the RF-F registry gap view at the current tree (HEAD `0f52636`; the workflow snapshot was taken at `f5f0e92` + 34 dirty entries, which have since landed as `346eb67` "Complete remaining roadmap items: WebAuthn, impersonation, feature flags, contract test" and `0f52636` "Fix WebAuthn nil-user abort path and duplicate impersonation stop audit"). **76 gaps: P0×6, P1×20, P2×31, P3×19.**
 >
 > This file consolidates three sources and defers to them on conflict: the RF-F registry gap view and `FEATURE_INVENTORY.md` (current state + per-item evidence), `docs/product-roadmap/04-feature-gap-analysis.md` (the frozen gap register — GAP-01…53, D1–D9, NV register), and `todo.md` (Track A/B phasing, dependency gates). Acceptance criteria for classic `GAP-nn` items are condensed from doc 04 §2; for registry-completion and Track A items they are derived from `FEATURE_INVENTORY.md` limitations, `todo.md` phase items, and `docs/product-roadmap/upcomming-convo.md` §7/§11.

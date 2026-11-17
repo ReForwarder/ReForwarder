@@ -1,5 +1,8 @@
 # the reference platform Feature Inventory (source-evidence catalog)
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical reference catalog** (2026-11-05) — the SF-01..SF-115 source inventory that seeded the parity programme. Current per-feature status lives in `docs/audits/FEATURE_PARITY_AUDIT.md`; many items once classed out-of-scope were later built under the Option B programme.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 > **Reference inspected:** the reference platform Mail & Collaboration Server, `main` @ `8b326865` = **v1.0.3** (fetched 2026-11-05; the 2026-11-02 security deep-dive used `23b69755` = v1.0.1 — Reports A–G in `docs/security-research/` cite that baseline; the delta is two patch releases).
 > **Licenses** (`LICENSES/`): AGPL-3.0-only (core), Apache-2.0, MIT, and `LicenseRef-SEL.txt` — the reference platform Enterprise License for closed-source enterprise components (AI spam, tenants, traces/metrics stores, SCIM, sharded stores, archived items, live tracing/metrics, masked email).
 > **Companion documents:** `reference-platform-feature-gap-analysis.md` (main report), `reforwarder-capability-audit.md`, `reforwarder-reference-platform-roadmap.md`.

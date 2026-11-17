@@ -1,5 +1,8 @@
 # ReForwarder — Roadmap
 
+> **📄 Status (2026-11-14):** 📌 **Current directional plan** — groupings, not statuses (by design, see its own header); per-item state lives in `FEATURE_INVENTORY.md` and root `todo.md`.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 > **Directional development direction — groupings, not statuses.** This file says *what belongs together and in what order the architecture allows it*; it deliberately carries no checkboxes, no completion claims, and no per-item state. Current status lives in `todo.md` (working checklist) and `FEATURE_INVENTORY.md` (registry); per-gap detail lives in `FEATURE_GAP_ANALYSIS.md`.
 >
 > The phase structure is **not invented here**: it is `todo.md`'s two-track structure verbatim — **Track A** = the Option B mail-infrastructure programme (`docs/product-roadmap/upcomming-convo.md` §7, Phases 0–6) and **Track B** = the relay roadmap (`docs/product-roadmap/05-implementation-roadmap.md`, P0–P3). Where a Track B item is marked `→ OB Phase n` in `todo.md`, it lands inside the Track A phase named there.

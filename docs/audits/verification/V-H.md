@@ -1,5 +1,8 @@
 # V-H — Verification of Category H records (SF-84..SF-91)
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical verification-wave evidence** (2026-11-07) — statuses recorded here are superseded by the live ledger `../FEATURE_PARITY_AUDIT.md`; retained as the evidence layer cited by register records.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../../README.md)
+
 Auditor: V-H · Date: 2026-11-07 · Method: code reading only (no local Go toolchain —
 no builds/tests/docker per the audit brief). Every claim below was verified against
 this checkout by reading the cited files; greps are quoted as run. Docs were treated

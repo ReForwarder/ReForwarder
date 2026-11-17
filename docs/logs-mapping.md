@@ -1,5 +1,8 @@
 # the reference workflow platform Logs & Message History — Source Mapping for the ReForwarder Implementation
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical design record** (2026-11-02) — the clean-room feature mapping that seeded R-04/R-05/R-06; its event-semantics caveats are superseded by provider-event ingestion. Behavior was studied only; no code was copied.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](README.md)
+
 | | |
 |---|---|
 | **Reference repo** | [the reference workflow platform/reference-workflow](https://github.com/the reference workflow platform/reference-workflow) — pinned commit `f635aa09c1050c2df1e8f7b7a0dd6e516019b146` (2026-10-28), local clone at `C:\Users\Ibrahim\.zcode\tmp\reference-workflow-analysis\reference-workflow` |

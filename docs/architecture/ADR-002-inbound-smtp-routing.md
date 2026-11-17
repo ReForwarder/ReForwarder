@@ -1,5 +1,8 @@
 # ADR-002 — Inbound Mail & Routing (Aliases, Forwarding, Quarantine, Return-Path)
 
+> **📄 Status (2026-11-14):** 📌 **Accepted ADR** (2026-11-07) — binding decision record. Landed as Option B Phase 2 (OB-2); the `/inbound-routes` rules-CRUD REST registration is a recorded residual.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 - **Status:** Accepted (2026-11-07 — Option B programme authorization)
 - **Phase:** Option B Phase 2 · **Covers (parity register):** SF-11, SF-14 (local delivery), SF-26, SF-27, SF-32, SF-45/48 (policy hooks), SF-51 (quarantine), CA-05 (VERP/return-path)
 

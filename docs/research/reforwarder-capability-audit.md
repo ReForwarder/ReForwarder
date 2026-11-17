@@ -1,5 +1,8 @@
 # ReForwarder Capability Audit (source-verified)
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical audit snapshot** (2026-11-04, HEAD `7a84e46`) — every "not implemented" verdict here has since been delivered (DKIM signing, campaign scheduler, queue admin, provider events, segments, WebAuthn, impersonation and more). Do not use this for current state.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 > **Audited:** ReForwarder `main` @ `7a84e46` ("ui: update automations sidebar icon", 2026-11-04). Go backend (`cmd/posta` server + worker, okapi HTTP framework, GORM/Postgres, Redis, asynq) and Vue 3 web app. This document is the ReForwarder side of the comparison in `reference-platform-feature-gap-analysis.md`; the reference platform-side findings live in `reference-platform-feature-inventory.md`; priorities live in `reforwarder-reference-platform-roadmap.md`.
 > **Method:** every claim verified in the current checkout with file paths; statuses use the comparison taxonomy (FULLY IMPLEMENTED / PARTIALLY IMPLEMENTED / BACKEND ONLY / CONFIGURATION ONLY / PLACEHOLDER / BROKEN / NOT IMPLEMENTED / NOT APPLICABLE / NEEDS VERIFICATION). Untracked working-tree files at audit time: `DEVELOPMENT_HISTORY.md`, `compose.override.yml`, and the four research documents of this analysis (deliberately not committed per the task's research-only rule).
 

@@ -1,5 +1,8 @@
 # Git Commit Provenance Audit
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical point-in-time record** (2026-11-12) — provenance scrub verification (VIOLATION 0 after remediation); HEAD has since advanced, the scrub's guarantee stands.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 **Audit date:** 2026-11-12 · **Auditor:** independent coordinator pass (deterministic script, `provenance-audit.py`) · **Baseline before audit:** `1193bfd` · **Final state after remediation:** `ba7dac0` (force-pushed per the standing provenance policy)
 
 ## 1. Scope and methodology

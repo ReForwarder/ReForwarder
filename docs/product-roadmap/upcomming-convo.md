@@ -1,3 +1,6 @@
+> **📄 Status (2026-11-14):** 📌 **Decision record — the origin of the current direction** (historical transcript): Option B chosen; the architecture-first programme it mandates was executed in full (ADRs 001–009 + OB-1..OB-6, 2026-11-07..12).
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 Then let's make ReForwarder a complete email infrastructure and marketing platform, combining the strongest capabilities of all 12 projects, followed by Resend-inspired developer experience.
 
 I've reviewed the uploaded audit documents. The important thing is that we don't need to rebuild everything from scratch.

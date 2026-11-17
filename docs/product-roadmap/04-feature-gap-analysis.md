@@ -1,5 +1,8 @@
 # 04 — Feature Gap Analysis: What ReForwarder Lacks or Needs to Improve
 
+> **📄 Status (2026-11-14):** 🗄️ **Frozen gap register** (GAP-01..53, 2026-11-05) — ~12 of its gaps have since closed and the operational register moved to `docs/project/FEATURE_GAP_ANALYSIS.md` (76 gaps) with live status in `docs/project/FEATURE_INVENTORY.md`. Check those before working any gap.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 > **Doc 4 of 7** in the ReForwarder product-roadmap documentation suite. This document is the **gap register**: everything ReForwarder is missing, has only partially implemented, needs to refactor (expressed as architectural/duplication findings), cannot yet verify, or ships twice. Each gap carries competitor evidence, file-level proof, and a recommended approach that reuses existing ReForwarder patterns. The scored and sequenced version of this register is doc 05 (roadmap); architecture consequences live in `06-architecture-impact.md`.
 
 - **Date:** 2026-11-05.

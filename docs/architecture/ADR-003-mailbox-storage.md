@@ -1,5 +1,8 @@
 # ADR-003 — Mailbox & Storage Foundation
 
+> **📄 Status (2026-11-14):** 📌 **Accepted ADR** (2026-11-07) — binding decision record. Landed as Option B Phase 3 (OB-3).
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 - **Status:** Accepted (2026-11-07 — Option B programme authorization)
 - **Phase:** Option B Phase 3 · **Covers (parity register):** SF-14 (storage side), SF-18, SF-51 (store side), SF-75 (plane completion), SF-78 (blob encryption), SF-79 (search depth), SF-80 (quotas), SF-83 (compression), SF-112 (files/attachments)
 

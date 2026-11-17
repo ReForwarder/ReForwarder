@@ -1,5 +1,8 @@
 # Final Verification Report — Option B Mail-Infrastructure Programme
 
+> **📄 Status (2026-11-14):** 🗄️ **Historical snapshot** (2026-11-12, HEAD `ee38ca8`) — its tally (69/35/1/18) is superseded by the live tally in `FEATURE_PARITY_AUDIT.md` (COMPLETE 82 · PARTIAL 23 · PLANNED 17 · EXCLUDED 1 as of 2026-11-14).
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 **Programme:** Option B (Track A) — the reference-platform mail-server parity surface, ReForwarder (`github.com/goposta/posta`)
 **Report date:** 2026-11-12 · **Produced by:** final report builder (final reconciliation stage)
 **Baseline:** HEAD `ee38ca8` ("OB-6 convergence: DNS automation, ACME/SNI, IP pools and warm-up with reputation, MTA-STS/TLS-RPT, observability completion, deployment runbooks") — **pushed**: `origin/main` tip is `ee38ca8` and `git log origin/main..main` is empty (verified this session).
