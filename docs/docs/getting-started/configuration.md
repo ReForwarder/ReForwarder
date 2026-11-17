@@ -30,6 +30,17 @@ Posta is configured via environment variables. All variables are prefixed with `
 | `POSTA_DB_NAME` | `posta` | Database name |
 | `POSTA_DB_SSL_MODE` | `disable` | SSL mode (`disable`, `require`, `verify-full`) |
 | `POSTA_DB_URL` | — | Full connection string (overrides individual settings) |
+| `POSTA_DB_DRIVER` | `postgres` | Data-store backend: `postgres` (the only supported production store) or `sqlite` (the embedded development/experimentation tier — a pure-Go driver, no CGO; ADR-009 amendment) |
+| `POSTA_DB_SQLITE_PATH` | — | The SQLite database file; required when `POSTA_DB_DRIVER=sqlite` |
+
+> **SQLite dev tier (SF-76):** `POSTA_DB_DRIVER=sqlite` serves local
+> development and experimentation only. Postgres remains the production
+> store — the dev tier does not cover the Postgres-idiomatic runtime paths
+> (the mailstore UID claim, the delivery queue's claim substrate, and the FTS
+> searcher), so mail ingestion, queueing and worker flows are out of its
+> supported surface. Backups for a dev-tier file are a plain file copy taken
+> while no process holds it open; the production backup automation
+> (`pg_dump`) is Postgres-only. See the ADR-009 amendment for the boundary.
 
 ## Redis
 

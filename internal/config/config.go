@@ -550,6 +550,28 @@ type DatabaseConfig struct {
 	port     int
 	sslMode  string
 	url      string
+	// Driver selects the data-store backend (SF-76, the ADR-009 amendment):
+	// "postgres" (the default and the only production store) or "sqlite" (the
+	// embedded development/experimentation tier, a pure-Go driver — no CGO).
+	Driver string
+	// SQLitePath is the dev-tier database file; required when Driver is
+	// "sqlite".
+	SQLitePath string
+}
+
+// Database driver names (SF-76, the ADR-009 amendment).
+const (
+	DBDriverPostgres = "postgres"
+	DBDriverSQLite   = "sqlite"
+)
+
+// Driver returns the configured data-store backend ("postgres" when unset —
+// the pre-SF-76 default, unchanged).
+func (c *DatabaseConfig) DriverName() string {
+	if c.Driver == "" {
+		return DBDriverPostgres
+	}
+	return c.Driver
 }
 
 // DSN returns the postgres connection string in the form external tools such
@@ -682,10 +704,14 @@ func New() *Config {
 			host:     goutils.Env("POSTA_DB_HOST", "localhost"),
 			user:     goutils.Env("POSTA_DB_USER", "posta"),
 			password: goutils.Env("POSTA_DB_PASSWORD", "posta"),
-			name:     goutils.Env("POSTA_DB_NAME", "posta"),
+			name:     goutils.Env("POSTA_DB_NAME", "porta"),
 			port:     goutils.EnvInt("POSTA_DB_PORT", 5432),
 			sslMode:  goutils.Env("POSTA_DB_SSL_MODE", "disable"),
 			url:      goutils.Env("POSTA_DB_URL", ""),
+			// SF-76 (the ADR-009 amendment): the data-store backend. The
+			// default stays postgres — the pre-amendment behavior, unchanged.
+			Driver:     goutils.Env("POSTA_DB_DRIVER", DBDriverPostgres),
+			SQLitePath: goutils.Env("POSTA_DB_SQLITE_PATH", ""),
 		},
 		Redis:                newRedisConfig(),
 		Port:                 port,
@@ -939,6 +965,15 @@ func warnRemovedEnvVars() {
 
 func (c *Config) validate() error {
 	warnRemovedEnvVars()
+	// SF-76 (the ADR-009 amendment): the data-store backend gate. Postgres is
+	// the default and the only production store; the sqlite dev tier requires
+	// a database file path.
+	if d := c.Database.DriverName(); d != DBDriverPostgres && d != DBDriverSQLite {
+		return fmt.Errorf("unsupported POSTA_DB_DRIVER %q (postgres or sqlite)", d)
+	}
+	if c.Database.DriverName() == DBDriverSQLite && strings.TrimSpace(c.Database.SQLitePath) == "" {
+		return fmt.Errorf("POSTA_DB_DRIVER=sqlite requires POSTA_DB_SQLITE_PATH (the dev-tier database file)")
+	}
 	if c.MessagesEnabled && c.MessagesInboundDomain != "" && !c.InboundEnabled {
 		return fmt.Errorf("POSTA_MESSAGES_INBOUND_DOMAIN requires POSTA_INBOUND_ENABLED=true")
 	}
@@ -1246,17 +1281,34 @@ func (c *Config) initLogger() *logger.Logger {
 }
 
 func (c *Config) InitStorage() {
-	var dsn string
-	if c.Database.url != "" {
-		dsn = c.Database.url
-	} else {
-		dsn = fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%d sslmode=%s", c.Database.host, c.Database.user, c.Database.password, c.Database.name, c.Database.port, c.Database.sslMode)
+	// SF-76 (the ADR-009 amendment): the data-store backend. Postgres stays
+	// the production store; the sqlite branch serves the embedded dev /
+	// experimentation tier only.
+	switch c.Database.DriverName() {
+	case DBDriverPostgres:
+		var dsn string
+		if c.Database.url != "" {
+			dsn = c.Database.url
+		} else {
+			dsn = fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%d sslmode=%s", c.Database.host, c.Database.user, c.Database.password, c.Database.name, c.Database.port, c.Database.sslMode)
+		}
+		dbConn, err := storage.ConnectPostgres(dsn)
+		if err != nil {
+			logger.Fatal("failed to connect to database", "error", err)
+		}
+		c.Database.DB = dbConn
+	case DBDriverSQLite:
+		if strings.TrimSpace(c.Database.SQLitePath) == "" {
+			logger.Fatal("POSTA_DB_DRIVER=sqlite requires POSTA_DB_SQLITE_PATH (the dev-tier database file)")
+		}
+		dbConn, err := storage.ConnectSQLite(c.Database.SQLitePath)
+		if err != nil {
+			logger.Fatal("failed to connect to the sqlite dev database", "error", err)
+		}
+		c.Database.DB = dbConn
+	default:
+		logger.Fatal("unsupported POSTA_DB_DRIVER %q (postgres or sqlite)", c.Database.Driver)
 	}
-	dbConn, err := storage.ConnectPostgres(dsn)
-	if err != nil {
-		logger.Fatal("failed to connect to database", "error", err)
-	}
-	c.Database.DB = dbConn
 
 	redisClient, err := storage.NewRedis(c.Redis.RedisOptions())
 	if err != nil {

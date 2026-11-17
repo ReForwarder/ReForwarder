@@ -75,6 +75,12 @@ CREATE INDEX IF NOT EXISTS idx_mail_messages_search_tsv ON mail_messages USING G
 // from the "2026-11-07-mailstore-fts" upgrade step (existing versioned
 // databases). Both paths are safe to run repeatedly.
 func EnsureMailstoreSearch(db *gorm.DB) error {
+	// SF-76 (the ADR-009 amendment): the tsvector generated column + GIN index
+	// are Postgres constructs; the SQLite dev tier does not serve the FTS
+	// searcher (documented in the amendment's production-guidance boundary).
+	if db.Dialector.Name() == "sqlite" {
+		return nil
+	}
 	if err := db.Exec(mailstoreEnsureSQL).Error; err != nil {
 		return fmt.Errorf("ensure mail_messages.search_tsv + GIN: %w", err)
 	}

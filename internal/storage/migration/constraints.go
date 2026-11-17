@@ -26,6 +26,16 @@ import (
 )
 
 func runConstraints(db *gorm.DB) {
+	// SF-76 (the ADR-009 amendment): the constraint/index fixups below are
+	// Postgres-idiomatic (DO $$ blocks, pg_constraint catalog queries, partial
+	// indexes over NOW()). The SQLite dev tier's schema is the AutoMigrate
+	// fleet itself — gorm's SQLite dialect declares the model references, and
+	// the perf indexes/partial uniques are Postgres optimizations, not
+	// correctness requirements. Nothing in this pass ships tenant/schema
+	// behavior; the production (Postgres) path is untouched.
+	if db.Dialector.Name() == "sqlite" {
+		return
+	}
 	// Add FK constraints
 	db.Exec(`DO $$ BEGIN
 		IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_template_versions_template') THEN

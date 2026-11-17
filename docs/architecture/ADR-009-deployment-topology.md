@@ -1,5 +1,8 @@
 # ADR-009 — Deployment Topology & Scaling
 
+> **📄 Status (2026-11-14):** 📌 **Accepted ADR** (2026-11-07) — binding decision record (one binary, gated listeners; multi-node deferred). Amendment-gated items (SQLite backend, store failover) are tracked in the PARTIAL-completion tracker.
+> **Live status:** [docs/PROJECT_STATUS_DASHBOARD.md](../PROJECT_STATUS_DASHBOARD.md) · [docs/README.md](../README.md)
+
 - **Status:** Accepted (2026-11-07 — Option B programme authorization)
 - **Phase:** Cross-cutting (bindings applied in Phases 1–6; convergence items at Phase 6) · **Covers (parity register):** SF-76 (single data store), SF-105 (cluster fabric), SF-106 (multi-node failover), SF-107 (cluster invalidation), SF-109 (shutdown), SF-114 (deployment tooling), GAP-49 (Redis HA guidance)
 
@@ -29,3 +32,65 @@ ReForwarder deploys as a single Go binary (`posta`) with a `server` and a `worke
 - `cmd/posta` listener wiring + config schema extension; compose updates per enabled listeners; GAP-03 (cron leader lease) and GAP-49 (Redis HA runbook) close inside this ADR's scope; `doctor` extensions.
 - Tests: listener lifecycle (start/stop/drain), multi-worker claim safety (existing concurrency battery extended to direct-delivery tasks), Redis-lease leadership, config-gate matrix (every listener off-by-default proof).
 - The four non-negotiables are enforced at the listener boundary: submission/auth policies on the new ports mirror the relay and inbound receivers (no open relay; tenant-derived recipient domains; delivered-on-truth only; durable path before any routing action).
+
+## Amendment (2026-11-18, SF-76): the SQLite dev-tier backend
+
+**Decision**: a second relational data-store backend — **SQLite, driven by a
+pure-Go driver (no CGO)** — is approved as an **embedded development /
+experimentation tier only**, behind explicit configuration. **Postgres remains
+the production store**; the production guidance, HA runbook and backup
+automation (R-11's `pg_dump` posture) stay Postgres-only, and the alternative
+backends of the reference platform's breadth (RocksDB, MySQL, FoundationDB,
+HTTP KV) remain rejected — this amendment widens the store surface by exactly
+one backend, for exactly one deployment posture.
+
+**Rationale**: the do-not-implement table's "managed Postgres HA" reasoning
+binds PRODUCTION deployments; it does not bind a developer cloning the tree to
+experiment with the dashboard. The binary already isolates its storage behind
+one seam (`internal/storage` connection wiring + gorm AutoMigrate over the
+registered model fleet, `internal/storage/migration/migration.go`), so a
+second backend is a bounded additive slice, not an architecture change. This
+amendment discharges the "Amendment-gated items (SQLite backend…)" note in the
+ADR's status banner and the tracker row that carried it.
+
+**Configuration (additive, default unchanged)**: `POSTA_DB_DRIVER`
+(`postgres` by default; `sqlite` opts into the dev tier — anything else is a
+configuration error) and `POSTA_DB_SQLITE_PATH` (the database file; required
+when the driver is `sqlite`). With the default driver the wiring executes the
+exact pre-amendment code path (no behavior change for any existing
+deployment); with `sqlite`, `internal/storage.ConnectSQLite` opens the file
+through the pure-Go driver and the server runs `migration.Run` over the same
+registered fleet.
+
+**Migration compatibility**: gorm's SQLite dialector renders the model fleet's
+DDL; the fleet's Postgres-idiomatic `DEFAULT gen_random_uuid()` column
+defaults do not parse as SQLite expression defaults (SQLite requires a
+parenthesized expression). The dev-tier connection therefore registers a
+thin driver wrapper that rewrites exactly that default, for CREATE/ALTER DDL
+only, to the SQLite-native equivalent
+(`lower(hex(randomblob(16)))` — a random 32-hex-char identifier of the same
+shape); the model tags stay untouched, so the Postgres schema is byte-identical
+on every existing deployment. `jsonb`-typed columns are declared as-is (SQLite
+accepts arbitrary type names) and carry the application's JSON semantics.
+
+**Documented production guidance (the boundary of the dev tier)**:
+- Postgres remains the only supported production store; the dev tier targets
+  local development, CI experiments and dashboard evaluations.
+- The dev tier does NOT cover the Postgres-idiomatic runtime paths: the
+  mailstore's UID claim (`pg_advisory_xact_lock`), the queue's
+  `FOR UPDATE SKIP LOCKED` claim substrate, and the Postgres FTS searcher are
+  Postgres-only by construction — mail ingestion/queueing/worker flows are
+  out of the dev tier's supported surface, which is the dashboard/API core
+  over the migrated tables.
+- Backup automation (R-11) stays `pg_dump`-based; a dev-tier file is backed up
+  by copying the file while no process holds it open.
+- The server logs the dev-tier posture loudly at startup; `doctor` guidance
+  points operators back to Postgres.
+
+**Consequences**: `internal/storage` gains the SQLite connection + the
+driver wrapper; `internal/config` gains the two settings + validation; the
+server's migration call stays `migration.Run` on both drivers; tests pin the
+round-trip over the migrated fleet, the config gating, and the unchanged
+Postgres default. The alternative backends remain rejected; a further
+widening (a third backend, or promoting the dev tier) re-opens this amendment
+by decision, not by config.
