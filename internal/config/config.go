@@ -557,6 +557,11 @@ type DatabaseConfig struct {
 	// SQLitePath is the dev-tier database file; required when Driver is
 	// "sqlite".
 	SQLitePath string
+	// FailoverDSNs is the ordered store-endpoint list for the application-side
+	// startup failover (SF-106): the primary first, then the standbys. Empty
+	// (the default) keeps the single-DSN wiring unchanged. Postgres only —
+	// the dev tier does not fail over.
+	FailoverDSNs []string
 }
 
 // Database driver names (SF-76, the ADR-009 amendment).
@@ -712,6 +717,10 @@ func New() *Config {
 			// default stays postgres — the pre-amendment behavior, unchanged.
 			Driver:     goutils.Env("POSTA_DB_DRIVER", DBDriverPostgres),
 			SQLitePath: goutils.Env("POSTA_DB_SQLITE_PATH", ""),
+			// SF-106: the application-side startup failover — the ordered
+			// endpoint list (primary first). Empty (the default) keeps the
+			// single-DSN wiring byte-identical.
+			FailoverDSNs: splitList(goutils.Env("POSTA_DB_FAILOVER_DSN", "")),
 		},
 		Redis:                newRedisConfig(),
 		Port:                 port,
@@ -973,6 +982,22 @@ func (c *Config) validate() error {
 	}
 	if c.Database.DriverName() == DBDriverSQLite && strings.TrimSpace(c.Database.SQLitePath) == "" {
 		return fmt.Errorf("POSTA_DB_DRIVER=sqlite requires POSTA_DB_SQLITE_PATH (the dev-tier database file)")
+	}
+	// SF-106: the startup-failover gate. Postgres only (the dev tier does not
+	// fail over), and at least two endpoints — failover semantics with one
+	// would be a lie.
+	if len(c.Database.FailoverDSNs) > 0 {
+		if c.Database.DriverName() != DBDriverPostgres {
+			return fmt.Errorf("POSTA_DB_FAILOVER_DSN requires POSTA_DB_DRIVER=postgres (the dev tier does not fail over)")
+		}
+		if len(c.Database.FailoverDSNs) < 2 {
+			return fmt.Errorf("POSTA_DB_FAILOVER_DSN requires at least two entries (the primary + a standby), got %d", len(c.Database.FailoverDSNs))
+		}
+		for i, dsn := range c.Database.FailoverDSNs {
+			if strings.TrimSpace(dsn) == "" {
+				return fmt.Errorf("POSTA_DB_FAILOVER_DSN entry %d is empty", i)
+			}
+		}
 	}
 	if c.MessagesEnabled && c.MessagesInboundDomain != "" && !c.InboundEnabled {
 		return fmt.Errorf("POSTA_MESSAGES_INBOUND_DOMAIN requires POSTA_INBOUND_ENABLED=true")
@@ -1291,6 +1316,20 @@ func (c *Config) InitStorage() {
 			dsn = c.Database.url
 		} else {
 			dsn = fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%d sslmode=%s", c.Database.host, c.Database.user, c.Database.password, c.Database.name, c.Database.port, c.Database.sslMode)
+		}
+		// SF-106: with POSTA_DB_FAILOVER_DSN configured, the process opens
+		// against the FIRST REACHABLE endpoint of the ordered list (the
+		// health-driven selector) instead of the single DSN. The runtime
+		// switchover of live connections stays the managed-HA remainder
+		// (ADR-009 §5).
+		if len(c.Database.FailoverDSNs) >= 2 {
+			dbConn, chosen, ferr := storage.ConnectWithFailover(append([]string{dsn}, c.Database.FailoverDSNs...))
+			if ferr != nil {
+				logger.Fatal("failed to connect to database", "error", ferr)
+			}
+			logger.Info("store failover: landed on", "endpoint", chosen)
+			c.Database.DB = dbConn
+			break
 		}
 		dbConn, err := storage.ConnectPostgres(dsn)
 		if err != nil {

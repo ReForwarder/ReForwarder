@@ -34,10 +34,64 @@ func clearDBDriverEnv(t *testing.T) {
 	// The JWT-secret placeholder check is orthogonal to the DB gate; dev
 	// posture bypasses it so the assertions stay on the driver rules.
 	t.Setenv("POSTA_ENV", "dev")
-	for _, k := range []string{"POSTA_DB_DRIVER", "POSTA_DB_SQLITE_PATH", "POSTA_DB_URL"} {
+	for _, k := range []string{"POSTA_DB_DRIVER", "POSTA_DB_SQLITE_PATH", "POSTA_DB_URL", "POSTA_DB_FAILOVER_DSN"} {
 		t.Setenv(k, "")
 		_ = os.Unsetenv(k)
 	}
+}
+
+// TestDBFailoverGating (SF-106): the startup-failover gate — postgres only,
+// at least two endpoints, entries non-empty; empty (the default) keeps the
+// single-DSN wiring unchanged.
+func TestDBFailoverGating(t *testing.T) {
+	t.Run("off by default", func(t *testing.T) {
+		clearDBDriverEnv(t)
+		cfg := New()
+		if len(cfg.Database.FailoverDSNs) != 0 {
+			t.Fatalf("failover DSNs = %v, want empty by default", cfg.Database.FailoverDSNs)
+		}
+		if err := cfg.validate(); err != nil {
+			t.Fatalf("the default config must validate: %v", err)
+		}
+	})
+
+	t.Run("configured with postgres validates", func(t *testing.T) {
+		clearDBDriverEnv(t)
+		t.Setenv("POSTA_DB_FAILOVER_DSN", "host=primary.internal dbname=porta, host=standby.internal dbname=porta")
+		cfg := New()
+		if len(cfg.Database.FailoverDSNs) != 2 {
+			t.Fatalf("failover DSNs = %v, want 2 entries", cfg.Database.FailoverDSNs)
+		}
+		if err := cfg.validate(); err != nil {
+			t.Fatalf("a two-entry failover list on postgres must validate: %v", err)
+		}
+	})
+
+	t.Run("single entry is refused", func(t *testing.T) {
+		clearDBDriverEnv(t)
+		t.Setenv("POSTA_DB_FAILOVER_DSN", "host=primary.internal dbname=porta")
+		cfg := New()
+		if err := cfg.validate(); err == nil {
+			t.Fatal("failover with one entry must not validate (failover semantics with one is a lie)")
+		}
+	})
+
+	t.Run("refused on the sqlite dev tier", func(t *testing.T) {
+		clearDBDriverEnv(t)
+		t.Setenv("POSTA_DB_DRIVER", DBDriverSQLite)
+		t.Setenv("POSTA_DB_SQLITE_PATH", "data/posta-dev.db")
+		t.Setenv("POSTA_DB_FAILOVER_DSN", "host=primary.internal dbname=porta, host=standby.internal dbname=porta")
+		cfg := New()
+		if err := cfg.validate(); err == nil {
+			t.Fatal("failover on the dev tier must not validate")
+		}
+	})
+
+	// Note: the empty-entry case is unreachable through the env — splitList
+	// drops blank fragments (helper.go's documented contract) — so the
+	// per-entry emptiness check in validate() is defense-in-depth and is not
+	// env-assertable; the two real gate rules (postgres-only, ≥2 entries) are
+	// pinned above.
 }
 
 // TestDBDriverDefaultUnchanged — without POSTA_DB_DRIVER the backend is

@@ -42,6 +42,8 @@ Posta is configured via environment variables. All variables are prefixed with `
 > while no process holds it open; the production backup automation
 > (`pg_dump`) is Postgres-only. See the ADR-009 amendment for the boundary.
 
+| `POSTA_DB_FAILOVER_DSN` | — | Ordered store endpoints for the application-side startup failover (SF-106): the primary first, then the standbys, comma-separated. Postgres only; requires at least two entries. When set, the process opens against the first reachable endpoint instead of the single DSN. **Boundary:** this covers the startup selection — the runtime switchover of live connections stays the managed-HA remainder (ADR-009 §5; see `docs/docs/operations/deployment.md` and the HA pattern `docs/docs/operations/redis-ha.md`). With the variable unset the connection wiring is unchanged.
+
 ## Redis
 
 | Variable | Default | Description |

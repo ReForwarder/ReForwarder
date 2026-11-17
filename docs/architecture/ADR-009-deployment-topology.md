@@ -94,3 +94,21 @@ round-trip over the migrated fleet, the config gating, and the unchanged
 Postgres default. The alternative backends remain rejected; a further
 widening (a third backend, or promoting the dev tier) re-opens this amendment
 by decision, not by config.
+
+## Amendment (2026-11-18, SF-106): the application-side startup failover selector
+
+§5's posture stands — the RUNTIME switchover of live store connections is a
+deployment concern served by managed HA (the runbook:
+`docs/docs/operations/deployment.md`, the HA pattern
+`docs/docs/operations/redis-ha.md`). What this amendment adds is the
+application-side preparation that is testable in a single-node environment:
+a health-driven primary/replica DSN selector (`internal/storage/failover.go`)
+behind `POSTA_DB_FAILOVER_DSN` (ordered endpoints, primary first; Postgres
+only; at least two entries; off by default — unset keeps the wiring
+byte-identical). At startup the process opens against the FIRST REACHABLE
+endpoint instead of the single DSN; a failed primary fails over to the next
+reachable standby, and a recovered primary is re-promoted on the next pick.
+The runtime switchover of live connections is deliberately NOT application
+code: a hot-swapped `*gorm.DB` under running transactions would be exactly
+the double-delivery surface the exactly-once claim substrate (R-26) guards
+against — that remainder belongs to managed HA, per §5.
